@@ -1,0 +1,16 @@
+# Normalize line endings for all text files, checked out as LF.
+* text=auto eol=lf
+
+# Windows-only scripts are checked out with CRLF so native tools behave.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Treat these as binary (no line-ending conversion, no diff noise).
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
