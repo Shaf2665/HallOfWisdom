@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // See packages/agent-adapter-sdk/tsconfig.json for why typecheck
+    // resolves workspace dependencies against source, not dist.
+    "paths": {
+      "@hall-of-wisdom/agent-adapter-sdk": ["../../packages/agent-adapter-sdk/src/index.ts"],
+      "@hall-of-wisdom/protocol": ["../../packages/protocol/src/index.ts"]
+    }
+  },
+  "include": ["src", "vitest.config.ts"],
+  "exclude": ["dist", "node_modules"]
+}

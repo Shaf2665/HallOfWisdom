@@ -1,6 +1,8 @@
 # 0001 — Initial Architecture
 
-Status: Draft (Phase 2.1). This document will be revised as later phases add real packages.
+Status: Draft (Phase 3). This document will be revised as later phases add real packages. See
+[`0002-agent-adapter-boundary.md`](0002-agent-adapter-boundary.md) for the Phase 3 adapter/SDK
+boundary decisions.
 
 ## Vision
 
@@ -37,16 +39,18 @@ hall-of-wisdom/
     server/                 Fastify-based Hall Core backend (Phase 5+)
   packages/
     protocol/               Hall protocol: agent identity, tasks, runs, normalized events (Phase 2)
+    agent-adapter-sdk/      Shared contract all coding-agent adapters implement (Phase 3)
     database/                Prisma schema and data access (Phase 9)
-    agent-adapter-sdk/      Shared contract all coding-agent adapters implement (Phase 3+)
     source-control/         Provider-neutral Git/GitHub/Azure Repos interfaces (Phase 10, 18, 19)
     work-management/        Provider-neutral work-item interfaces (Boards, etc.)
+  adapters/
+    mock-agent/              Deterministic, no-network adapter used to prove the pipeline (Phase 3)
+    claude-code/              Claude Code detection + execution adapter (Phase 12, 14)
+    codex/                     Codex detection + execution adapter (Phase 13, 15)
   runners/
-    hall-runner/            Local process: detects/starts/cancels agents, streams events (Phase 4+)
-      adapters/
-        mock-agent/          Deterministic, no-network adapter used to prove the pipeline (Phase 3)
-        claude-code/          Claude Code detection + execution adapter (Phase 12, 14)
-        codex/                 Codex detection + execution adapter (Phase 13, 15)
+    hall-runner/            Local process: detects/starts/cancels agents, streams events (Phase 4+).
+                             Depends on adapters through @hall-of-wisdom/agent-adapter-sdk only —
+                             no adapter-specific code lives here (see 0002-agent-adapter-boundary.md).
   integrations/
     github/                  GitHub App-based source-control integration (Phase 18)
     azure-devops/            Azure DevOps integration (Phase 19)
@@ -59,13 +63,16 @@ hall-of-wisdom/
   pnpm-workspace.yaml
 ```
 
-## Current state (end of Phase 2.1)
+## Current state (end of Phase 3)
 
 ```
 hall-of-wisdom/
   packages/
-    protocol/                 @hall-of-wisdom/protocol - shared communication contract (see below)
-  docs/architecture/0001-initial-architecture.md
+    protocol/                 @hall-of-wisdom/protocol - shared communication contract
+    agent-adapter-sdk/        @hall-of-wisdom/agent-adapter-sdk - adapter contract (see 0002)
+  adapters/
+    mock-agent/                @hall-of-wisdom/mock-agent - deterministic, network-free adapter
+  docs/architecture/0001-initial-architecture.md, 0002-agent-adapter-boundary.md
   AGENTS.md
   CLAUDE.md
   README.md
@@ -73,10 +80,8 @@ hall-of-wisdom/
   .prettierrc.json, .editorconfig, .gitattributes, .gitignore
 ```
 
-The temporary `src/example/` module from Phase 1 has been removed now that a real package exists.
-No `apps/`, `runners/`, or `integrations/` directories exist yet, and `packages/` contains only
-`protocol` — the remaining packages listed in "Planned module structure" above are created only
-when the phase that needs them arrives.
+No `apps/`, `runners/`, or `integrations/` directories exist yet — the remaining packages listed
+in "Planned module structure" above are created only when the phase that needs them arrives.
 
 ## The Hall protocol (`@hall-of-wisdom/protocol`, Phase 2)
 
@@ -157,15 +162,21 @@ deduplicate events.
 `run.completed`, `run.failed`, and `run.cancelled` are **terminal events** — once one of them has
 been emitted for a run, no further events should follow for that run. The protocol package defines
 their shapes only; it does not enforce "exactly one terminal event per run" or "no events after
-termination". That lifecycle rule is the responsibility of the agent adapter SDK (Phase 3+, which
-produces the events) and Hall Core (Phase 5+, which consumes and persists them).
+termination" itself. As of Phase 3, that lifecycle rule _is_ enforced — by `TerminalEventGuard` in
+`@hall-of-wisdom/agent-adapter-sdk`, which every adapter (Mock Agent now, others later) is required
+to use rather than reimplement. See `0002-agent-adapter-boundary.md` for the full design.
 
 ## Open questions for later phases
 
-- Exact shape of the agent adapter contract that produces these normalized events (Phase 3 minimal
-  version, expanded later).
 - How task/branch/worktree naming (`agent/<agent>/<task-id>`) is enforced and validated.
 - Where permission decisions (`allowed` / `requires-approval` / `denied`) are evaluated — Hall
   Core vs. Hall Runner.
 - Where event ordering, deduplication (by `sequence`), and persistence are implemented — likely
   Hall Core (Phase 5+), once a server exists to own that state.
+- Where `AgentTaskInput.workingDirectory` path validation happens (Hall Runner, Phase 4+) — see
+  `0002-agent-adapter-boundary.md`.
+- The secret-redaction layer for adapter-captured output (failure details, detection diagnostics)
+  remains unbuilt — see `0002-agent-adapter-boundary.md`.
+- Whether/how a run's event stream needs to support multiple independent consumers (Hall Core and,
+  say, a debugging tool both watching the same run) — the current `AsyncIterable`-based design
+  assumes a single consumer drives execution; see `0002-agent-adapter-boundary.md`.

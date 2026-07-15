@@ -36,6 +36,35 @@ importers:
         specifier: ^3.0.4
         version: 3.2.7(@types/node@24.13.3)
 
+  adapters/mock-agent:
+    dependencies:
+      '@hall-of-wisdom/agent-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/agent-adapter-sdk
+      '@hall-of-wisdom/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+
+  packages/agent-adapter-sdk:
+    dependencies:
+      '@hall-of-wisdom/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+
   packages/protocol:
     dependencies:
       zod:

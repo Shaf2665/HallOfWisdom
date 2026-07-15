@@ -1,0 +1,36 @@
+{
+  "name": "@hall-of-wisdom/agent-adapter-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Provider-neutral contract every Hall of Wisdom coding-agent adapter must implement: descriptors, detection, task input, event sequencing, and terminal-event guarantees.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=24.11.0 <25"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "verify:package-entry": "node verify-package-entry.mjs"
+  },
+  "dependencies": {
+    "@hall-of-wisdom/protocol": "workspace:*",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0"
+  }
+}

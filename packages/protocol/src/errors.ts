@@ -30,7 +30,20 @@ export class ProtocolValidationError extends Error {
   }
 }
 
-export function parseWithSchema<T>(schema: z.ZodType<T>, input: unknown, subject: string): T {
+/**
+ * Generic over the schema itself (`S extends z.ZodTypeAny`), returning
+ * `z.output<S>`, rather than pinning a single `T` via `z.ZodType<T>`. This
+ * matters for schemas using `.default()`: their input and output types
+ * differ (a field can be omitted on input but is always present on
+ * output), and `z.ZodType<T>`'s input parameter defaults to `T` too,
+ * which such a schema does not structurally satisfy. Inferring from the
+ * schema and projecting only its output type sidesteps that mismatch.
+ */
+export function parseWithSchema<S extends z.ZodTypeAny>(
+  schema: S,
+  input: unknown,
+  subject: string,
+): z.output<S> {
   const result = schema.safeParse(input);
   if (!result.success) {
     const issues = result.error.issues.map((issue) => ({
@@ -39,7 +52,9 @@ export function parseWithSchema<T>(schema: z.ZodType<T>, input: unknown, subject
     }));
     throw new ProtocolValidationError(subject, issues);
   }
-  return result.data;
+  // `S` being a bare type parameter loses precision through `.safeParse`;
+  // this assertion restates what `z.output<S>` already guarantees.
+  return result.data as z.output<S>;
 }
 
 /**

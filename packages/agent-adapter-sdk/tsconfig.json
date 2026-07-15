@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    // Typecheck resolves workspace dependencies directly against their
+    // TypeScript source, not their built dist output, so `pnpm typecheck`
+    // works on a clean checkout before `pnpm build` has ever run. The
+    // build config (tsconfig.build.json) intentionally does NOT set this,
+    // so `pnpm build` still resolves dependencies the same way the
+    // published package would at runtime (via node_modules -> dist).
+    "paths": {
+      "@hall-of-wisdom/protocol": ["../protocol/src/index.ts"]
+    }
+  },
+  "include": ["src", "vitest.config.ts"],
+  "exclude": ["dist", "node_modules"]
+}
