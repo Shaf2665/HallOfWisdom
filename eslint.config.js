@@ -7,7 +7,12 @@ import globals from "globals";
 
 export default defineConfig(
   {
-    ignores: ["dist/**", "coverage/**", "node_modules/**"],
+    // verify-package-entry.mjs deliberately imports the package's own name
+    // to prove the built output resolves; that self-reference only works
+    // once `dist` exists, so the file is kept outside every tsconfig's
+    // "include" (see its header comment) and, consequently, outside
+    // type-aware linting too.
+    ignores: ["**/dist/**", "**/coverage/**", "**/node_modules/**", "**/verify-package-entry.mjs"],
   },
   js.configs.recommended,
   ...tseslint.configs.strictTypeChecked,
@@ -15,9 +20,7 @@ export default defineConfig(
   {
     languageOptions: {
       parserOptions: {
-        projectService: {
-          allowDefaultProject: ["*.js", "*.ts"],
-        },
+        projectService: true,
         tsconfigRootDir: import.meta.dirname,
       },
       globals: {
@@ -33,5 +36,7 @@ export default defineConfig(
       ],
     },
   },
+  // eslint-config-prettier ships no type declarations; its export is an untyped rule-disabling config object.
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-argument
   eslintConfigPrettier,
 );

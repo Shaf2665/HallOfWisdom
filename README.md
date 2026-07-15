@@ -13,9 +13,11 @@ rules coding agents working in this repository must follow.
 
 ## Status
 
-**Phase 1 — Project Foundation.** Only the workspace tooling exists so far: strict TypeScript,
-ESLint, Prettier, and Vitest. No application code (web app, server, runner, adapters) has been
-built yet.
+**Phase 2.1 — Protocol Cancellation and Packaging Hardening.** The workspace tooling from Phase 1
+(strict TypeScript, ESLint, Prettier, Vitest) is joined by the first real package,
+`@hall-of-wisdom/protocol`: the provider-neutral message contract shared by Hall Core, Hall
+Runner, the web app, and every coding-agent adapter. No application code (web app, server, runner,
+adapters) has been built yet.
 
 ## Requirements
 
@@ -33,6 +35,7 @@ pnpm typecheck
 pnpm lint
 pnpm format
 pnpm test
+pnpm build
 ```
 
 Bash (Linux / macOS):
@@ -43,19 +46,37 @@ pnpm typecheck
 pnpm lint
 pnpm format
 pnpm test
+pnpm build
 ```
+
+`typecheck`, `test`, and `build` run recursively across every workspace package (currently just
+`packages/protocol`); `lint` and `format` run once across the whole repository.
+
+To verify the _built_ protocol package resolves and behaves correctly through its public entry
+point (as an external consumer would use it, not via `src`), after `pnpm build`:
+
+```powershell
+pnpm --filter @hall-of-wisdom/protocol run verify:package-entry
+```
+
+## Packages
+
+| Package                                         | Purpose                                                                                                                                           |
+| ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@hall-of-wisdom/protocol`](packages/protocol) | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation. |
 
 ## Repository Layout (current)
 
 ```
 hall-of-wisdom/
-  src/example/        sample module demonstrating the toolchain (temporary, Phase 1 only)
+  packages/
+    protocol/          @hall-of-wisdom/protocol - shared communication contract
   docs/architecture/   architecture decision records
   AGENTS.md            rules for coding agents working in this repo
-  CLAUDE.md            rules for Claude Code specifically
+  CLAUDE.md             rules for Claude Code specifically
   README.md            this file
 ```
 
-Future phases will add `apps/` (web, server), `packages/` (protocol, database,
-agent-adapter-sdk, source-control, work-management), and `runners/` (hall-runner and its
-adapters) as each becomes necessary. See the architecture document for the full planned layout.
+Future phases will add `apps/` (web, server), more `packages/` (database, agent-adapter-sdk,
+source-control, work-management), and `runners/` (hall-runner and its adapters) as each becomes
+necessary. See the architecture document for the full planned layout.

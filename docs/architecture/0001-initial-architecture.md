@@ -1,6 +1,6 @@
 # 0001 — Initial Architecture
 
-Status: Draft (Phase 1). This document will be revised as later phases add real packages.
+Status: Draft (Phase 2.1). This document will be revised as later phases add real packages.
 
 ## Vision
 
@@ -59,23 +59,71 @@ hall-of-wisdom/
   pnpm-workspace.yaml
 ```
 
-## Current state (end of Phase 1)
-
-Only the workspace root exists:
+## Current state (end of Phase 2.1)
 
 ```
 hall-of-wisdom/
-  src/example/               Sample module + test proving the toolchain works (temporary)
+  packages/
+    protocol/                 @hall-of-wisdom/protocol - shared communication contract (see below)
   docs/architecture/0001-initial-architecture.md
   AGENTS.md
   CLAUDE.md
   README.md
-  package.json, pnpm-workspace.yaml, tsconfig*.json, eslint.config.js,
-  .prettierrc.json, vitest.config.ts, .editorconfig, .gitattributes, .gitignore
+  package.json, pnpm-workspace.yaml, tsconfig.base.json, tsconfig.json, eslint.config.js,
+  .prettierrc.json, .editorconfig, .gitattributes, .gitignore
 ```
 
-No `apps/`, `packages/`, `runners/`, or `integrations/` directories exist yet — they will be
-created starting with `packages/protocol` in Phase 2.
+The temporary `src/example/` module from Phase 1 has been removed now that a real package exists.
+No `apps/`, `runners/`, or `integrations/` directories exist yet, and `packages/` contains only
+`protocol` — the remaining packages listed in "Planned module structure" above are created only
+when the phase that needs them arrives.
+
+## The Hall protocol (`@hall-of-wisdom/protocol`, Phase 2)
+
+`packages/protocol` defines the wire contract every other part of the system (Hall Core, Hall
+Runner, the web app, and all coding-agent adapters) uses to talk about agents, tasks, runs, and
+events. It is deliberately the first package built, and deliberately has zero dependencies on any
+other Hall package, any specific agent, or any specific provider:
+
+- **Why a normalized protocol at all.** Without one, every consumer of agent output (the web UI,
+  the task board, the CEO Agent) would need to understand every adapter's native format. A single
+  shared contract means Hall Core is written once against one vocabulary, and adding a tenth coding
+  agent later requires only a new adapter, not changes throughout the rest of the system.
+- **Why adapters must not leak provider-specific events.** If a Claude-specific or Codex-specific
+  event type ever reached Hall Core directly, Hall Core would have to special-case it, and the
+  "provider-neutral core" constraint above would already be broken on day one. Each adapter is
+  responsible for translating its agent's native output into the nine `NormalizedAgentEvent`
+  variants defined here before anything leaves the adapter boundary.
+- **Why ISO 8601 timestamp strings, not `Date` objects.** A `Date` is a JavaScript-runtime concept:
+  it does not serialize predictably through `JSON.stringify`/`JSON.parse`, has no meaning in a
+  browser-vs-Node vs. future-non-JS-adapter context, and silently reinterprets time zones. A fixed
+  ISO 8601 string is unambiguous across every process boundary the protocol crosses.
+- **Why every event carries a required, non-negative `sequence` number.** Events travel from an
+  adapter subprocess through Hall Runner to Hall Core and out over a (future) WebSocket connection
+  to the browser. Network connections drop and reconnect; wall-clock timestamps can collide or
+  arrive out of order. A monotonically increasing sequence number, scoped per run, is what lets a
+  consumer detect gaps, discard duplicates after a reconnect, and reconstruct the correct event
+  order — none of which a timestamp alone can guarantee.
+- **Why runtime validation, not just TypeScript types.** Types are erased at compile time and
+  provide no protection against malformed data crossing an actual process or network boundary (a
+  buggy adapter, a corrupted message, a future hostile client). Every protocol object is backed by
+  a [Zod](https://zod.dev) schema that is the single source of truth; TypeScript types are inferred
+  from the schema (`z.infer`) rather than hand-maintained, so the type and the validator cannot
+  drift apart. Object schemas are `.strict()` so unexpected fields are rejected rather than
+  silently accepted at the trust boundary, which also closes off prototype-pollution-style attacks
+  via unexpected keys (see the package's `security.test.ts`).
+- **What runtime validation does _not_ do: secret redaction.** `structuredFailureSchema`'s
+  `details` field is bounded in shape and size (flat primitives, capped key count, capped string
+  length) so it cannot be used to smuggle unbounded or deeply nested data. It has no way to know
+  whether one of those bounded strings happens to contain a token, password, or raw environment
+  variable value — that is a question of _meaning_, not shape, and no schema can answer it. Secret
+  redaction is a separate responsibility: real adapters and Hall Runner must run captured process
+  output through a dedicated redaction layer _before_ constructing a `StructuredFailure` or any
+  other protocol object. That redaction layer does not exist yet and is not part of this package.
+
+The package has no Node-specific or browser-specific dependencies (only `zod`, which runs
+identically in both) so it can be imported from Hall Core (Node), the web app (browser), and Hall
+Runner (Node) without modification.
 
 ## Technology decisions (Phase 1)
 
@@ -92,17 +140,32 @@ created starting with `packages/protocol` in Phase 2.
 Not yet introduced (by design, per the phase plan): Next.js, Fastify, Prisma, WebSockets, Tauri,
 Docker, Redis, PostgreSQL, Rust.
 
-## Normalized agent events (planned, Phase 2+)
+## Normalized agent events (implemented, Phase 2, extended Phase 2.1)
 
-All coding-agent adapters will emit a shared, agent-agnostic event vocabulary so Hall Core never
-needs to know about Claude- or Codex-specific formats:
+All coding-agent adapters emit a shared, agent-agnostic event vocabulary so Hall Core never needs
+to know about Claude- or Codex-specific formats. Defined in `@hall-of-wisdom/protocol`:
 
 `run.started`, `message.delta`, `tool.started`, `tool.completed`, `file.changed`,
-`approval.required`, `run.completed`, `run.failed`.
+`approval.required`, `run.completed`, `run.failed`, `run.cancelled`.
+
+Every event shares an envelope (`protocolVersion`, `eventId`, `runId`, `taskId`, `agentId`,
+`timestamp`, `sequence`, `type`) plus an event-specific `payload`. Ordering, deduplication, and
+persistence of these events is a Hall Core concern for a later phase — the protocol package only
+guarantees that `sequence` is present and non-negative; it does not itself buffer, reorder, or
+deduplicate events.
+
+`run.completed`, `run.failed`, and `run.cancelled` are **terminal events** — once one of them has
+been emitted for a run, no further events should follow for that run. The protocol package defines
+their shapes only; it does not enforce "exactly one terminal event per run" or "no events after
+termination". That lifecycle rule is the responsibility of the agent adapter SDK (Phase 3+, which
+produces the events) and Hall Core (Phase 5+, which consumes and persists them).
 
 ## Open questions for later phases
 
-- Exact shape of the agent adapter contract (Phase 3 minimal version, expanded later).
+- Exact shape of the agent adapter contract that produces these normalized events (Phase 3 minimal
+  version, expanded later).
 - How task/branch/worktree naming (`agent/<agent>/<task-id>`) is enforced and validated.
 - Where permission decisions (`allowed` / `requires-approval` / `denied`) are evaluated — Hall
   Core vs. Hall Runner.
+- Where event ordering, deduplication (by `sequence`), and persistence are implemented — likely
+  Hall Core (Phase 5+), once a server exists to own that state.

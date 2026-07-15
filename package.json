@@ -10,12 +10,13 @@
   },
   "packageManager": "pnpm@10.33.0",
   "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "typecheck": "pnpm -r run typecheck",
+    "build": "pnpm -r run build",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
-    "test": "vitest run"
+    "test": "pnpm -r run test"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
