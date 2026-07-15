@@ -134,8 +134,9 @@ correct and monotonic at the source.
 
 `AgentTaskInput.workingDirectory` is an unvalidated, bounded string in this SDK. Neither the SDK
 nor the Mock Agent checks that it exists, is absolute, or is safe from path traversal. That
-validation belongs to Hall Runner (Phase 4+), performed once, before any adapter is invoked — not
-duplicated (or forgotten) inside every adapter's own code.
+validation is now implemented in Hall Runner (Phase 4), performed once before any adapter is
+invoked — not duplicated (or forgotten) inside every adapter's own code. See
+[`0003-hall-runner-boundary.md`](0003-hall-runner-boundary.md) for the implementation.
 
 ## Where credential handling and redaction will occur later
 

@@ -1,8 +1,9 @@
 # 0001 — Initial Architecture
 
-Status: Draft (Phase 3). This document will be revised as later phases add real packages. See
+Status: Draft (Phase 4). This document will be revised as later phases add real packages. See
 [`0002-agent-adapter-boundary.md`](0002-agent-adapter-boundary.md) for the Phase 3 adapter/SDK
-boundary decisions.
+boundary decisions and [`0003-hall-runner-boundary.md`](0003-hall-runner-boundary.md) for the
+Phase 4 Hall Runner boundary decisions.
 
 ## Vision
 
@@ -48,9 +49,11 @@ hall-of-wisdom/
     claude-code/              Claude Code detection + execution adapter (Phase 12, 14)
     codex/                     Codex detection + execution adapter (Phase 13, 15)
   runners/
-    hall-runner/            Local process: detects/starts/cancels agents, streams events (Phase 4+).
+    hall-runner/            Local process: registers adapters, validates workspace/working
+                             directory, runs one task, streams JSON Lines events (Phase 4).
                              Depends on adapters through @hall-of-wisdom/agent-adapter-sdk only —
-                             no adapter-specific code lives here (see 0002-agent-adapter-boundary.md).
+                             no adapter-specific code lives here (see 0002-agent-adapter-boundary.md
+                             and 0003-hall-runner-boundary.md).
   integrations/
     github/                  GitHub App-based source-control integration (Phase 18)
     azure-devops/            Azure DevOps integration (Phase 19)
@@ -63,7 +66,7 @@ hall-of-wisdom/
   pnpm-workspace.yaml
 ```
 
-## Current state (end of Phase 3)
+## Current state (end of Phase 4)
 
 ```
 hall-of-wisdom/
@@ -72,7 +75,10 @@ hall-of-wisdom/
     agent-adapter-sdk/        @hall-of-wisdom/agent-adapter-sdk - adapter contract (see 0002)
   adapters/
     mock-agent/                @hall-of-wisdom/mock-agent - deterministic, network-free adapter
-  docs/architecture/0001-initial-architecture.md, 0002-agent-adapter-boundary.md
+  runners/
+    hall-runner/               @hall-of-wisdom/hall-runner - local task runner (see 0003)
+  docs/architecture/0001-initial-architecture.md, 0002-agent-adapter-boundary.md,
+                     0003-hall-runner-boundary.md
   AGENTS.md
   CLAUDE.md
   README.md
@@ -80,8 +86,8 @@ hall-of-wisdom/
   .prettierrc.json, .editorconfig, .gitattributes, .gitignore
 ```
 
-No `apps/`, `runners/`, or `integrations/` directories exist yet — the remaining packages listed
-in "Planned module structure" above are created only when the phase that needs them arrives.
+No `apps/` or `integrations/` directories exist yet — the remaining packages listed in "Planned
+module structure" above are created only when the phase that needs them arrives.
 
 ## The Hall protocol (`@hall-of-wisdom/protocol`, Phase 2)
 
@@ -173,8 +179,8 @@ to use rather than reimplement. See `0002-agent-adapter-boundary.md` for the ful
   Core vs. Hall Runner.
 - Where event ordering, deduplication (by `sequence`), and persistence are implemented — likely
   Hall Core (Phase 5+), once a server exists to own that state.
-- Where `AgentTaskInput.workingDirectory` path validation happens (Hall Runner, Phase 4+) — see
-  `0002-agent-adapter-boundary.md`.
+- `AgentTaskInput.workingDirectory` path validation is now implemented in Hall Runner (Phase 4) —
+  see `0003-hall-runner-boundary.md`.
 - The secret-redaction layer for adapter-captured output (failure details, detection diagnostics)
   remains unbuilt — see `0002-agent-adapter-boundary.md`.
 - Whether/how a run's event stream needs to support multiple independent consumers (Hall Core and,

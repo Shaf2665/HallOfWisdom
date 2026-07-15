@@ -71,6 +71,25 @@ importers:
         specifier: ^3.24.1
         version: 3.25.76
 
+  runners/hall-runner:
+    dependencies:
+      '@hall-of-wisdom/agent-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/agent-adapter-sdk
+      '@hall-of-wisdom/mock-agent':
+        specifier: workspace:*
+        version: link:../../adapters/mock-agent
+      '@hall-of-wisdom/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+
 packages:
 
   '@esbuild/aix-ppc64@0.28.1':
