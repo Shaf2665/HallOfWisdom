@@ -3,22 +3,40 @@ import path from "node:path";
 import type { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import { validateWorkspace } from "@hall-of-wisdom/hall-runner";
 import { RunnerError, runTask } from "@hall-of-wisdom/hall-runner";
-import { parseAgentTaskInput } from "@hall-of-wisdom/agent-adapter-sdk";
+import { parseAgentTaskInput, type AgentAdapter } from "@hall-of-wisdom/agent-adapter-sdk";
 import { parseHallTask, type HallTask, type NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
 import {
   AdapterNotFoundError,
+  AdapterUnavailableError,
+  ActiveTaskTransitionDeniedError,
+  InternalServerError,
+  InvalidManualTransitionError,
+  InvalidRequestError,
   TaskStateConflictError,
   WorkspaceValidationFailedError,
 } from "../errors/app-error.js";
-import { isTerminalTaskStatus } from "./task-status-transitions.js";
+import {
+  isExecutionControlledStatus,
+  isManualTransitionAllowed,
+  isTerminalTaskStatus,
+} from "./task-status-transitions.js";
 import type { TaskRecord } from "./task-record.js";
 import type { TaskStore } from "./task-store.js";
 import type { EventStore } from "../events/event-store.js";
 import type { EventBus } from "../events/event-bus.js";
 import { EventStoreError } from "../events/event-store-errors.js";
 import { buildInfrastructureFailureEvent } from "../events/synthetic-events.js";
-import { createTaskRequestSchema, type CreateTaskRequest } from "../schemas/create-task-request.js";
-import { InvalidRequestError } from "../errors/app-error.js";
+import {
+  assignTaskRequestSchema,
+  createTaskRequestSchema,
+  type CreateTaskRequest,
+  type DeferredCreateTaskRequest,
+  type ImmediateCreateTaskRequest,
+} from "../schemas/create-task-request.js";
+import {
+  transitionTaskRequestSchema,
+  type TransitionTaskRequest,
+} from "../schemas/transition-task-request.js";
 
 function formatUnknownError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -36,6 +54,12 @@ export interface TaskOrchestratorOptions {
 }
 
 export interface CreateTaskResult {
+  readonly task: HallTask;
+  /** Absent for a deferred (planning-only) task — nothing has started yet. */
+  readonly runId?: string;
+}
+
+export interface StartTaskResult {
   readonly task: HallTask;
   readonly runId: string;
 }
@@ -59,6 +83,18 @@ export class TaskOrchestrator {
   readonly #activeControllers = new Map<string, AbortController>();
   readonly #activeExecutions = new Map<string, Promise<void>>();
 
+  /**
+   * The canonical, absolute working directory validated for a task that
+   * has been assigned (or created deferred with one) but not yet started.
+   * Deliberately never part of `TaskRecord` — that type is serialized
+   * directly as an HTTP response body, and an absolute filesystem path
+   * must never reach the browser (see `docs/architecture/0006-kanban-board.md`,
+   * "Assignment and Start separation"). Cleared once `startTask()` reads
+   * it (the value then lives only inside the `AgentTaskInput` already
+   * handed to Hall Runner).
+   */
+  readonly #pendingWorkingDirectories = new Map<string, string>();
+
   constructor(options: TaskOrchestratorOptions) {
     this.#taskStore = options.taskStore;
     this.#eventStore = options.eventStore;
@@ -69,7 +105,195 @@ export class TaskOrchestrator {
   }
 
   createTask(rawRequest: unknown): CreateTaskResult {
-    const parsedRequest = this.#parseRequest(rawRequest);
+    const parsedRequest = this.#parseCreateRequest(rawRequest);
+    return parsedRequest.executionMode === "deferred"
+      ? this.#createDeferredTask(parsedRequest)
+      : this.#createImmediateTask(parsedRequest);
+  }
+
+  /**
+   * Assigns (or reassigns, before start) an adapter to a planning task.
+   * Async only because of the `adapter.detect()` availability check — no
+   * run is created, no status other than `ready -> assigned` (on first
+   * assignment) is touched, and reassignment of an already-`assigned`,
+   * not-yet-started task leaves status untouched.
+   *
+   * The eligibility check below (before `adapter.detect()`) is only a
+   * fast-fail: it lets an obviously-ineligible request skip the
+   * potentially-slow `detect()` call entirely, and preserves this
+   * method's existing 409-on-a-backlog-task behavior without waiting on
+   * I/O. It is NOT what makes this method race-safe — `assignTask()` reads
+   * a snapshot, then `await`s, and Node can run arbitrary other code
+   * (another request's handler) during that `await`. The snapshot taken
+   * here could be stale by the time `detect()` resolves.
+   *
+   * `TaskStore.assignIfEligible()` is what actually closes that race: it
+   * re-validates the exact same four-field snapshot (`status`, `runId`,
+   * `adapterId`, `agentId`) against the task's CURRENT live state and
+   * applies the assignment in one synchronous call with no `await` in
+   * between — see its own doc comment for the full policy. If the task's
+   * lifecycle moved on while this request was awaiting `adapter.detect()`
+   * (blocked, cancelled, started, or already committed by a racing
+   * assignment), this throws `TaskStateConflictError` (409) instead of
+   * silently overwriting whatever the task's current state actually is.
+   */
+  async assignTask(taskId: string, rawRequest: unknown): Promise<TaskRecord> {
+    const parsed = this.#parseAssignRequest(rawRequest);
+    const preCheck = this.#taskStore.get(taskId);
+
+    const isFirstAssignment = preCheck.task.status === "ready";
+    const isReassignment = preCheck.task.status === "assigned" && preCheck.runId === undefined;
+    if (!isFirstAssignment && !isReassignment) {
+      throw new TaskStateConflictError(taskId, preCheck.task.status, "assigned");
+    }
+
+    const adapter = this.#resolveAdapter(parsed.adapterId);
+    const detection = await adapter.detect();
+    if (detection.availability !== "available") {
+      throw new AdapterUnavailableError(parsed.adapterId, detection.availability);
+    }
+
+    const canonicalWorkingDirectory =
+      parsed.workingDirectory !== undefined
+        ? this.#resolveWorkingDirectory(parsed.workingDirectory)
+        : (this.#pendingWorkingDirectories.get(taskId) ?? this.#resolveWorkingDirectory(undefined));
+
+    // Atomic commit — see TaskStore.assignIfEligible()'s doc comment. No
+    // `await` occurs between this call and the fast-fail check above other
+    // than the already-completed `adapter.detect()`.
+    const record = this.#taskStore.assignIfEligible(
+      taskId,
+      {
+        status: preCheck.task.status,
+        runId: preCheck.runId,
+        adapterId: preCheck.adapterId,
+        agentId: preCheck.agentId,
+      },
+      { adapterId: parsed.adapterId, agentId: adapter.descriptor.supportedAgent.agentId },
+    );
+
+    // Only cache the resolved working directory once the assignment this
+    // request made has actually been committed — a losing request must
+    // never overwrite the winner's working directory.
+    this.#pendingWorkingDirectories.set(taskId, canonicalWorkingDirectory);
+
+    return record;
+  }
+
+  /**
+   * Starts execution for a task already assigned via `assignTask()`.
+   * Claims `runId` synchronously (no `await` between reading the task's
+   * current state and calling `TaskStore.setRunId()`) so two concurrent
+   * `POST .../start` calls for the same task can never both begin a run —
+   * see `TaskStore.setRunId()`'s own doc comment for why this ordering is
+   * what actually closes the race, not any lock or queue.
+   */
+  async startTask(taskId: string): Promise<StartTaskResult> {
+    const record = this.#taskStore.get(taskId);
+    if (record.task.status !== "assigned") {
+      throw new TaskStateConflictError(taskId, record.task.status, "started");
+    }
+    if (record.runId !== undefined) {
+      throw new TaskStateConflictError(taskId, record.task.status, "started");
+    }
+    if (record.adapterId === undefined) {
+      throw new InternalServerError(`Task "${taskId}" is assigned but has no adapterId recorded.`);
+    }
+
+    const adapter = this.#resolveAdapter(record.adapterId);
+    const runId = randomUUID();
+    // Atomic claim — see the doc comment above and on `TaskStore.setRunId()`.
+    this.#taskStore.setRunId(taskId, runId);
+
+    const detection = await adapter.detect();
+    if (detection.availability !== "available") {
+      this.#taskStore.clearRunId(taskId);
+      throw new AdapterUnavailableError(record.adapterId, detection.availability);
+    }
+
+    const workingDirectory =
+      this.#pendingWorkingDirectories.get(taskId) ?? this.#resolveWorkingDirectory(undefined);
+    this.#pendingWorkingDirectories.delete(taskId);
+
+    const taskInput = parseAgentTaskInput({
+      hallTask: record.task,
+      agentIdentity: adapter.descriptor.supportedAgent,
+      runId,
+      workingDirectory,
+    });
+
+    this.#beginExecution(taskId, adapter.descriptor.adapterId, taskInput);
+
+    return { task: this.#taskStore.get(taskId).task, runId };
+  }
+
+  /**
+   * A manual planning-state transition (`POST .../transition`). Never
+   * touches `EventStore`/`EventBus` and never emits a synthetic
+   * `run.cancelled` — cancelling a planning task that has no run is
+   * purely a `TaskStore` status change, not an execution outcome.
+   */
+  transitionTask(taskId: string, rawRequest: unknown): TaskRecord {
+    const parsed = this.#parseTransitionRequest(rawRequest);
+    const record = this.#taskStore.get(taskId);
+    const currentStatus = record.task.status;
+
+    const activelyExecuting =
+      isExecutionControlledStatus(currentStatus) ||
+      (currentStatus === "assigned" && record.runId !== undefined);
+    if (activelyExecuting) {
+      throw new ActiveTaskTransitionDeniedError(taskId, currentStatus);
+    }
+    if (isTerminalTaskStatus(currentStatus)) {
+      throw new TaskStateConflictError(taskId, currentStatus, "moved");
+    }
+    if (!isManualTransitionAllowed(currentStatus, parsed.targetStatus)) {
+      throw new InvalidManualTransitionError(taskId, currentStatus, parsed.targetStatus);
+    }
+
+    this.#taskStore.updateStatus(taskId, parsed.targetStatus);
+    // Un-assigning: a task leaving `assigned` for a planning column no
+    // longer has a meaningful adapter/agent selection.
+    if (
+      currentStatus === "assigned" &&
+      (parsed.targetStatus === "ready" || parsed.targetStatus === "blocked")
+    ) {
+      this.#taskStore.clearAssignment(taskId);
+      this.#pendingWorkingDirectories.delete(taskId);
+    }
+
+    return this.#taskStore.get(taskId);
+  }
+
+  requestCancellation(taskId: string): { alreadyRequested: boolean } {
+    const record = this.#taskStore.get(taskId);
+    if (isTerminalTaskStatus(record.task.status)) {
+      throw new TaskStateConflictError(taskId, record.task.status, "cancelled");
+    }
+    if (record.cancellationRequested) {
+      return { alreadyRequested: true };
+    }
+    this.#taskStore.setCancellationRequested(taskId);
+    this.#activeControllers.get(taskId)?.abort("cancellation requested via REST API");
+    return { alreadyRequested: false };
+  }
+
+  /** Aborts every active run and waits (bounded by `timeoutMs`) for them to reach a terminal state. */
+  async shutdown(timeoutMs: number): Promise<void> {
+    for (const controller of this.#activeControllers.values()) {
+      controller.abort("server shutting down");
+    }
+    const pending = Array.from(this.#activeExecutions.values());
+    if (pending.length === 0) return;
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, timeoutMs);
+      }),
+    ]);
+  }
+
+  #createImmediateTask(parsedRequest: ImmediateCreateTaskRequest): CreateTaskResult {
     const adapter = this.#resolveAdapter(parsedRequest.adapterId);
     const resolvedWorkingDirectory = this.#resolveWorkingDirectory(parsedRequest.workingDirectory);
 
@@ -113,17 +337,78 @@ export class TaskOrchestrator {
       workingDirectory: resolvedWorkingDirectory,
     });
 
+    this.#beginExecution(taskId, adapter.descriptor.adapterId, taskInput);
+
+    return { task: hallTask, runId };
+  }
+
+  /**
+   * Creates a planning-only task: `status: "backlog"`, no adapter, no
+   * run, no execution started. `workingDirectory`, if supplied, is
+   * validated (relative, within the workspace root) and its canonical
+   * form cached in `#pendingWorkingDirectories` so `assignTask()`/
+   * `startTask()` don't need it re-entered — but is never written into
+   * `TaskRecord` itself.
+   */
+  #createDeferredTask(parsedRequest: DeferredCreateTaskRequest): CreateTaskResult {
+    const taskId = randomUUID();
+    const now = new Date().toISOString();
+
+    const hallTask = parseHallTask({
+      taskId,
+      projectId: parsedRequest.projectId,
+      title: parsedRequest.title,
+      description: parsedRequest.description ?? "",
+      priority: parsedRequest.priority ?? "normal",
+      status: "backlog",
+      dependencyTaskIds: [],
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const record: TaskRecord = {
+      task: hallTask,
+      runId: undefined,
+      adapterId: undefined,
+      agentId: undefined,
+      eventCount: 0,
+      lastSequence: undefined,
+      terminalEventType: undefined,
+      failure: undefined,
+      cancellationRequested: false,
+      createdAt: now,
+      startedAt: undefined,
+      completedAt: undefined,
+    };
+
+    this.#taskStore.add(record);
+
+    if (parsedRequest.workingDirectory !== undefined) {
+      this.#pendingWorkingDirectories.set(
+        taskId,
+        this.#resolveWorkingDirectory(parsedRequest.workingDirectory),
+      );
+    }
+
+    return { task: hallTask };
+  }
+
+  /**
+   * The shared execution-kickoff tail used by both an immediate task's
+   * creation and a deferred task's `startTask()`: tracks an
+   * `AbortController`, starts `#execute()` without awaiting it (the
+   * caller's HTTP handler must return promptly), and cleans up active-run
+   * tracking once the run settles.
+   */
+  #beginExecution(
+    taskId: string,
+    adapterId: string,
+    taskInput: Parameters<typeof runTask>[0]["taskInput"],
+  ): void {
     const controller = new AbortController();
     this.#activeControllers.set(taskId, controller);
 
-    // Deliberately not awaited: the HTTP request that triggered this must
-    // return promptly (202 Accepted), not block until the agent finishes.
-    const execution = this.#execute(
-      taskId,
-      adapter.descriptor.adapterId,
-      taskInput,
-      controller.signal,
-    )
+    const execution = this.#execute(taskId, adapterId, taskInput, controller.signal)
       .catch((error: unknown) => {
         this.#onExecutionError?.(taskId, error);
         this.#failTaskOnUnhandledExecutionError(taskId, error);
@@ -133,39 +418,9 @@ export class TaskOrchestrator {
         this.#activeExecutions.delete(taskId);
       });
     this.#activeExecutions.set(taskId, execution);
-
-    return { task: hallTask, runId };
   }
 
-  requestCancellation(taskId: string): { alreadyRequested: boolean } {
-    const record = this.#taskStore.get(taskId);
-    if (isTerminalTaskStatus(record.task.status)) {
-      throw new TaskStateConflictError(taskId, record.task.status, "cancelled");
-    }
-    if (record.cancellationRequested) {
-      return { alreadyRequested: true };
-    }
-    this.#taskStore.setCancellationRequested(taskId);
-    this.#activeControllers.get(taskId)?.abort("cancellation requested via REST API");
-    return { alreadyRequested: false };
-  }
-
-  /** Aborts every active run and waits (bounded by `timeoutMs`) for them to reach a terminal state. */
-  async shutdown(timeoutMs: number): Promise<void> {
-    for (const controller of this.#activeControllers.values()) {
-      controller.abort("server shutting down");
-    }
-    const pending = Array.from(this.#activeExecutions.values());
-    if (pending.length === 0) return;
-    await Promise.race([
-      Promise.allSettled(pending),
-      new Promise<void>((resolve) => {
-        setTimeout(resolve, timeoutMs);
-      }),
-    ]);
-  }
-
-  #parseRequest(rawRequest: unknown): CreateTaskRequest {
+  #parseCreateRequest(rawRequest: unknown): CreateTaskRequest {
     const result = createTaskRequestSchema.safeParse(rawRequest);
     if (!result.success) {
       const issues = result.error.issues.map((issue) => ({
@@ -177,7 +432,31 @@ export class TaskOrchestrator {
     return result.data;
   }
 
-  #resolveAdapter(adapterId: string): ReturnType<AgentRegistry["resolve"]> {
+  #parseAssignRequest(rawRequest: unknown): ReturnType<typeof assignTaskRequestSchema.parse> {
+    const result = assignTaskRequestSchema.safeParse(rawRequest);
+    if (!result.success) {
+      const issues = result.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      }));
+      throw new InvalidRequestError("Invalid assign-task request.", issues);
+    }
+    return result.data;
+  }
+
+  #parseTransitionRequest(rawRequest: unknown): TransitionTaskRequest {
+    const result = transitionTaskRequestSchema.safeParse(rawRequest);
+    if (!result.success) {
+      const issues = result.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      }));
+      throw new InvalidRequestError("Invalid transition-task request.", issues);
+    }
+    return result.data;
+  }
+
+  #resolveAdapter(adapterId: string): AgentAdapter {
     try {
       return this.#registry.resolve(adapterId);
     } catch {
@@ -230,6 +509,14 @@ export class TaskOrchestrator {
 
   #handleEvent(taskId: string, event: NormalizedAgentEvent): void {
     const record = this.#taskStore.get(taskId);
+    if (record.runId === undefined || record.agentId === undefined) {
+      // Defense in depth: `#handleEvent` is only ever wired up from
+      // `#execute`, which only ever runs after `runId`/`agentId` are set
+      // (immediate creation, or `startTask()`) — this should be
+      // unreachable, and is not a client-facing condition.
+      console.error(`Received an event for task "${taskId}" with no run recorded; ignoring.`);
+      return;
+    }
 
     let appendResult;
     try {
@@ -359,6 +646,13 @@ export class TaskOrchestrator {
     clientSafeMessage: string,
     serverLogDetail: string,
   ): void {
+    if (record.runId === undefined || record.agentId === undefined) {
+      console.error(
+        `Hall Core cannot record an infrastructure failure for task "${taskId}": it has no run recorded.`,
+      );
+      return;
+    }
+
     // Stop accepting normal events for this task and signal the adapter to
     // stop, before this task's terminal outcome is recorded — an adapter
     // that keeps running after this point cannot replace this result (any

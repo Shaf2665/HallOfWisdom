@@ -1,4 +1,9 @@
 import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
+import type {
+  AgentAdapter,
+  AgentDetectionResult,
+  AvailabilityStatus,
+} from "@hall-of-wisdom/agent-adapter-sdk";
 import { MockAgentAdapter, type MockAgentConfigInput } from "@hall-of-wisdom/mock-agent";
 import { createHallCoreApp, type CreateHallCoreAppOptions } from "./app.js";
 import { TaskStore } from "./tasks/task-store.js";
@@ -20,9 +25,9 @@ export interface TaskRecordJson {
     readonly createdAt: string;
     readonly updatedAt: string;
   };
-  readonly runId: string;
-  readonly adapterId: string;
-  readonly agentId: string;
+  readonly runId?: string;
+  readonly adapterId?: string;
+  readonly agentId?: string;
   readonly eventCount: number;
   readonly lastSequence?: number;
   readonly terminalEventType?: string;
@@ -110,6 +115,111 @@ export function validCreateTaskBody(
     adapterId: "hall.mock-agent",
     ...overrides,
   };
+}
+
+export function validDeferredTaskBody(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    executionMode: "deferred",
+    projectId: "project-1",
+    title: "Planning task",
+    ...overrides,
+  };
+}
+
+/**
+ * Controls a `GatedAdapter`'s `detect()` calls from a test: every call to
+ * `detect()` parks (does not resolve) until `release()` is called. This is
+ * what lets a concurrency test deterministically force two requests to
+ * overlap inside `TaskOrchestrator.assignTask()`'s `await adapter.detect()`
+ * window — the exact window the Phase 7.1 assignment race lived in —
+ * instead of relying on incidental Promise-microtask ordering (which Mock
+ * Agent's real, near-instant `detect()` does not reliably control).
+ */
+export interface GatedAdapterController {
+  /** Resolves once at least `count` `detect()` calls are currently parked (called, not yet released). */
+  waitForParked(count: number, timeoutMs?: number): Promise<void>;
+  /** Resolves every currently-parked `detect()` call (and any future ones) with `availability`. */
+  release(availability?: AvailabilityStatus): void;
+  readonly parkedCount: number;
+}
+
+/**
+ * A minimal `AgentAdapter` whose `detect()` is test-controlled via the
+ * returned `GatedAdapterController`, and whose `startTask()` always
+ * rejects — this adapter exists purely to gate the assignment race window
+ * and must never actually be started.
+ */
+export function createGatedAdapter(adapterId = "hall.gated-agent"): {
+  adapter: AgentAdapter;
+  controller: GatedAdapterController;
+} {
+  let parked = 0;
+  let releasers: ((result: AgentDetectionResult) => void)[] = [];
+
+  const controller: GatedAdapterController = {
+    get parkedCount() {
+      return parked;
+    },
+    async waitForParked(count, timeoutMs = 2000) {
+      const start = Date.now();
+      while (parked < count) {
+        if (Date.now() - start > timeoutMs) {
+          throw new Error(
+            `GatedAdapterController.waitForParked: only ${String(parked)}/${String(count)} calls parked within ${String(timeoutMs)}ms`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+    },
+    release(availability = "available") {
+      const toRelease = releasers;
+      releasers = [];
+      parked -= toRelease.length;
+      for (const resolve of toRelease) {
+        resolve({ installed: true, availability });
+      }
+    },
+  };
+
+  const adapter: AgentAdapter = {
+    descriptor: {
+      adapterId,
+      displayName: "Gated Test Agent",
+      adapterVersion: "0.0.0",
+      integrationLevel: "native",
+      supportedOperatingSystems: ["windows", "macos", "linux"],
+      supportedAgent: {
+        agentId: "gated-agent",
+        displayName: "Gated Test Agent",
+        adapterId,
+        adapterVersion: "0.0.0",
+      },
+      capabilities: {
+        streaming: true,
+        cancellation: true,
+        sessionResume: false,
+        toolEvents: true,
+        fileEditing: false,
+        shellExecution: false,
+        subagents: false,
+        mcp: false,
+        acp: false,
+      },
+    },
+    detect(): Promise<AgentDetectionResult> {
+      parked += 1;
+      return new Promise((resolve) => {
+        releasers.push(resolve);
+      });
+    },
+    startTask(): Promise<never> {
+      return Promise.reject(new Error("GatedAdapter.startTask must never be called"));
+    },
+  };
+
+  return { adapter, controller };
 }
 
 /** Polls `check` until it returns true or `timeoutMs` elapses, without a fixed arbitrary sleep for the whole wait. */

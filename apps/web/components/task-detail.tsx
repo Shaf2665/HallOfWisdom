@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { ApiClientError, cancelTask } from "../lib/api-client";
+import { ApiClientError, cancelTask, transitionTask } from "../lib/api-client";
 import type { TaskRecord } from "../lib/api-schemas";
 import { useTaskEvents } from "../hooks/use-task-events";
 import { StatusBadge } from "./task-list-item";
@@ -30,19 +30,34 @@ export function TaskDetail({
   // `cancelState` included — whenever the selected task changes.
   const [cancelState, setCancelState] = useState<CancelState>("idle");
 
-  const { connectionState, events, reconnectAttempt } = useTaskEvents(task.taskId, wsBaseUrl, {
-    onTerminalEvent: () => {
-      onTaskTerminal(task.taskId);
+  // A planning task (no run yet) has nothing to stream — never opens a
+  // WebSocket connection until it has actually started (`runId` set).
+  const { connectionState, events, reconnectAttempt } = useTaskEvents(
+    record.runId !== undefined ? task.taskId : null,
+    wsBaseUrl,
+    {
+      onTerminalEvent: () => {
+        onTaskTerminal(task.taskId);
+      },
     },
-  });
+  );
 
   const isTerminal = TERMINAL_STATUSES.has(task.status);
 
   async function handleConfirmCancel(): Promise<void> {
     setCancelState("pending");
     try {
-      await cancelTask(baseUrl, task.taskId);
-      setCancelState("requested");
+      if (record.runId === undefined) {
+        // No active run to cancel — this is a planning-state move, and it
+        // completes synchronously (unlike an active-run cancel, which only
+        // becomes "cancelled" once `run.cancelled` arrives).
+        await transitionTask(baseUrl, task.taskId, "cancelled");
+        setCancelState("requested");
+        onTaskTerminal(task.taskId);
+      } else {
+        await cancelTask(baseUrl, task.taskId);
+        setCancelState("requested");
+      }
     } catch (error) {
       if (error instanceof ApiClientError && error.statusCode === 409) {
         setCancelState("conflict");
@@ -60,7 +75,9 @@ export function TaskDetail({
         </h2>
         <div className="mt-1 flex items-center gap-2">
           <StatusBadge status={task.status} />
-          <span className="text-sm text-stone-500 dark:text-stone-400">{record.agentId}</span>
+          {record.agentId ? (
+            <span className="text-sm text-stone-500 dark:text-stone-400">{record.agentId}</span>
+          ) : null}
         </div>
       </div>
 
@@ -70,11 +87,11 @@ export function TaskDetail({
 
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm sm:grid-cols-3">
         <DetailField label="Task ID" value={task.taskId} />
-        <DetailField label="Run ID" value={record.runId} />
+        {record.runId ? <DetailField label="Run ID" value={record.runId} /> : null}
         <DetailField label="Project" value={task.projectId} />
         <DetailField label="Priority" value={task.priority} />
-        <DetailField label="Adapter" value={record.adapterId} />
-        <DetailField label="Agent" value={record.agentId} />
+        {record.adapterId ? <DetailField label="Adapter" value={record.adapterId} /> : null}
+        {record.agentId ? <DetailField label="Agent" value={record.agentId} /> : null}
         <DetailField label="Created" value={new Date(task.createdAt).toLocaleString()} />
         <DetailField label="Updated" value={new Date(task.updatedAt).toLocaleString()} />
         <DetailField label="Events" value={String(record.eventCount)} />

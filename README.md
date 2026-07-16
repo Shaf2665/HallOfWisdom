@@ -13,15 +13,17 @@ rules coding agents working in this repository must follow.
 
 ## Status
 
-**Phase 6 — Minimal Web Interface.** Six packages now exist: `@hall-of-wisdom/protocol` (the wire
-contract), `@hall-of-wisdom/agent-adapter-sdk` (the adapter contract), `@hall-of-wisdom/mock-agent`
-(the first concrete adapter), `@hall-of-wisdom/hall-runner` (a local CLI that runs one task and
-streams normalized events as JSON Lines), `@hall-of-wisdom/hall-core` (a local Fastify HTTP +
-WebSocket server that creates and runs tasks in memory, calling Hall Runner's public API
-in-process, with an exact-origin CORS/WebSocket-Origin allowlist for the web app below), and
-`@hall-of-wisdom/web` — a Next.js browser dashboard that talks to Hall Core directly from the
-browser (no proxy, no custom server). No authentication, persistence, Kanban board, communication
-features, Git integration, or real coding-agent integration exists yet.
+**Phase 7 — Kanban Board.** Six packages now exist: `@hall-of-wisdom/protocol` (the wire contract),
+`@hall-of-wisdom/agent-adapter-sdk` (the adapter contract), `@hall-of-wisdom/mock-agent` (the first
+concrete adapter), `@hall-of-wisdom/hall-runner` (a local CLI that runs one task and streams
+normalized events as JSON Lines), `@hall-of-wisdom/hall-core` (a local Fastify HTTP + WebSocket
+server that creates and runs tasks in memory, calling Hall Runner's public API in-process, with an
+exact-origin CORS/WebSocket-Origin allowlist for the web app below), and `@hall-of-wisdom/web` — a
+Next.js browser dashboard with two pages: the Task Console (`/`, Phase 6, immediate task execution)
+and the Kanban Board (`/board`, Phase 7, planning tasks — Backlog → Ready → Assigned → In Progress
+→ a terminal outcome — with drag-and-drop and full keyboard-accessible equivalents). No
+authentication, persistence, Communication Boards, Git integration, or real coding-agent
+integration exists yet.
 
 ## Requirements
 
@@ -71,14 +73,14 @@ pnpm --filter @hall-of-wisdom/hall-core run verify:package-entry
 
 ## Packages
 
-| Package                                                           | Purpose                                                                                                                                                                                              |
-| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@hall-of-wisdom/protocol`](packages/protocol)                   | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation.                                                    |
-| [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                 |
-| [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                |
-| [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events. |
-| [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, and binds to `127.0.0.1` only.       |
-| [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: talks to Hall Core directly (no proxy, no custom server) to create tasks, list them, and stream live events; binds to `127.0.0.1` only.                                   |
+| Package                                                           | Purpose                                                                                                                                                                                                             |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@hall-of-wisdom/protocol`](packages/protocol)                   | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation.                                                                   |
+| [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                                |
+| [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                               |
+| [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events.                |
+| [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, and binds to `127.0.0.1` only.                      |
+| [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: the Task Console (`/`) for immediate execution and the Kanban Board (`/board`) for planning tasks — talks to Hall Core directly (no proxy, no custom server); binds to `127.0.0.1` only. |
 
 ## Running Hall Runner
 
@@ -378,6 +380,59 @@ resumes):
    task as unavailable ("This task no longer exists.") rather than retrying indefinitely or showing
    stale data as if it were live.
 
+## Running the Kanban Board
+
+The Kanban Board (`/board`) shares the same Hall Core process and the same two-terminal setup as
+Hall Web above — no extra flags, no extra terminal.
+
+**Terminal 1 — Hall Core:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario success `
+  --web-origin "http://127.0.0.1:3000"
+```
+
+**Terminal 2 — Hall Web:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/web run dev
+```
+
+**Walkthrough** (browser, `http://127.0.0.1:3000/board`):
+
+1. Start Hall Core and Hall Web as above, then open `http://127.0.0.1:3000/board`.
+2. Click **"Kanban Board"** in the top navigation (or go directly to `/board`) — confirm all 10
+   columns render: Backlog, Ready, Assigned, In Progress, Agent Review, Human Approval, Blocked,
+   Completed, Failed, Cancelled.
+3. Click **"+ New backlog task"**, fill in Project and Title, and submit — confirm a new card
+   appears in Backlog.
+4. Drag the card from Backlog to Ready (or use its Actions menu → "Move to Ready").
+5. On the Ready card, open Actions → **"Assign agent"** — in the dialog, select Mock Agent, leave
+   the working directory blank, and click Assign — confirm the card moves to Assigned.
+6. Click **"Start task"** on the Assigned card, confirm the "Start this task…" prompt, click
+   Confirm.
+7. Confirm the card briefly shows "Starting…" (no Start button, no Actions menu) until it reaches
+   In Progress.
+8. Wait for the card to reach Completed.
+9. Create another backlog task, move it to Blocked (drag or Actions menu), then back to Ready.
+10. Create a third backlog task and use its Actions menu → "Cancel task" — confirm it moves to
+    Cancelled without ever creating a run.
+11. Verify keyboard-only operation: `Tab` to a card's "Actions" button, press `Enter` to open the
+    action list, `Tab` to the item you want (these are ordinary buttons, not an ARIA menu — there is
+    no arrow-key navigation), press `Enter` to choose it — confirm the same moves work with no mouse
+    involved, and that focus lands back on a sensible control afterward.
+
+To exercise a failure or a cancellable-while-running scenario, stop Hall Core and restart it with
+`--mock-scenario failure` or `--mock-scenario cancellable --mock-step-delay-ms 1000` (see "Switching
+scenarios requires restarting Hall Core" above), then repeat the assign/start steps.
+
+See [`docs/architecture/0006-kanban-board.md`](docs/architecture/0006-kanban-board.md) for the full
+design: the column/status mapping, why drag can never start execution on its own, the accessible
+non-drag controls, the dnd-kit boundary, and the polling strategy.
+
 ## Full workspace verification
 
 ```powershell
@@ -413,7 +468,7 @@ hall-of-wisdom/
   README.md               this file
 ```
 
-Future phases will add more `packages/` (database, source-control, work-management), a Kanban board
-and communication features on top of `apps/web`, and more `adapters/` (Claude Code, Codex, ...) as
-each becomes necessary. See the architecture documents for the full planned layout and the Phase
-3/4/5/6 boundary decisions.
+Future phases will add more `packages/` (database, source-control, work-management), Communication
+Boards on top of `apps/web`, and more `adapters/` (Claude Code, Codex, ...) as each becomes
+necessary. See the architecture documents for the full planned layout and the Phase 3/4/5/6/7
+boundary decisions.

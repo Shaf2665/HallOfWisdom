@@ -5,6 +5,7 @@ import {
   InvalidTaskTransitionError,
   TaskCapacityReachedError,
   TaskNotFoundError,
+  TaskStateConflictError,
 } from "../errors/app-error.js";
 import { isValidTaskTransition } from "./task-status-transitions.js";
 import type { TaskRecord } from "./task-record.js";
@@ -83,6 +84,104 @@ export class TaskStore {
 
   setCancellationRequested(taskId: string): void {
     this.#mustGetLive(taskId).cancellationRequested = true;
+  }
+
+  /**
+   * Atomically re-validates and commits an assignment against the task's
+   * CURRENT live state — this is what actually closes the check-then-act
+   * race described in `docs/architecture/0006-kanban-board.md` ("Assignment
+   * concurrency policy"): `TaskOrchestrator.assignTask()` reads a snapshot,
+   * `await`s `adapter.detect()`, and only then calls this method with no
+   * further `await` before it runs. JavaScript's single-threaded execution
+   * means nothing else can run between this method's read and write, so
+   * whatever eligibility this method observes is still true at the moment
+   * it writes.
+   *
+   * `expected` is the exact eligibility-relevant snapshot the caller
+   * observed and was authorized to act on (`status`, `runId`, `adapterId`,
+   * `agentId` — the same four fields `assignTask()` read before its
+   * `await`). The commit proceeds only if:
+   *
+   * 1. The task still exists (`#mustGetLive` throws `TaskNotFoundError`
+   *    otherwise).
+   * 2. The live record's `status`/`runId`/`adapterId`/`agentId` still
+   *    exactly match `expected` — i.e. nothing about assignment eligibility
+   *    changed while this caller was awaiting `adapter.detect()`.
+   * 3. The live status is independently still `"ready"` (first assignment)
+   *    or `"assigned"` with no run (pre-start reassignment) — re-derived
+   *    from the live record, not trusted from the caller, so this method
+   *    is self-contained and correct even if a future caller skips
+   *    `assignTask()`'s own fast-fail pre-check.
+   *
+   * Comparing the full four-field snapshot (not just `status`) is
+   * deliberate: it also closes the narrower race between two concurrent
+   * *reassignments* of an already-assigned, not-yet-started task (the
+   * second reassignment's `expected.adapterId`/`agentId` would no longer
+   * match after the first one committed), not only the Ready -> Assigned
+   * race the security review originally found.
+   *
+   * Any mismatch throws `TaskStateConflictError` (409, reused rather than
+   * a new dedicated code — see the ADR) — never last-write-wins.
+   */
+  assignIfEligible(
+    taskId: string,
+    expected: {
+      readonly status: TaskStatus;
+      readonly runId: string | undefined;
+      readonly adapterId: string | undefined;
+      readonly agentId: string | undefined;
+    },
+    assignment: { readonly adapterId: string; readonly agentId: string },
+  ): TaskRecord {
+    const record = this.#mustGetLive(taskId);
+
+    const isFirstAssignment = record.task.status === "ready";
+    const isReassignment = record.task.status === "assigned" && record.runId === undefined;
+    const stillMatchesExpectation =
+      record.task.status === expected.status &&
+      record.runId === expected.runId &&
+      record.adapterId === expected.adapterId &&
+      record.agentId === expected.agentId;
+
+    if ((!isFirstAssignment && !isReassignment) || !stillMatchesExpectation) {
+      throw new TaskStateConflictError(taskId, record.task.status, "assigned");
+    }
+
+    const now = new Date().toISOString();
+    record.adapterId = assignment.adapterId;
+    record.agentId = assignment.agentId;
+    record.task = isFirstAssignment
+      ? { ...record.task, status: "assigned", updatedAt: now }
+      : { ...record.task, updatedAt: now };
+
+    return structuredClone(record);
+  }
+
+  /** Clears a planning task's assignment (used when a manual transition moves an assigned task back to ready/blocked). */
+  clearAssignment(taskId: string): void {
+    const record = this.#mustGetLive(taskId);
+    record.adapterId = undefined;
+    record.agentId = undefined;
+  }
+
+  /**
+   * Atomically claims `runId` for a task about to start execution:
+   * operates on the live record (not a clone) and throws if a run was
+   * already claimed, so two concurrent `POST .../start` calls for the
+   * same task can never both succeed — see `TaskOrchestrator.startTask()`
+   * for why this must run with no `await` between the read and the write.
+   */
+  setRunId(taskId: string, runId: string): void {
+    const record = this.#mustGetLive(taskId);
+    if (record.runId !== undefined) {
+      throw new TaskStateConflictError(taskId, record.task.status, "started");
+    }
+    record.runId = runId;
+  }
+
+  /** Rolls back a `setRunId()` claim when starting execution fails before any event was ever produced. */
+  clearRunId(taskId: string): void {
+    this.#mustGetLive(taskId).runId = undefined;
   }
 
   #mustGetLive(taskId: string): TaskRecord {

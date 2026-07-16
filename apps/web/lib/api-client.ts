@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { TaskStatus } from "@hall-of-wisdom/protocol";
 import {
   adapterSummarySchema,
   cancelTaskResponseSchema,
@@ -49,6 +50,19 @@ export interface CreateTaskRequestBody {
   readonly title: string;
   readonly description?: string;
   readonly priority?: "low" | "normal" | "high" | "critical";
+  readonly adapterId: string;
+  readonly workingDirectory?: string;
+}
+
+export interface CreateDeferredTaskRequestBody {
+  readonly projectId: string;
+  readonly title: string;
+  readonly description?: string;
+  readonly priority?: "low" | "normal" | "high" | "critical";
+  readonly workingDirectory?: string;
+}
+
+export interface AssignTaskRequestBody {
   readonly adapterId: string;
   readonly workingDirectory?: string;
 }
@@ -238,6 +252,64 @@ export function cancelTask(
     `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/cancel`,
     { method: "POST" },
     cancelTaskResponseSchema,
+    options,
+  );
+}
+
+/** Creates a planning-only task in `backlog` — no adapter, no run, no execution started. */
+export function createDeferredTask(
+  baseUrl: string,
+  body: CreateDeferredTaskRequestBody,
+  options: RequestOptions = {},
+): Promise<CreateTaskResponse> {
+  return request(
+    `${baseUrl}/api/v1/tasks`,
+    { method: "POST", body: { ...body, executionMode: "deferred" } },
+    createTaskResponseSchema,
+    options,
+  );
+}
+
+/** A manual planning-state move (never running/reviewing/waiting_for_approval/completed/failed). */
+export function transitionTask(
+  baseUrl: string,
+  taskId: string,
+  targetStatus: TaskStatus,
+  options: RequestOptions = {},
+): Promise<TaskRecord> {
+  return request(
+    `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/transition`,
+    { method: "POST", body: { targetStatus } },
+    taskRecordSchema,
+    options,
+  );
+}
+
+/** Assigns (or, before start, reassigns) an adapter to a `ready` task. Starts nothing. */
+export function assignTask(
+  baseUrl: string,
+  taskId: string,
+  body: AssignTaskRequestBody,
+  options: RequestOptions = {},
+): Promise<TaskRecord> {
+  return request(
+    `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/assign`,
+    { method: "POST", body },
+    taskRecordSchema,
+    options,
+  );
+}
+
+/** Starts execution for a task already assigned via `assignTask()`. */
+export function startTask(
+  baseUrl: string,
+  taskId: string,
+  options: RequestOptions = {},
+): Promise<CreateTaskResponse> {
+  return request(
+    `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/start`,
+    { method: "POST" },
+    createTaskResponseSchema,
     options,
   );
 }

@@ -100,6 +100,49 @@ export class InvalidTaskTransitionError extends HallCoreError {
   }
 }
 
+/**
+ * A client requested a manual planning transition (`POST
+ * /api/v1/tasks/:taskId/transition`) whose target status is not a
+ * permitted manual destination from the task's current status — distinct
+ * from `InvalidTaskTransitionError` above, which guards an internal
+ * invariant and should never be reachable from client input.
+ */
+export class InvalidManualTransitionError extends HallCoreError {
+  readonly code = "INVALID_TASK_TRANSITION";
+  readonly statusCode = 409;
+
+  constructor(taskId: string, from: string, to: string) {
+    super(`Task "${taskId}" cannot be manually moved from "${from}" to "${to}".`);
+  }
+}
+
+/**
+ * A client attempted a manual planning transition on a task that is
+ * currently under execution control (running, reviewing,
+ * waiting_for_approval, or assigned with a run already started) —
+ * planning-endpoint moves are only ever valid before or between runs.
+ */
+export class ActiveTaskTransitionDeniedError extends HallCoreError {
+  readonly code = "ACTIVE_TASK_TRANSITION_DENIED";
+  readonly statusCode = 409;
+
+  constructor(taskId: string, status: string) {
+    super(
+      `Task "${taskId}" is under execution control (status "${status}") and cannot be manually moved.`,
+    );
+  }
+}
+
+/** The adapter chosen for assignment exists but did not report itself available. */
+export class AdapterUnavailableError extends HallCoreError {
+  readonly code = "ADAPTER_UNAVAILABLE";
+  readonly statusCode = 409;
+
+  constructor(adapterId: string, availability: string) {
+    super(`Adapter "${adapterId}" is not available (status "${availability}").`);
+  }
+}
+
 export class InternalServerError extends HallCoreError {
   readonly code = "INTERNAL_ERROR";
   readonly statusCode = 500;

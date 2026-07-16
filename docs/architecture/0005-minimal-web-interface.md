@@ -1,6 +1,7 @@
 # 0005 — Minimal Web Interface
 
-Status: Draft (Phase 6).
+Status: Draft (Phase 6; `TaskRecord`'s optional run fields noted below were extended in Phase 7,
+see `0006-kanban-board.md`).
 
 ## Context
 
@@ -8,7 +9,13 @@ Phase 6 adds `@hall-of-wisdom/web` (`apps/web`): a Next.js 16 App Router dashboa
 visible Hall of Wisdom user interface. It talks directly to Hall Core's REST + WebSocket API
 (`docs/architecture/0004-hall-core-server.md`) from the browser, with no server-side proxy of its
 own. It is a prototype, same as every package before it: no authentication, no persistence beyond
-what Hall Core itself already holds in memory, and no Kanban board or communication features yet.
+what Hall Core itself already holds in memory. Phase 7 (`0006-kanban-board.md`) added a second page,
+the Kanban Board (`/board`), on top of the same API client and schemas this document describes —
+this page (the Task Console, `/`) is unchanged in its own responsibilities below, except that
+`TaskRecord.runId`/`.adapterId`/`.agentId` are now `undefined` for a planning task selected here
+(the Task Console can display any task `GET /api/v1/tasks` returns, including ones with no run
+yet), and `TaskDetail`/`TaskListItem` render those fields conditionally rather than assuming they
+exist.
 
 ## Web application responsibilities
 

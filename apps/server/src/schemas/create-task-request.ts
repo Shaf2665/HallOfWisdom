@@ -17,19 +17,84 @@ import {
  * `docs/architecture/0004-hall-core-server.md` ("Why API requests cannot
  * choose arbitrary workspace roots").
  */
-export const createTaskRequestSchema = z
+const workingDirectorySchema = z
+  .string()
+  .min(1, "must not be blank")
+  .max(4096, "must not exceed 4096 characters");
+
+const sharedTaskFields = {
+  projectId: nonEmptyIdSchema,
+  title: boundedNonBlankString(200),
+  description: z.string().max(20000).optional(),
+  priority: taskPrioritySchema.optional(),
+} as const;
+
+/**
+ * Preserves Phase 6 behavior exactly: `adapterId` required, task starts
+ * asynchronously, response is `202 Accepted`. `executionMode` is optional
+ * here (defaulting to `"immediate"`) only so a request that never
+ * mentions it at all — every existing client and test — keeps working
+ * unchanged; see the `z.preprocess` below for how an entirely-absent
+ * `executionMode` is defaulted before this union ever runs.
+ */
+const immediateCreateTaskRequestSchema = z
   .object({
-    projectId: nonEmptyIdSchema,
-    title: boundedNonBlankString(200),
-    description: z.string().max(20000).optional(),
-    priority: taskPrioritySchema.optional(),
+    ...sharedTaskFields,
+    executionMode: z.literal("immediate"),
     adapterId: nonEmptyIdSchema,
-    workingDirectory: z
-      .string()
-      .min(1, "must not be blank")
-      .max(4096, "must not exceed 4096 characters")
-      .optional(),
+    workingDirectory: workingDirectorySchema.optional(),
   })
   .strict();
 
+/**
+ * A planning-only task: no adapter, no run, no execution. `adapterId` is
+ * deliberately absent from this schema's shape (not merely optional) —
+ * `.strict()` rejects it outright if a client sends one, since an adapter
+ * on a task that isn't executing yet is meaningless and could otherwise
+ * look like a promise this endpoint doesn't keep. Mock Agent scenario
+ * selection has no place in either branch of this schema: it is, and
+ * remains, server-startup-only configuration (see
+ * `docs/architecture/0004-hall-core-server.md`, "Mock scenario
+ * documentation").
+ */
+const deferredCreateTaskRequestSchema = z
+  .object({
+    ...sharedTaskFields,
+    executionMode: z.literal("deferred"),
+    workingDirectory: workingDirectorySchema.optional(),
+  })
+  .strict();
+
+/**
+ * `executionMode` is defaulted to `"immediate"` up front, before the
+ * discriminated union runs, so a request that omits it entirely (every
+ * existing Phase 6 caller) is treated identically to one that sends
+ * `"immediate"` explicitly — and still gets the clear, branch-specific
+ * validation errors `z.discriminatedUnion` produces (e.g. "adapterId
+ * required") rather than the harder-to-read combined-branch errors a
+ * plain `z.union` of two independent object schemas would produce.
+ */
+export const createTaskRequestSchema = z.preprocess(
+  (raw) => {
+    if (raw !== null && typeof raw === "object" && !("executionMode" in raw)) {
+      return { ...raw, executionMode: "immediate" };
+    }
+    return raw;
+  },
+  z.discriminatedUnion("executionMode", [
+    immediateCreateTaskRequestSchema,
+    deferredCreateTaskRequestSchema,
+  ]),
+);
+
+export type ImmediateCreateTaskRequest = z.infer<typeof immediateCreateTaskRequestSchema>;
+export type DeferredCreateTaskRequest = z.infer<typeof deferredCreateTaskRequestSchema>;
 export type CreateTaskRequest = z.infer<typeof createTaskRequestSchema>;
+
+export const assignTaskRequestSchema = z
+  .object({
+    adapterId: nonEmptyIdSchema,
+    workingDirectory: workingDirectorySchema.optional(),
+  })
+  .strict();
+export type AssignTaskRequest = z.infer<typeof assignTaskRequestSchema>;

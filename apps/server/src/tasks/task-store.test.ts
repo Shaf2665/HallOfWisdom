@@ -6,6 +6,7 @@ import {
   InvalidTaskTransitionError,
   TaskCapacityReachedError,
   TaskNotFoundError,
+  TaskStateConflictError,
 } from "../errors/app-error.js";
 import type { TaskRecord } from "./task-record.js";
 
@@ -172,5 +173,139 @@ describe("TaskStore", () => {
     expect(store.get("task-1").cancellationRequested).toBe(false);
     store.setCancellationRequested("task-1");
     expect(store.get("task-1").cancellationRequested).toBe(true);
+  });
+
+  describe("assignIfEligible", () => {
+    function makeReadyRecord(taskId: string): TaskRecord {
+      return makeRecord(taskId, {
+        task: makeTask(taskId, { status: "ready" }),
+        runId: undefined,
+        adapterId: undefined,
+        agentId: undefined,
+      });
+    }
+
+    it("commits a first assignment from ready, moving status to assigned", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeReadyRecord("task-1"));
+      const result = store.assignIfEligible(
+        "task-1",
+        { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
+        { adapterId: "hall.mock-agent", agentId: "mock-agent" },
+      );
+      expect(result.task.status).toBe("assigned");
+      expect(result.adapterId).toBe("hall.mock-agent");
+      expect(result.agentId).toBe("mock-agent");
+      expect(store.get("task-1").task.status).toBe("assigned");
+    });
+
+    it("commits a reassignment while already assigned with no run, leaving status unchanged", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(
+        makeRecord("task-1", {
+          task: makeTask("task-1", { status: "assigned" }),
+          runId: undefined,
+          adapterId: "hall.old-agent",
+          agentId: "old-agent",
+        }),
+      );
+      const result = store.assignIfEligible(
+        "task-1",
+        { status: "assigned", runId: undefined, adapterId: "hall.old-agent", agentId: "old-agent" },
+        { adapterId: "hall.new-agent", agentId: "new-agent" },
+      );
+      expect(result.task.status).toBe("assigned");
+      expect(result.adapterId).toBe("hall.new-agent");
+      expect(result.agentId).toBe("new-agent");
+    });
+
+    it("rejects when the live status no longer matches the expected snapshot (e.g. moved to blocked)", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeReadyRecord("task-1"));
+      store.updateStatus("task-1", "blocked");
+      expect(() => {
+        store.assignIfEligible(
+          "task-1",
+          { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
+          { adapterId: "hall.mock-agent", agentId: "mock-agent" },
+        );
+      }).toThrow(TaskStateConflictError);
+      // The rejected commit must not have mutated anything.
+      expect(store.get("task-1").task.status).toBe("blocked");
+      expect(store.get("task-1").adapterId).toBeUndefined();
+    });
+
+    it("rejects when a run has already been claimed since the snapshot was taken", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(
+        makeRecord("task-1", {
+          task: makeTask("task-1", { status: "assigned" }),
+          runId: undefined,
+          adapterId: "hall.old-agent",
+          agentId: "old-agent",
+        }),
+      );
+      store.setRunId("task-1", "run-1");
+      expect(() => {
+        store.assignIfEligible(
+          "task-1",
+          {
+            status: "assigned",
+            runId: undefined,
+            adapterId: "hall.old-agent",
+            agentId: "old-agent",
+          },
+          { adapterId: "hall.new-agent", agentId: "new-agent" },
+        );
+      }).toThrow(TaskStateConflictError);
+    });
+
+    it("rejects a stale snapshot even when the live status string still matches (a different assignment already committed)", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeReadyRecord("task-1"));
+      // First commit: ready -> assigned via hall.first-agent.
+      store.assignIfEligible(
+        "task-1",
+        { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
+        { adapterId: "hall.first-agent", agentId: "first-agent" },
+      );
+      // A second caller's snapshot (also taken while the task was still
+      // "ready") is now stale: the live status is "assigned", not "ready".
+      expect(() => {
+        store.assignIfEligible(
+          "task-1",
+          { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
+          { adapterId: "hall.second-agent", agentId: "second-agent" },
+        );
+      }).toThrow(TaskStateConflictError);
+      expect(store.get("task-1").adapterId).toBe("hall.first-agent");
+    });
+
+    it("rejects assignment on an unknown task", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      expect(() => {
+        store.assignIfEligible(
+          "nonexistent",
+          { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
+          { adapterId: "hall.mock-agent", agentId: "mock-agent" },
+        );
+      }).toThrow(TaskNotFoundError);
+    });
+
+    it("is self-contained: rejects a blocked task even if a caller wrongly claims it observed ready", () => {
+      // Defense in depth for the case documented on assignIfEligible's own
+      // doc comment: the live-state re-derivation (isFirstAssignment /
+      // isReassignment) does not simply trust `expected` — it independently
+      // re-checks the live record's actual status.
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "blocked" }) }));
+      expect(() => {
+        store.assignIfEligible(
+          "task-1",
+          { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
+          { adapterId: "hall.mock-agent", agentId: "mock-agent" },
+        );
+      }).toThrow(TaskStateConflictError);
+    });
   });
 });

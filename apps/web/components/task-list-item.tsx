@@ -67,8 +67,12 @@ export function TaskListItem({
           <span>{task.projectId}</span>
           <span aria-hidden="true">·</span>
           <span className="capitalize">{task.priority}</span>
-          <span aria-hidden="true">·</span>
-          <span>{record.agentId}</span>
+          {record.agentId ? (
+            <>
+              <span aria-hidden="true">·</span>
+              <span>{record.agentId}</span>
+            </>
+          ) : null}
           <span aria-hidden="true">·</span>
           <span>{new Date(task.createdAt).toLocaleString()}</span>
           {record.eventCount > 0 ? (

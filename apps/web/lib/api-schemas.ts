@@ -26,12 +26,18 @@ export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
 const terminalEventTypeSchema = z.enum(["run.completed", "run.failed", "run.cancelled"]);
 
+/**
+ * `runId`/`adapterId`/`agentId` are absent (never an empty string) for a
+ * planning task that has not been assigned (backlog/ready) or started
+ * (assigned, before `POST .../start`) — see
+ * `docs/architecture/0006-kanban-board.md`, "Task snapshot compatibility".
+ */
 export const taskRecordSchema = z
   .object({
     task: hallTaskSchema,
-    runId: z.string(),
-    adapterId: z.string(),
-    agentId: z.string(),
+    runId: z.string().optional(),
+    adapterId: z.string().optional(),
+    agentId: z.string().optional(),
     eventCount: z.number(),
     lastSequence: z.number().optional(),
     terminalEventType: terminalEventTypeSchema.optional(),
@@ -44,10 +50,19 @@ export const taskRecordSchema = z
   .strict();
 export type TaskRecord = z.infer<typeof taskRecordSchema>;
 
+/**
+ * The envelope `POST /api/v1/tasks` (both execution modes) and
+ * `POST /api/v1/tasks/:taskId/start` return: a full `TaskRecord` plus,
+ * only when a run actually exists, `eventsPath`. A deferred-mode create
+ * response has no `eventsPath` — absent, never an empty string.
+ */
 export const createTaskResponseSchema = taskRecordSchema.extend({
-  eventsPath: z.string(),
+  eventsPath: z.string().optional(),
 });
 export type CreateTaskResponse = z.infer<typeof createTaskResponseSchema>;
+
+export const executionModeSchema = z.enum(["immediate", "deferred"]);
+export type ExecutionMode = z.infer<typeof executionModeSchema>;
 
 export const listTasksResponseSchema = z.object({ tasks: z.array(taskRecordSchema) }).strict();
 

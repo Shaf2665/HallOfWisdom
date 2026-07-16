@@ -1,6 +1,6 @@
 # 0004 — Hall Core Server
 
-Status: Draft (Phase 5, hardened in Phase 5.1).
+Status: Draft (Phase 5, hardened in Phase 5.1; extended in Phase 6 and Phase 7).
 
 ## Context
 
@@ -119,22 +119,40 @@ whatever this endpoint actually returns rather than assuming `hall.mock-agent` i
 Agent or any concrete adapter type, resolving adapters purely through the injected `AgentRegistry`'s
 `AgentAdapter` interface. `createTask()` validates the request (reusing the protocol package's own
 `nonEmptyIdSchema`/`boundedNonBlankString`/`taskPrioritySchema` rather than duplicating `HallTask`'s
-validation rules), resolves and validates the working directory, stores the task, and starts
-execution **without awaiting it** — the HTTP handler returns `202 Accepted` as soon as `createTask()`
-returns, while the run continues in the background. Each active run gets its own `AbortController`,
-tracked so `requestCancellation()` and `shutdown()` can abort it, and cleaned up in a `finally` block
-once the run settles.
+validation rules) and branches on `executionMode`:
+
+- **Immediate** (default, Phase 5/6 behavior unchanged): resolves and validates the working
+  directory, stores the task, and starts execution **without awaiting it** — the HTTP handler
+  returns `202 Accepted` as soon as `createTask()` returns, while the run continues in the
+  background.
+- **Deferred** (Phase 7): stores a planning-only task (`status: "backlog"`, no adapter, no run) and
+  returns `201 Created`. No execution starts. See `docs/architecture/0006-kanban-board.md`,
+  "Deferred versus immediate task creation".
+
+Each active run gets its own `AbortController`, tracked so `requestCancellation()` and `shutdown()`
+can abort it, and cleaned up in a `finally` block once the run settles — the same tracking now
+also covers a deferred task's run once `assignTask()`/`startTask()` (Phase 7) eventually begin one.
 
 ## Controlled status transitions
 
-A task is created directly in `assigned` status (an adapter is already selected at creation time).
-From there, status changes only in response to the adapter's own normalized events —
-`run.started` → `running`, `run.completed` → `completed`, `run.failed` → `failed`,
-`run.cancelled` → `cancelled` — never because a cancellation was merely _requested_.
-`tasks/task-status-transitions.ts` encodes the full allowed-transition graph explicitly (including
-the direct `assigned -> cancelled` edge for the immediate-abort case, where a cancellation lands
-before `run.started` is ever emitted) and rejects anything else, including any attempt to leave a
-terminal status (`completed`/`failed`/`cancelled`) — there is no "restart" operation in this phase.
+A task created immediately starts directly in `assigned` status (an adapter is already selected at
+creation time); a task created deferred starts in `backlog` and only ever reaches `assigned` through
+`POST /assign`. From `assigned`, status changes to `running` only in response to a real
+`run.started` event, never because `POST /start` was merely called — `/start` claims a run and
+begins execution, but the client-visible status stays `assigned` until the adapter's own event
+arrives (see `docs/architecture/0006-kanban-board.md`, "The assigned-but-launching window"). From
+`running`, `run.completed` → `completed`, `run.failed` → `failed`, `run.cancelled` → `cancelled` —
+never because a cancellation was merely _requested_.
+
+Phase 7 adds the planning-state edges `backlog <-> ready/blocked`, `ready <-> blocked`, and
+`assigned -> ready/blocked` (manual, via `POST /transition`), plus `ready -> assigned` (via
+`POST /assign`) — see `tasks/task-status-transitions.ts`'s two tables: `ALLOWED_TRANSITIONS` (the
+full graph `TaskStore.updateStatus()` enforces, including transitions only ever reachable from
+specific internal call sites) and the strictly smaller `MANUAL_TRANSITIONS` (what a client may
+request directly through `POST /transition` — never `running`, `reviewing`,
+`waiting_for_approval`, `completed`, or `failed` as a destination from anywhere). Both reject any
+attempt to leave a terminal status (`completed`/`failed`/`cancelled`) — there is no "restart"
+operation in this phase.
 
 ## In-memory storage limitations
 
@@ -299,6 +317,41 @@ is idempotent). The task's status does **not** flip to `cancelled` at request ti
 when the adapter's own `run.cancelled` event actually arrives, the same event-driven rule every
 other status transition follows.
 
+## Planning task endpoints (Phase 7)
+
+Three endpoints exist only for planning tasks; none of them ever emits an event or touches
+`EventStore`/`EventBus` — see `docs/architecture/0006-kanban-board.md` for the full design and
+rationale, summarized here as a contract reference:
+
+| Endpoint                         | Purpose                                                             | Success | Key failure codes                                                                                                                                                                    |
+| -------------------------------- | ------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `POST /tasks/:taskId/transition` | Manual planning-column move (never to an execution/terminal status) | `200`   | `TASK_NOT_FOUND` (404), `TASK_STATE_CONFLICT` (409, terminal), `ACTIVE_TASK_TRANSITION_DENIED` (409, executing), `INVALID_TASK_TRANSITION` (409, not a permitted manual destination) |
+| `POST /tasks/:taskId/assign`     | Assign (or, before start, reassign) an adapter to a `ready` task    | `200`   | `TASK_NOT_FOUND`, `ADAPTER_NOT_FOUND` (404), `ADAPTER_UNAVAILABLE` (409), `TASK_STATE_CONFLICT` (409), `WORKSPACE_VALIDATION_FAILED` (400)                                           |
+| `POST /tasks/:taskId/start`      | Begin execution for an already-assigned task                        | `202`   | `TASK_NOT_FOUND`, `TASK_STATE_CONFLICT` (409, not assigned / already started / terminal), `ADAPTER_NOT_FOUND`, `ADAPTER_UNAVAILABLE`                                                 |
+
+`INVALID_TASK_TRANSITION` (409) is distinct from the pre-existing `InvalidTaskTransitionError`
+(`INTERNAL_ERROR`, 500): the latter guards `TaskStore.updateStatus()`'s own invariant and should be
+unreachable from any correctly-gated caller; the former is what a client actually sees when it
+requests a manual transition `MANUAL_TRANSITIONS` doesn't permit — a real, expected 409, not a bug
+signal.
+
+`/start`'s duplicate-start guard is a true atomic compare-and-set, not a best-effort check:
+`TaskStore.setRunId()` operates on the live record and throws if a run was already claimed, and
+`TaskOrchestrator.startTask()` performs every synchronous step (status check, existing-run check,
+adapter resolution, claiming the run) with **no `await` in between** — only the availability
+re-check (`adapter.detect()`) is asynchronous, and it runs strictly after the claim. Under Node's
+single-threaded execution model this closes the race completely: two concurrent `POST /start`
+requests for the same task can never both begin a run.
+
+`/assign` (Phase 7.1) uses the identical pattern: `TaskOrchestrator.assignTask()` reads a snapshot,
+`await`s `adapter.detect()`, then commits through one synchronous `TaskStore.assignIfEligible()` call
+with no further `await` — re-validating the exact snapshot it read against the task's live state
+before writing. Two concurrent `POST /assign` requests for the same task, or an assignment racing a
+manual transition or cancellation, can never both succeed or leave mixed state; exactly one commits
+and every other caller receives `409 TASK_STATE_CONFLICT`. See
+`docs/architecture/0006-kanban-board.md`, "Assignment concurrency policy (Phase 7.1)", for the full
+design and the races it closes.
+
 ## Graceful shutdown
 
 `process/signal-shutdown.ts` listens for both `SIGINT` and `SIGTERM` (deliberately a small,
@@ -362,14 +415,17 @@ authentication now would be complexity with no corresponding threat this phase a
 would couple this phase to schema and migration concerns unrelated to proving the task/event model
 itself works. Phase 9 (per `0001-initial-architecture.md`'s phase plan) is where persistence enters.
 
-## The web interface (Phase 6)
+## The web interface (Phases 6 and 7)
 
 Phase 6 built `apps/web`, the first browser client of the REST/WebSocket API this document
-describes. See `docs/architecture/0005-minimal-web-interface.md` for the web application's own
+describes. See `docs/architecture/0005-minimal-web-interface.md` for the Task Console's own
 architecture (Next.js App Router boundary, why no custom server/API routes, URL configuration,
-close-code handling on the client side, accessibility). This document (`0004`) remains the source
-of truth for Hall Core's own contract — the CORS and WebSocket-Origin sections above are the parts
-of that contract Phase 6 specifically required Hall Core to grow.
+close-code handling on the client side, accessibility) and
+`docs/architecture/0006-kanban-board.md` for the Kanban Board Phase 7 added on top of it (planning
+tasks, the assign/start separation, drag-and-drop with accessible non-drag equivalents, polling).
+This document (`0004`) remains the source of truth for Hall Core's own contract — the CORS,
+WebSocket-Origin, and "Planning task endpoints" sections above are the parts of that contract the
+web application specifically required Hall Core to grow.
 
 ## Permanent subagent and plugin usage rules
 

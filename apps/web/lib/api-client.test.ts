@@ -1,12 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ApiClientError,
+  assignTask,
   cancelTask,
+  createDeferredTask,
   createTask,
   getHealth,
   getTask,
   listAdapters,
   listTasks,
+  startTask,
+  transitionTask,
 } from "./api-client";
 
 const BASE_URL = "http://127.0.0.1:4310";
@@ -256,6 +260,158 @@ describe("api-client", () => {
       expect(message).not.toContain("secret/path.ts");
       expect(message).not.toContain("stack");
     }
+  });
+
+  it("createDeferredTask: handles the 201 Created response with no runId/eventsPath", async () => {
+    const now = new Date().toISOString();
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          task: {
+            taskId: "task-2",
+            projectId: "project-1",
+            title: "Planning task",
+            description: "",
+            priority: "normal",
+            status: "backlog",
+            dependencyTaskIds: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+          eventCount: 0,
+          cancellationRequested: false,
+          createdAt: now,
+        },
+        201,
+      ),
+    );
+    const result = await createDeferredTask(BASE_URL, {
+      projectId: "project-1",
+      title: "Planning task",
+    });
+    expect(result.task.status).toBe("backlog");
+    expect(result.runId).toBeUndefined();
+    expect(result.eventsPath).toBeUndefined();
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toMatchObject({ executionMode: "deferred" });
+  });
+
+  it("transitionTask: returns the updated task record on success", async () => {
+    const now = new Date().toISOString();
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        task: {
+          taskId: "task-1",
+          projectId: "project-1",
+          title: "Test",
+          description: "",
+          priority: "normal",
+          status: "ready",
+          dependencyTaskIds: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+        eventCount: 0,
+        cancellationRequested: false,
+        createdAt: now,
+      }),
+    );
+    const result = await transitionTask(BASE_URL, "task-1", "ready");
+    expect(result.task.status).toBe("ready");
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(`${BASE_URL}/api/v1/tasks/task-1/transition`);
+    expect(JSON.parse(init.body as string)).toEqual({ targetStatus: "ready" });
+  });
+
+  it("transitionTask: surfaces a 409 invalid-transition error", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        { error: { code: "INVALID_TASK_TRANSITION", message: "Cannot move to running." } },
+        409,
+      ),
+    );
+    await expect(transitionTask(BASE_URL, "task-1", "running")).rejects.toMatchObject({
+      code: "INVALID_TASK_TRANSITION",
+      statusCode: 409,
+    });
+  });
+
+  it("assignTask: returns the updated task record on success", async () => {
+    const now = new Date().toISOString();
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        task: {
+          taskId: "task-1",
+          projectId: "project-1",
+          title: "Test",
+          description: "",
+          priority: "normal",
+          status: "assigned",
+          dependencyTaskIds: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+        adapterId: "hall.mock-agent",
+        agentId: "mock-agent",
+        eventCount: 0,
+        cancellationRequested: false,
+        createdAt: now,
+      }),
+    );
+    const result = await assignTask(BASE_URL, "task-1", { adapterId: "hall.mock-agent" });
+    expect(result.task.status).toBe("assigned");
+    expect(result.adapterId).toBe("hall.mock-agent");
+  });
+
+  it("assignTask: surfaces a 409 adapter-unavailable failure", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: { code: "ADAPTER_UNAVAILABLE", message: "Adapter is busy." } }, 409),
+    );
+    await expect(
+      assignTask(BASE_URL, "task-1", { adapterId: "hall.mock-agent" }),
+    ).rejects.toMatchObject({ code: "ADAPTER_UNAVAILABLE", statusCode: 409 });
+  });
+
+  it("startTask: handles the 202 Accepted response with eventsPath", async () => {
+    const now = new Date().toISOString();
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          task: {
+            taskId: "task-1",
+            projectId: "project-1",
+            title: "Test",
+            description: "",
+            priority: "normal",
+            status: "assigned",
+            dependencyTaskIds: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+          runId: "run-1",
+          adapterId: "hall.mock-agent",
+          agentId: "mock-agent",
+          eventCount: 0,
+          cancellationRequested: false,
+          createdAt: now,
+          eventsPath: "/api/v1/tasks/task-1/events",
+        },
+        202,
+      ),
+    );
+    const result = await startTask(BASE_URL, "task-1");
+    expect(result.runId).toBe("run-1");
+    expect(result.eventsPath).toBe("/api/v1/tasks/task-1/events");
+  });
+
+  it("startTask: surfaces a 409 conflict for a duplicate concurrent start", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: { code: "TASK_STATE_CONFLICT", message: "Already started." } }, 409),
+    );
+    await expect(startTask(BASE_URL, "task-1")).rejects.toMatchObject({
+      code: "TASK_STATE_CONFLICT",
+      statusCode: 409,
+    });
   });
 
   it("does not include credentials on any request", async () => {

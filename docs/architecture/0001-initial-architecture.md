@@ -1,11 +1,12 @@
 # 0001 — Initial Architecture
 
-Status: Draft (Phase 6). This document will be revised as later phases add real packages. See
+Status: Draft (Phase 7). This document will be revised as later phases add real packages. See
 [`0002-agent-adapter-boundary.md`](0002-agent-adapter-boundary.md) for the Phase 3 adapter/SDK
 boundary decisions, [`0003-hall-runner-boundary.md`](0003-hall-runner-boundary.md) for the Phase 4
 Hall Runner boundary decisions, [`0004-hall-core-server.md`](0004-hall-core-server.md) for the
-Phase 5 / 5.1 Hall Core server decisions, and
+Phase 5 / 5.1 Hall Core server decisions,
 [`0005-minimal-web-interface.md`](0005-minimal-web-interface.md) for the Phase 6 web dashboard
+decisions, and [`0006-kanban-board.md`](0006-kanban-board.md) for the Phase 7 Kanban board
 decisions.
 
 ## Vision
@@ -39,9 +40,10 @@ this repository does not contain empty placeholder packages ahead of time.
 ```
 hall-of-wisdom/
   apps/
-    web/                    @hall-of-wisdom/web - Next.js + React + Tailwind browser dashboard
-                             (Phase 6, see 0005-minimal-web-interface.md). Talks to Hall Core
-                             directly from the browser — no proxy, no custom Next.js server.
+    web/                    @hall-of-wisdom/web - Next.js + React + Tailwind browser dashboard:
+                             Task Console (Phase 6, see 0005-minimal-web-interface.md) and Kanban
+                             Board (Phase 7, see 0006-kanban-board.md). Talks to Hall Core directly
+                             from the browser — no proxy, no custom Next.js server.
     server/                 @hall-of-wisdom/hall-core - Fastify + WebSocket backend (Phase 5).
                              Calls Hall Runner's public runTask()/AgentRegistry/validateWorkspace
                              in-process (see 0004-hall-core-server.md); no changes were needed to
@@ -74,7 +76,7 @@ hall-of-wisdom/
   pnpm-workspace.yaml
 ```
 
-## Current state (end of Phase 6)
+## Current state (end of Phase 7)
 
 ```
 hall-of-wisdom/
@@ -86,11 +88,12 @@ hall-of-wisdom/
   runners/
     hall-runner/               @hall-of-wisdom/hall-runner - local task runner (see 0003)
   apps/
-    server/                    @hall-of-wisdom/hall-core - HTTP + WebSocket server (see 0004)
-    web/                       @hall-of-wisdom/web - Next.js browser dashboard (see 0005)
+    server/                    @hall-of-wisdom/hall-core - HTTP + WebSocket server (see 0004, 0006)
+    web/                       @hall-of-wisdom/web - Task Console (/, see 0005) and Kanban Board
+                               (/board, see 0006)
   docs/architecture/0001-initial-architecture.md, 0002-agent-adapter-boundary.md,
                      0003-hall-runner-boundary.md, 0004-hall-core-server.md,
-                     0005-minimal-web-interface.md
+                     0005-minimal-web-interface.md, 0006-kanban-board.md
   AGENTS.md
   CLAUDE.md
   README.md
@@ -98,9 +101,9 @@ hall-of-wisdom/
   .prettierrc.json, .editorconfig, .gitattributes, .gitignore
 ```
 
-No `integrations/` directory exists yet, `apps/` contains only `server` (no `web` yet), and no
-Git-related packages exist yet — the remaining packages listed in "Planned module structure" above
-are created only when the phase that needs them arrives.
+No `integrations/` directory exists yet, and no Git-related or database packages exist yet — the
+remaining packages listed in "Planned module structure" above are created only when the phase that
+needs them arrives.
 
 ## The Hall protocol (`@hall-of-wisdom/protocol`, Phase 2)
 
