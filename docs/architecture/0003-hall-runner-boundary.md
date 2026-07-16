@@ -1,6 +1,7 @@
 # 0003 — Hall Runner Boundary
 
-Status: Draft (Phase 4).
+Status: Draft (Phase 4). See [`0004-hall-core-server.md`](0004-hall-core-server.md) for how Phase 5
+consumes Hall Runner's public API in-process, with no changes needed to it.
 
 ## Context
 

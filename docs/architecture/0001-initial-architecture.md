@@ -1,9 +1,10 @@
 # 0001 — Initial Architecture
 
-Status: Draft (Phase 4). This document will be revised as later phases add real packages. See
+Status: Draft (Phase 5.1). This document will be revised as later phases add real packages. See
 [`0002-agent-adapter-boundary.md`](0002-agent-adapter-boundary.md) for the Phase 3 adapter/SDK
-boundary decisions and [`0003-hall-runner-boundary.md`](0003-hall-runner-boundary.md) for the
-Phase 4 Hall Runner boundary decisions.
+boundary decisions, [`0003-hall-runner-boundary.md`](0003-hall-runner-boundary.md) for the Phase 4
+Hall Runner boundary decisions, and [`0004-hall-core-server.md`](0004-hall-core-server.md) for the
+Phase 5 / 5.1 Hall Core server decisions.
 
 ## Vision
 
@@ -37,7 +38,10 @@ this repository does not contain empty placeholder packages ahead of time.
 hall-of-wisdom/
   apps/
     web/                    Next.js + React + Tailwind web application (Phase 6+)
-    server/                 Fastify-based Hall Core backend (Phase 5+)
+    server/                 @hall-of-wisdom/hall-core - Fastify + WebSocket backend (Phase 5).
+                             Calls Hall Runner's public runTask()/AgentRegistry/validateWorkspace
+                             in-process (see 0004-hall-core-server.md); no changes were needed to
+                             Hall Runner's public API to support it.
   packages/
     protocol/               Hall protocol: agent identity, tasks, runs, normalized events (Phase 2)
     agent-adapter-sdk/      Shared contract all coding-agent adapters implement (Phase 3)
@@ -66,7 +70,7 @@ hall-of-wisdom/
   pnpm-workspace.yaml
 ```
 
-## Current state (end of Phase 4)
+## Current state (end of Phase 5.1)
 
 ```
 hall-of-wisdom/
@@ -77,8 +81,10 @@ hall-of-wisdom/
     mock-agent/                @hall-of-wisdom/mock-agent - deterministic, network-free adapter
   runners/
     hall-runner/               @hall-of-wisdom/hall-runner - local task runner (see 0003)
+  apps/
+    server/                    @hall-of-wisdom/hall-core - HTTP + WebSocket server (see 0004)
   docs/architecture/0001-initial-architecture.md, 0002-agent-adapter-boundary.md,
-                     0003-hall-runner-boundary.md
+                     0003-hall-runner-boundary.md, 0004-hall-core-server.md
   AGENTS.md
   CLAUDE.md
   README.md
@@ -86,8 +92,9 @@ hall-of-wisdom/
   .prettierrc.json, .editorconfig, .gitattributes, .gitignore
 ```
 
-No `apps/` or `integrations/` directories exist yet — the remaining packages listed in "Planned
-module structure" above are created only when the phase that needs them arrives.
+No `integrations/` directory exists yet, `apps/` contains only `server` (no `web` yet), and no
+Git-related packages exist yet — the remaining packages listed in "Planned module structure" above
+are created only when the phase that needs them arrives.
 
 ## The Hall protocol (`@hall-of-wisdom/protocol`, Phase 2)
 
@@ -177,12 +184,17 @@ to use rather than reimplement. See `0002-agent-adapter-boundary.md` for the ful
 - How task/branch/worktree naming (`agent/<agent>/<task-id>`) is enforced and validated.
 - Where permission decisions (`allowed` / `requires-approval` / `denied`) are evaluated — Hall
   Core vs. Hall Runner.
-- Where event ordering, deduplication (by `sequence`), and persistence are implemented — likely
-  Hall Core (Phase 5+), once a server exists to own that state.
+- Event ordering and deduplication (by `sequence`) are now implemented in Hall Core's `EventStore`
+  (Phase 5) — see `0004-hall-core-server.md`, "Event sequencing and duplicate policy". Persistence
+  itself remains unbuilt (in-memory only); Phase 9 is where that is planned to land.
 - `AgentTaskInput.workingDirectory` path validation is now implemented in Hall Runner (Phase 4) —
   see `0003-hall-runner-boundary.md`.
 - The secret-redaction layer for adapter-captured output (failure details, detection diagnostics)
   remains unbuilt — see `0002-agent-adapter-boundary.md`.
-- Whether/how a run's event stream needs to support multiple independent consumers (Hall Core and,
-  say, a debugging tool both watching the same run) — the current `AsyncIterable`-based design
-  assumes a single consumer drives execution; see `0002-agent-adapter-boundary.md`.
+- Multiple independent consumers of a single run's event stream are now supported at the Hall Core
+  level (Phase 5): `EventBus` fans one task's events out to every subscribed WebSocket client, up to
+  `maxSubscribersPerTask` — see `0004-hall-core-server.md`. The underlying adapter-facing
+  `AsyncIterable` design in `@hall-of-wisdom/agent-adapter-sdk` (`0002-agent-adapter-boundary.md`)
+  is unchanged and still assumes a single in-process consumer (Hall Runner's `runner-service.ts`,
+  which is what actually drives the `for await` loop and forwards events to Hall Core via a plain
+  callback) — the fan-out happens one layer up, in Hall Core, not in the SDK itself.

@@ -1,0 +1,44 @@
+{
+  "name": "@hall-of-wisdom/hall-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local Hall Core HTTP + WebSocket server: creates and runs tasks through Hall Runner's public API and streams normalized events.",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=24.11.0 <25"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "build": "tsc -p tsconfig.build.json",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "dev": "tsc -p tsconfig.build.json && node dist/server.js",
+    "verify:package-entry": "node verify-package-entry.mjs"
+  },
+  "dependencies": {
+    "@fastify/websocket": "^11.3.0",
+    "@hall-of-wisdom/agent-adapter-sdk": "workspace:*",
+    "@hall-of-wisdom/hall-runner": "workspace:*",
+    "@hall-of-wisdom/mock-agent": "workspace:*",
+    "@hall-of-wisdom/protocol": "workspace:*",
+    "fastify": "^5.10.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.13",
+    "ws": "^8.18.0"
+  }
+}

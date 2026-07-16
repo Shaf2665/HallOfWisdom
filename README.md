@@ -13,12 +13,13 @@ rules coding agents working in this repository must follow.
 
 ## Status
 
-**Phase 4 — Hall Runner Prototype.** Four packages now exist: `@hall-of-wisdom/protocol` (the wire
+**Phase 5.1 — Event Capacity and WebSocket Backpressure Hardening.** Five packages now exist: `@hall-of-wisdom/protocol` (the wire
 contract), `@hall-of-wisdom/agent-adapter-sdk` (the adapter contract), `@hall-of-wisdom/mock-agent`
-(the first concrete adapter), and `@hall-of-wisdom/hall-runner` — a local CLI that registers an
-adapter, validates the workspace, runs one task, and streams normalized events as JSON Lines to the
-terminal. No server, web app, networking, Git integration, or real coding-agent integration exists
-yet.
+(the first concrete adapter), `@hall-of-wisdom/hall-runner` (a local CLI that runs one task and
+streams normalized events as JSON Lines), and `@hall-of-wisdom/hall-core` — a local Fastify HTTP +
+WebSocket server that creates and runs tasks in memory, calling Hall Runner's public API
+in-process. No web app, authentication, persistence, Git integration, or real coding-agent
+integration exists yet.
 
 ## Requirements
 
@@ -63,6 +64,7 @@ pnpm --filter @hall-of-wisdom/protocol run verify:package-entry
 pnpm --filter @hall-of-wisdom/agent-adapter-sdk run verify:package-entry
 pnpm --filter @hall-of-wisdom/mock-agent run verify:package-entry
 pnpm --filter @hall-of-wisdom/hall-runner run verify:package-entry
+pnpm --filter @hall-of-wisdom/hall-core run verify:package-entry
 ```
 
 ## Packages
@@ -73,6 +75,7 @@ pnpm --filter @hall-of-wisdom/hall-runner run verify:package-entry
 | [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                 |
 | [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                |
 | [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events. |
+| [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, and binds to `127.0.0.1` only.       |
 
 ## Running Hall Runner
 
@@ -157,6 +160,81 @@ to stderr, never mixed into the JSON Lines stream. See
 [`docs/architecture/0003-hall-runner-boundary.md`](docs/architecture/0003-hall-runner-boundary.md)
 for the full exit-code policy and cancellation design.
 
+## Running Hall Core
+
+Hall Core is an HTTP + WebSocket server prototype, bound to `127.0.0.1` only. Start it in one
+PowerShell window, then issue requests from a **second** PowerShell window (the server occupies the
+first one while it's running).
+
+**Success-scenario server:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- --workspace-root "D:\HallOfWisdom" --port 4310 --mock-scenario success
+```
+
+**Failure-scenario server:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- --workspace-root "D:\HallOfWisdom" --port 4310 --mock-scenario failure
+```
+
+**Cancellable-scenario server** (use a nonzero `--mock-step-delay-ms` to leave a window to cancel):
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- --workspace-root "D:\HallOfWisdom" --port 4310 --mock-scenario cancellable --mock-step-delay-ms 500
+```
+
+With a server running, from a **second** PowerShell window:
+
+**Health check:**
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:4310/api/v1/health" -Method Get
+```
+
+**Create a task** (adapterId must match the server's registered adapter, `hall.mock-agent`):
+
+```powershell
+$body = @{ projectId = "demo-project"; title = "Manual verification task"; adapterId = "hall.mock-agent" } | ConvertTo-Json
+$created = Invoke-RestMethod -Uri "http://127.0.0.1:4310/api/v1/tasks" -Method Post -Body $body -ContentType "application/json"
+$created
+```
+
+**List tasks:**
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:4310/api/v1/tasks" -Method Get
+```
+
+**Read one task** (using the `taskId` from the create response above):
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:4310/api/v1/tasks/$($created.task.taskId)" -Method Get
+```
+
+**Cancel a task** (only meaningful against the cancellable-scenario server, before it finishes):
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:4310/api/v1/tasks/$($created.task.taskId)/cancel" -Method Post
+```
+
+Stop the server with Ctrl+C in its own window (first `SIGINT` requests a graceful shutdown —
+cancelling any active runs and waiting, bounded, for them to settle; a second `SIGINT` forces an
+immediate exit). See
+[`docs/architecture/0004-hall-core-server.md`](docs/architecture/0004-hall-core-server.md) for the
+full API, status-transition, event-sequencing, and shutdown design.
+
+A task can also fail for reasons that are Hall Core's fault rather than the agent's — most notably
+running out of its configured per-task event budget (`maxEventsPerTask`). These surface exactly
+like any other failed task (`status: "failed"`, a `failure` object), but with a distinct code
+(`EVENT_CAPACITY_REACHED` and similar, rather than `MOCK_EXECUTION_FAILED`) so a caller can tell
+"the agent's work failed" apart from "Hall Core couldn't keep up." A WebSocket client that falls too
+far behind the live event stream is disconnected with close code `4504` rather than silently
+missing frames — reconnect with `?afterSequence=<lastReceivedSequence>` to replay whatever was
+missed; nothing already stored is ever discarded on a slow client's account. See
+[`docs/architecture/0004-hall-core-server.md`](docs/architecture/0004-hall-core-server.md), "Event-capacity
+terminal handling" and "WebSocket backpressure policy", for the full design.
+
 ## Repository Layout (current)
 
 ```
@@ -168,12 +246,14 @@ hall-of-wisdom/
     mock-agent/            @hall-of-wisdom/mock-agent - deterministic, network-free adapter
   runners/
     hall-runner/            @hall-of-wisdom/hall-runner - local task runner CLI
+  apps/
+    server/                 @hall-of-wisdom/hall-core - HTTP + WebSocket server
   docs/architecture/      architecture decision records
   AGENTS.md               rules for coding agents working in this repo
   CLAUDE.md                rules for Claude Code specifically
   README.md               this file
 ```
 
-Future phases will add `apps/` (web, server), more `packages/` (database, source-control,
+Future phases will add `apps/web` (the browser UI), more `packages/` (database, source-control,
 work-management), and more `adapters/` (Claude Code, Codex, ...) as each becomes necessary. See the
-architecture documents for the full planned layout and the Phase 3/4 boundary decisions.
+architecture documents for the full planned layout and the Phase 3/4/5 boundary decisions.

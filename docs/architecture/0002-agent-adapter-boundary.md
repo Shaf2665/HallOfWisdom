@@ -65,18 +65,23 @@ stated rule.
 - **Natural backpressure.** A consumer that is slower than the producer (e.g. writing events to a
   database one at a time) simply doesn't call `next()` again until it's ready; a callback-based
   push API has no equivalent without a manual queue.
-- **Composable with `for await`.** Hall Core will eventually need to consume these events and
-  forward them over a WebSocket; `for await (const event of run.events)` is the direct, idiomatic
-  way to do that without inventing a subscription/unsubscription protocol.
+- **Composable with `for await`.** `for await (const event of run.events)` is the direct, idiomatic
+  way to drive a run without inventing a subscription/unsubscription protocol at this layer. As of
+  Phase 4, Hall Runner's `runner-service.ts` is the (single, in-process) consumer that actually runs
+  this loop; it forwards each event onward through a plain callback (`onEvent`) rather than exposing
+  the iterable further up the stack.
 - **One iteration is one execution.** Because the Mock Agent's generator is lazy, "consuming the
   stream" and "running the task" are the same act, which keeps the mental model simple: there is
   no separate "start" call that races against "start listening".
 
 The tradeoff, made explicit rather than hidden: only one iteration meaningfully drives execution.
 `AgentRunHandle.completion` resolves as a side effect of `events` being iterated to its terminal
-event, not independently. An adapter (or Hall Runner, later) that wants multiple independent
-consumers of the same run's events would need to fan the stream out itself; the SDK does not do
-this for you in Phase 3, since nothing in this phase's scope needs it yet.
+event, not independently. This SDK-level `AsyncIterable` still has exactly one consumer (Hall
+Runner) and does not fan out by itself. Multiple independent _external_ consumers of a single run's
+events is instead solved one layer up: as of Phase 5, Hall Core's `EventBus` fans each task's events
+out to every subscribed WebSocket client (up to a configured `maxSubscribersPerTask`) — see
+`0004-hall-core-server.md`, "WebSocket replay and live streaming" — without this SDK's `AsyncIterable`
+itself needing to change.
 
 ## Cancellation behavior
 
