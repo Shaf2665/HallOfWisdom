@@ -1,10 +1,12 @@
 # 0001 — Initial Architecture
 
-Status: Draft (Phase 5.1). This document will be revised as later phases add real packages. See
+Status: Draft (Phase 6). This document will be revised as later phases add real packages. See
 [`0002-agent-adapter-boundary.md`](0002-agent-adapter-boundary.md) for the Phase 3 adapter/SDK
 boundary decisions, [`0003-hall-runner-boundary.md`](0003-hall-runner-boundary.md) for the Phase 4
-Hall Runner boundary decisions, and [`0004-hall-core-server.md`](0004-hall-core-server.md) for the
-Phase 5 / 5.1 Hall Core server decisions.
+Hall Runner boundary decisions, [`0004-hall-core-server.md`](0004-hall-core-server.md) for the
+Phase 5 / 5.1 Hall Core server decisions, and
+[`0005-minimal-web-interface.md`](0005-minimal-web-interface.md) for the Phase 6 web dashboard
+decisions.
 
 ## Vision
 
@@ -37,7 +39,9 @@ this repository does not contain empty placeholder packages ahead of time.
 ```
 hall-of-wisdom/
   apps/
-    web/                    Next.js + React + Tailwind web application (Phase 6+)
+    web/                    @hall-of-wisdom/web - Next.js + React + Tailwind browser dashboard
+                             (Phase 6, see 0005-minimal-web-interface.md). Talks to Hall Core
+                             directly from the browser — no proxy, no custom Next.js server.
     server/                 @hall-of-wisdom/hall-core - Fastify + WebSocket backend (Phase 5).
                              Calls Hall Runner's public runTask()/AgentRegistry/validateWorkspace
                              in-process (see 0004-hall-core-server.md); no changes were needed to
@@ -70,7 +74,7 @@ hall-of-wisdom/
   pnpm-workspace.yaml
 ```
 
-## Current state (end of Phase 5.1)
+## Current state (end of Phase 6)
 
 ```
 hall-of-wisdom/
@@ -83,8 +87,10 @@ hall-of-wisdom/
     hall-runner/               @hall-of-wisdom/hall-runner - local task runner (see 0003)
   apps/
     server/                    @hall-of-wisdom/hall-core - HTTP + WebSocket server (see 0004)
+    web/                       @hall-of-wisdom/web - Next.js browser dashboard (see 0005)
   docs/architecture/0001-initial-architecture.md, 0002-agent-adapter-boundary.md,
-                     0003-hall-runner-boundary.md, 0004-hall-core-server.md
+                     0003-hall-runner-boundary.md, 0004-hall-core-server.md,
+                     0005-minimal-web-interface.md
   AGENTS.md
   CLAUDE.md
   README.md

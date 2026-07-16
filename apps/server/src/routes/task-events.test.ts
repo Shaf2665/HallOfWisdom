@@ -72,8 +72,9 @@ describe("WebSocket /api/v1/tasks/:taskId/events", () => {
 
   async function setup(
     mockAgentConfig: Parameters<typeof buildTestApp>[0]["mockAgentConfig"],
+    webOrigin?: string,
   ): Promise<void> {
-    const built = await buildTestApp({ workspaceRoot: tempRoot, mockAgentConfig });
+    const built = await buildTestApp({ workspaceRoot: tempRoot, mockAgentConfig, webOrigin });
     app = built.app;
     harness = built.harness;
     const address = await startEphemeral(app);
@@ -367,6 +368,79 @@ describe("WebSocket /api/v1/tasks/:taskId/events", () => {
     const code = await closeCode;
     expect(typeof code).toBe("number");
   });
+
+  it("accepts a WebSocket connection whose Origin header matches the configured web origin", async () => {
+    await setup({ scenario: "success", progressMessageCount: 1 }, "http://127.0.0.1:3000");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      payload: validCreateTaskBody(),
+    });
+    const { task } = created.json<CreateTaskResponseJson>();
+
+    const socket = new WebSocket(`${baseUrl}/api/v1/tasks/${task.taskId}/events`, {
+      headers: { Origin: "http://127.0.0.1:3000" },
+    });
+    const { closeCode } = collectMessages(socket);
+    await waitForOpen(socket);
+    const code = await closeCode;
+    expect(code).toBe(1000);
+  });
+
+  it("rejects a WebSocket connection whose Origin header does not match, and creates no subscriber", async () => {
+    await setup({ scenario: "success" }, "http://127.0.0.1:3000");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      payload: validCreateTaskBody(),
+    });
+    const { task } = created.json<CreateTaskResponseJson>();
+
+    const socket = new WebSocket(`${baseUrl}/api/v1/tasks/${task.taskId}/events`, {
+      headers: { Origin: "http://evil.example.com" },
+    });
+    const { closeCode } = collectMessages(socket);
+    await waitForOpen(socket).catch(() => undefined);
+    const code = await closeCode;
+    expect(code).toBe(4403);
+    expect(harness.eventBus.subscriberCount(task.taskId)).toBe(0);
+  });
+
+  it("rejects a WebSocket connection with a malformed Origin header", async () => {
+    await setup({ scenario: "success" }, "http://127.0.0.1:3000");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      payload: validCreateTaskBody(),
+    });
+    const { task } = created.json<CreateTaskResponseJson>();
+
+    const socket = new WebSocket(`${baseUrl}/api/v1/tasks/${task.taskId}/events`, {
+      headers: { Origin: "not-a-valid-origin" },
+    });
+    const { closeCode } = collectMessages(socket);
+    await waitForOpen(socket).catch(() => undefined);
+    const code = await closeCode;
+    expect(code).toBe(4403);
+  });
+
+  it("allows a WebSocket connection with no Origin header at all (non-browser client policy)", async () => {
+    await setup({ scenario: "success", progressMessageCount: 1 }, "http://127.0.0.1:3000");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      payload: validCreateTaskBody(),
+    });
+    const { task } = created.json<CreateTaskResponseJson>();
+
+    // Node's `ws` client sends no Origin header by default — this is the
+    // same shape a PowerShell/CLI WebSocket client would produce.
+    const socket = new WebSocket(`${baseUrl}/api/v1/tasks/${task.taskId}/events`);
+    const { closeCode } = collectMessages(socket);
+    await waitForOpen(socket);
+    const code = await closeCode;
+    expect(code).toBe(1000);
+  });
 });
 
 /**
@@ -453,6 +527,8 @@ function makeEvent(
   };
 }
 
+const ALLOWED_ORIGIN = "http://127.0.0.1:3000";
+
 describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () => {
   const RUN_ID = "run-1";
   const AGENT_ID = "agent-1";
@@ -467,7 +543,7 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
     const eventStore = new EventStore({ maxEventsPerTask: 100 });
     const eventBus = new EventBus({ maxSubscribersPerTask: 20 });
     return {
-      deps: { taskStore, eventStore, eventBus, maxBufferedBytes },
+      deps: { taskStore, eventStore, eventBus, maxBufferedBytes, allowedOrigin: ALLOWED_ORIGIN },
       taskStore,
       eventStore,
       eventBus,
@@ -490,7 +566,11 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
     const taskId = "task-1";
     taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
     const socket = new FakeSocket();
-    handleTaskEventsConnection(socket, { taskId, afterSequenceRaw: undefined }, deps);
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+      deps,
+    );
 
     appendAndPublish(eventStore, eventBus, taskId, makeEvent(0, RUN_ID, taskId, AGENT_ID));
 
@@ -504,7 +584,11 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
     taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
     const socket = new FakeSocket();
     socket.bufferedAmount = 999;
-    handleTaskEventsConnection(socket, { taskId, afterSequenceRaw: undefined }, deps);
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+      deps,
+    );
     expect(eventBus.subscriberCount(taskId)).toBe(1);
 
     appendAndPublish(eventStore, eventBus, taskId, makeEvent(0, RUN_ID, taskId, AGENT_ID));
@@ -521,7 +605,11 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
     taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
     const socket = new FakeSocket();
     socket.bufferedAmount = 999;
-    handleTaskEventsConnection(socket, { taskId, afterSequenceRaw: undefined }, deps);
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+      deps,
+    );
 
     appendAndPublish(eventStore, eventBus, taskId, makeEvent(0, RUN_ID, taskId, AGENT_ID));
     expect(socket.closeCalls).toHaveLength(1);
@@ -540,10 +628,18 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
 
     const slow = new FakeSocket();
     slow.bufferedAmount = 999;
-    handleTaskEventsConnection(slow, { taskId, afterSequenceRaw: undefined }, deps);
+    handleTaskEventsConnection(
+      slow,
+      { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+      deps,
+    );
 
     const healthy = new FakeSocket();
-    handleTaskEventsConnection(healthy, { taskId, afterSequenceRaw: undefined }, deps);
+    handleTaskEventsConnection(
+      healthy,
+      { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+      deps,
+    );
 
     appendAndPublish(eventStore, eventBus, taskId, makeEvent(0, RUN_ID, taskId, AGENT_ID));
 
@@ -559,7 +655,11 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
     taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
     const socket = new FakeSocket();
     socket.bufferedAmount = 999;
-    handleTaskEventsConnection(socket, { taskId, afterSequenceRaw: undefined }, deps);
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+      deps,
+    );
 
     appendAndPublish(eventStore, eventBus, taskId, makeEvent(0, RUN_ID, taskId, AGENT_ID));
 
@@ -572,7 +672,11 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
     taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
     const socket = new FakeSocket();
     socket.bufferedAmount = 999;
-    handleTaskEventsConnection(socket, { taskId, afterSequenceRaw: undefined }, deps);
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+      deps,
+    );
 
     const event = makeEvent(0, RUN_ID, taskId, AGENT_ID);
     appendAndPublish(eventStore, eventBus, taskId, event);
@@ -581,7 +685,11 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
 
     // A reconnect with afterSequence=-1 (nothing received yet) replays it.
     const reconnected = new FakeSocket();
-    handleTaskEventsConnection(reconnected, { taskId, afterSequenceRaw: undefined }, deps);
+    handleTaskEventsConnection(
+      reconnected,
+      { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+      deps,
+    );
     expect(reconnected.sent).toHaveLength(1);
     expect(JSON.parse(reconnected.sent[0] ?? "{}")).toMatchObject({ sequence: 0 });
   });
@@ -594,7 +702,11 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
     for (let i = 0; i < 5; i += 1) {
       const socket = new FakeSocket();
       socket.bufferedAmount = 999;
-      handleTaskEventsConnection(socket, { taskId, afterSequenceRaw: undefined }, deps);
+      handleTaskEventsConnection(
+        socket,
+        { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+        deps,
+      );
     }
     expect(eventBus.subscriberCount(taskId)).toBe(5);
 
@@ -602,5 +714,130 @@ describe("handleTaskEventsConnection WebSocket backpressure (fake socket)", () =
 
     // Every slow subscriber was closed and unsubscribed by the one publish.
     expect(eventBus.subscriberCount(taskId)).toBe(0);
+  });
+});
+
+describe("handleTaskEventsConnection Origin validation (fake socket)", () => {
+  const RUN_ID = "run-1";
+  const AGENT_ID = "agent-1";
+
+  function buildHarness(): {
+    deps: TaskEventsRouteDeps;
+    taskStore: TaskStore;
+    eventBus: EventBus;
+  } {
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const eventStore = new EventStore({ maxEventsPerTask: 100 });
+    const eventBus = new EventBus({ maxSubscribersPerTask: 20 });
+    return {
+      deps: {
+        taskStore,
+        eventStore,
+        eventBus,
+        maxBufferedBytes: 1024,
+        allowedOrigin: ALLOWED_ORIGIN,
+      },
+      taskStore,
+      eventBus,
+    };
+  }
+
+  it("allows a connection with no Origin header", () => {
+    const { deps, taskStore, eventBus } = buildHarness();
+    const taskId = "task-1";
+    taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
+    const socket = new FakeSocket();
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: undefined },
+      deps,
+    );
+    expect(socket.closeCalls).toHaveLength(0);
+    expect(eventBus.subscriberCount(taskId)).toBe(1);
+  });
+
+  it("allows a connection whose Origin matches exactly", () => {
+    const { deps, taskStore, eventBus } = buildHarness();
+    const taskId = "task-1";
+    taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
+    const socket = new FakeSocket();
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: ALLOWED_ORIGIN },
+      deps,
+    );
+    expect(socket.closeCalls).toHaveLength(0);
+    expect(eventBus.subscriberCount(taskId)).toBe(1);
+  });
+
+  it("rejects a connection whose Origin does not match, before creating a subscriber", () => {
+    const { deps, taskStore, eventBus } = buildHarness();
+    const taskId = "task-1";
+    taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
+    const socket = new FakeSocket();
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: "http://evil.example.com" },
+      deps,
+    );
+    expect(socket.closeCalls).toEqual([{ code: 4403, reason: "origin not allowed" }]);
+    expect(eventBus.subscriberCount(taskId)).toBe(0);
+  });
+
+  it("does not use a substring/prefix match — a superstring origin is rejected", () => {
+    const { deps, taskStore, eventBus } = buildHarness();
+    const taskId = "task-1";
+    taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
+    const socket = new FakeSocket();
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: `${ALLOWED_ORIGIN}.evil.com` },
+      deps,
+    );
+    expect(socket.closeCalls).toHaveLength(1);
+    expect(eventBus.subscriberCount(taskId)).toBe(0);
+  });
+
+  it("rejects a malformed Origin header", () => {
+    const { deps, taskStore, eventBus } = buildHarness();
+    const taskId = "task-1";
+    taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
+    const socket = new FakeSocket();
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: "not a url" },
+      deps,
+    );
+    expect(socket.closeCalls).toEqual([{ code: 4403, reason: "origin not allowed" }]);
+    expect(eventBus.subscriberCount(taskId)).toBe(0);
+  });
+
+  it("does not disclose the configured allowed origin in the rejection reason", () => {
+    const { deps, taskStore } = buildHarness();
+    const taskId = "task-1";
+    taskStore.add(buildTaskRecord(taskId, RUN_ID, AGENT_ID));
+    const socket = new FakeSocket();
+    handleTaskEventsConnection(
+      socket,
+      { taskId, afterSequenceRaw: undefined, originRaw: "http://evil.example.com" },
+      deps,
+    );
+    expect(socket.closeCalls[0]?.reason).not.toContain(ALLOWED_ORIGIN);
+  });
+
+  it("rejects an unapproved Origin before ever checking whether the task exists", () => {
+    const { deps, eventBus } = buildHarness();
+    const socket = new FakeSocket();
+    handleTaskEventsConnection(
+      socket,
+      {
+        taskId: "nonexistent-task",
+        afterSequenceRaw: undefined,
+        originRaw: "http://evil.example.com",
+      },
+      deps,
+    );
+    expect(socket.closeCalls).toEqual([{ code: 4403, reason: "origin not allowed" }]);
+    expect(eventBus.subscriberCount("nonexistent-task")).toBe(0);
   });
 });

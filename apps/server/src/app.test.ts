@@ -90,3 +90,114 @@ describe("createHallCoreApp", () => {
     }
   });
 });
+
+describe("CORS", () => {
+  let tempRoot: string;
+  const ALLOWED_ORIGIN = "http://127.0.0.1:3000";
+  const OTHER_ORIGIN = "http://evil.example.com";
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hall-core-cors-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it("an allowed HTTP Origin receives CORS headers", async () => {
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: ALLOWED_ORIGIN });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/health",
+      headers: { origin: ALLOWED_ORIGIN },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBe(ALLOWED_ORIGIN);
+    await app.close();
+  });
+
+  it("a rejected HTTP Origin receives no CORS allow-origin header", async () => {
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: ALLOWED_ORIGIN });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/health",
+      headers: { origin: OTHER_ORIGIN },
+    });
+    // The server still answers (CORS is a browser-side enforcement
+    // mechanism) — it just never grants the disallowed origin permission
+    // to read the response via the missing header.
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+    await app.close();
+  });
+
+  it("OPTIONS preflight succeeds for an approved Origin", async () => {
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: ALLOWED_ORIGIN });
+    const response = await app.inject({
+      method: "OPTIONS",
+      url: "/api/v1/tasks",
+      headers: {
+        origin: ALLOWED_ORIGIN,
+        "access-control-request-method": "POST",
+        "access-control-request-headers": "Content-Type",
+      },
+    });
+    expect(response.headers["access-control-allow-origin"]).toBe(ALLOWED_ORIGIN);
+    expect(response.headers["access-control-allow-methods"]).toContain("POST");
+    await app.close();
+  });
+
+  it("OPTIONS preflight grants no CORS permission for an unapproved Origin", async () => {
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: ALLOWED_ORIGIN });
+    const response = await app.inject({
+      method: "OPTIONS",
+      url: "/api/v1/tasks",
+      headers: {
+        origin: OTHER_ORIGIN,
+        "access-control-request-method": "POST",
+      },
+    });
+    expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+    await app.close();
+  });
+
+  it("an Origin-less request (PowerShell/curl-style) continues to work", async () => {
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: ALLOWED_ORIGIN });
+    const response = await app.inject({ method: "GET", url: "/api/v1/health" });
+    expect(response.statusCode).toBe(200);
+    await app.close();
+  });
+
+  it("defaults to the documented default web origin when --web-origin is not configured", async () => {
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/health",
+      headers: { origin: "http://127.0.0.1:3000" },
+    });
+    expect(response.headers["access-control-allow-origin"]).toBe("http://127.0.0.1:3000");
+    await app.close();
+  });
+
+  it("does not use a wildcard origin", async () => {
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: ALLOWED_ORIGIN });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/health",
+      headers: { origin: ALLOWED_ORIGIN },
+    });
+    expect(response.headers["access-control-allow-origin"]).not.toBe("*");
+    await app.close();
+  });
+
+  it("does not enable CORS credentials", async () => {
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: ALLOWED_ORIGIN });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/health",
+      headers: { origin: ALLOWED_ORIGIN },
+    });
+    expect(response.headers["access-control-allow-credentials"]).toBeUndefined();
+    await app.close();
+  });
+});

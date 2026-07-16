@@ -48,6 +48,7 @@ export interface TestHarnessOptions {
   readonly limits?: Partial<ServerLimits> | undefined;
   readonly logger?: boolean | undefined;
   readonly onExecutionError?: ((taskId: string, error: unknown) => void) | undefined;
+  readonly webOrigin?: string | undefined;
 }
 
 export interface TestHarness {
@@ -91,6 +92,8 @@ export async function buildTestApp(options: TestHarnessOptions): Promise<{
     taskStore: harness.taskStore,
     eventStore: harness.eventStore,
     eventBus: harness.eventBus,
+    registry: harness.registry,
+    webOrigin: options.webOrigin,
     limits: harness.limits,
     logger: options.logger ?? false,
   };

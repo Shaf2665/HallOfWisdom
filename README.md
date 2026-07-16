@@ -13,13 +13,15 @@ rules coding agents working in this repository must follow.
 
 ## Status
 
-**Phase 5.1 — Event Capacity and WebSocket Backpressure Hardening.** Five packages now exist: `@hall-of-wisdom/protocol` (the wire
+**Phase 6 — Minimal Web Interface.** Six packages now exist: `@hall-of-wisdom/protocol` (the wire
 contract), `@hall-of-wisdom/agent-adapter-sdk` (the adapter contract), `@hall-of-wisdom/mock-agent`
 (the first concrete adapter), `@hall-of-wisdom/hall-runner` (a local CLI that runs one task and
-streams normalized events as JSON Lines), and `@hall-of-wisdom/hall-core` — a local Fastify HTTP +
+streams normalized events as JSON Lines), `@hall-of-wisdom/hall-core` (a local Fastify HTTP +
 WebSocket server that creates and runs tasks in memory, calling Hall Runner's public API
-in-process. No web app, authentication, persistence, Git integration, or real coding-agent
-integration exists yet.
+in-process, with an exact-origin CORS/WebSocket-Origin allowlist for the web app below), and
+`@hall-of-wisdom/web` — a Next.js browser dashboard that talks to Hall Core directly from the
+browser (no proxy, no custom server). No authentication, persistence, Kanban board, communication
+features, Git integration, or real coding-agent integration exists yet.
 
 ## Requirements
 
@@ -76,6 +78,7 @@ pnpm --filter @hall-of-wisdom/hall-core run verify:package-entry
 | [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                |
 | [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events. |
 | [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, and binds to `127.0.0.1` only.       |
+| [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: talks to Hall Core directly (no proxy, no custom server) to create tasks, list them, and stream live events; binds to `127.0.0.1` only.                                   |
 
 ## Running Hall Runner
 
@@ -235,6 +238,161 @@ missed; nothing already stored is ever discarded on a slow client's account. See
 [`docs/architecture/0004-hall-core-server.md`](docs/architecture/0004-hall-core-server.md), "Event-capacity
 terminal handling" and "WebSocket backpressure policy", for the full design.
 
+## Running Hall Web
+
+Hall Web is a Next.js browser dashboard that talks to Hall Core directly from the browser — start
+Hall Core first (with `--web-origin` matching where the dashboard will run), then the dashboard, in
+two separate PowerShell windows.
+
+**Terminal 1 — Hall Core** (success scenario):
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario success `
+  --web-origin "http://127.0.0.1:3000"
+```
+
+Failure scenario:
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario failure `
+  --web-origin "http://127.0.0.1:3000"
+```
+
+Cancellable scenario (use a nonzero `--mock-step-delay-ms` to leave a window to cancel):
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario cancellable `
+  --mock-step-delay-ms 500 `
+  --web-origin "http://127.0.0.1:3000"
+```
+
+**Terminal 2 — Hall Web:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/web run dev
+```
+
+Then open **http://127.0.0.1:3000** in a browser. Hall Web reads its Hall Core URL from
+`NEXT_PUBLIC_HALL_CORE_URL`, defaulting safely to `http://127.0.0.1:4310` when unset — copy
+[`apps/web/.env.local.example`](apps/web/.env.local.example) to `apps/web/.env.local` (gitignored,
+never committed) only if you need to point it somewhere else.
+
+**Production build and start**, from a second window once both are stopped:
+
+```powershell
+pnpm --filter @hall-of-wisdom/web run build
+pnpm --filter @hall-of-wisdom/web run start
+```
+
+`start`, like `dev`, binds to `127.0.0.1:3000` explicitly — never `0.0.0.0`.
+
+Stop Hall Web with Ctrl+C in its own window; it exits immediately (no in-process cleanup to wait
+for, unlike Hall Core). Stop Hall Core with Ctrl+C in its own window as described above.
+
+See [`docs/architecture/0005-minimal-web-interface.md`](docs/architecture/0005-minimal-web-interface.md)
+for the full design: the CORS/WebSocket-Origin contract this depends on, the WebSocket
+reconnect/close-code policy, URL configuration, and accessibility expectations.
+
+### Switching scenarios requires restarting Hall Core
+
+`--mock-scenario` is **server startup configuration**, not a per-task or per-request option — Mock
+Agent is configured once, when the adapter is constructed at server startup, and every task Hall
+Core runs for the rest of that process's lifetime uses that same scenario. There is no task title,
+project ID, or other field that changes which scenario runs; the generic REST task contract and the
+browser's task-creation form never expose a scenario field. To test a different scenario, stop Hall
+Core (Ctrl+C) and start it again with a different `--mock-scenario` value. Because `TaskStore` and
+`EventStore` are in-memory only (see `docs/architecture/0004-hall-core-server.md`, "In-memory
+storage limitations"), **restarting Hall Core for any reason — including only to change the
+scenario — discards every task and event it was holding.** Refresh the browser tab after restarting
+Hall Core so Hall Web re-fetches its task list from the new, empty process rather than continuing to
+show tasks that no longer exist server-side.
+
+### WebSocket reconnect vs. Hall Core restart — two different things
+
+These are easy to conflate but behave very differently:
+
+- **Same-process reconnect** (Hall Core keeps running; only the browser's connection drops —
+  a network blip, a laptop sleeping, DevTools "Offline" toggled on then off): Hall Web's
+  `useTaskEvents` hook reconnects automatically with `afterSequence=<last accepted sequence>`,
+  Hall Core replays whatever was stored in the meantime from its still-intact `EventStore`, and the
+  task resumes streaming with no gap and no duplicate timeline entries. This is the reconnect
+  behavior `docs/architecture/0005-minimal-web-interface.md` ("WebSocket replay and reconnect",
+  "Close-code handling") describes.
+- **Hall Core restart** (the process itself is stopped and started again — a new process, an empty
+  `TaskStore`/`EventStore`): there is nothing to resume. A client still watching a task from the old
+  process sees its connection drop abnormally (close code `1006`, since the old process is simply
+  gone) and reconnects on its normal bounded backoff — expect to briefly see "Reconnecting…", and
+  possibly "disconnected" with a manual Reconnect option if the restart takes longer than the retry
+  budget. Only once the _new_ process is back up and a reconnect attempt actually reaches it does the
+  task's real fate resolve: the new process has never heard of that task ID, so it closes with `4404`
+  and the hook settles permanently into "This task no longer exists." — no further automatic retry,
+  and no stale data is ever shown as if it were still live. **Restarting Hall Core never resumes a
+  task; it only ever discards it**, eventually surfaced safely. Cross-process resume would require
+  persisting `TaskStore`/`EventStore` to disk, which is explicitly out of scope for this prototype
+  (`docs/architecture/0004-hall-core-server.md`, "Why persistence is deferred").
+
+**Valid manual reconnect test** (keeps Hall Core running the whole time):
+
+1. Start Hall Core with the cancellable scenario and a long step delay so there's a window to test
+   within:
+   ```powershell
+   pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+     --workspace-root "D:\HallOfWisdom" `
+     --port 4310 `
+     --mock-scenario cancellable `
+     --mock-step-delay-ms 1000 `
+     --web-origin "http://127.0.0.1:3000"
+   ```
+2. Start Hall Web (`pnpm --filter @hall-of-wisdom/web run dev`) and open `http://127.0.0.1:3000`.
+3. Create a task and wait until at least one event appears in the timeline.
+4. Open the browser's DevTools, and set Network conditions to **Offline** for a few seconds — do
+   **not** stop Hall Core.
+5. Restore Network to **Online**.
+6. Confirm the connection status shows "Reconnecting…", then confirm it reconnects.
+7. Confirm any events that happened while offline appear with no gap and no duplicate entries.
+8. Confirm the task still eventually reaches its terminal state (complete it, or cancel it).
+
+(If DevTools "Offline" also blocks all localhost traffic in your browser, that's expected and still
+a valid test — the point is that Hall Core's process itself is never stopped.)
+
+**Separate restart-behavior test** (confirms data loss is real and handled safely, not that anything
+resumes):
+
+1. With a task selected in Hall Web, stop Hall Core (Ctrl+C).
+2. Start Hall Core again (any scenario).
+3. Confirm the server status header returns to "Online".
+4. The task's connection status will briefly show "Reconnecting…" (and possibly "disconnected" with
+   a manual Reconnect button, if the restart took longer than the automatic retry window) — this is
+   expected while the client is still trying against the process that's now gone.
+5. **Do not** expect the previously selected task to still be there — confirm it does not resume.
+6. Once a reconnect attempt reaches the new process, confirm Hall Web settles into reporting the old
+   task as unavailable ("This task no longer exists.") rather than retrying indefinitely or showing
+   stale data as if it were live.
+
+## Full workspace verification
+
+```powershell
+pnpm install
+pnpm typecheck
+pnpm lint
+pnpm format
+pnpm test
+pnpm build
+```
+
+`typecheck`/`test`/`build` run recursively across all six packages (including `apps/web`'s own
+`next build` for production output and `vitest run` for its component/hook/library test suite);
+`lint`/`format` run once across the whole repository.
+
 ## Repository Layout (current)
 
 ```
@@ -248,12 +406,14 @@ hall-of-wisdom/
     hall-runner/            @hall-of-wisdom/hall-runner - local task runner CLI
   apps/
     server/                 @hall-of-wisdom/hall-core - HTTP + WebSocket server
+    web/                    @hall-of-wisdom/web - Next.js browser dashboard
   docs/architecture/      architecture decision records
   AGENTS.md               rules for coding agents working in this repo
   CLAUDE.md                rules for Claude Code specifically
   README.md               this file
 ```
 
-Future phases will add `apps/web` (the browser UI), more `packages/` (database, source-control,
-work-management), and more `adapters/` (Claude Code, Codex, ...) as each becomes necessary. See the
-architecture documents for the full planned layout and the Phase 3/4/5 boundary decisions.
+Future phases will add more `packages/` (database, source-control, work-management), a Kanban board
+and communication features on top of `apps/web`, and more `adapters/` (Claude Code, Codex, ...) as
+each becomes necessary. See the architecture documents for the full planned layout and the Phase
+3/4/5/6 boundary decisions.

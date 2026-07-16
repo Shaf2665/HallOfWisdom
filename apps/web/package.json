@@ -1,0 +1,40 @@
+{
+  "name": "@hall-of-wisdom/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hall of Wisdom's browser dashboard: talks to Hall Core's REST + WebSocket API directly from the client, with no custom server and no proxy.",
+  "engines": {
+    "node": ">=24.11.0 <25"
+  },
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1 --port 3000",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 3000",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hall-of-wisdom/protocol": "workspace:*",
+    "next": "16.2.10",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.2",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
+    "@types/node": "^24.0.0",
+    "@types/react": "19.2.17",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint-config-next": "16.2.10",
+    "jsdom": "^25.0.1",
+    "tailwindcss": "4.3.2",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}

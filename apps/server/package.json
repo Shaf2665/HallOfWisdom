@@ -28,6 +28,7 @@
     "verify:package-entry": "node verify-package-entry.mjs"
   },
   "dependencies": {
+    "@fastify/cors": "^11.3.0",
     "@fastify/websocket": "^11.3.0",
     "@hall-of-wisdom/agent-adapter-sdk": "workspace:*",
     "@hall-of-wisdom/hall-runner": "workspace:*",

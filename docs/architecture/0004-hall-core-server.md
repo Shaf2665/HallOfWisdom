@@ -64,7 +64,54 @@ The server binds to `127.0.0.1` only (`LOCAL_ONLY_HOST` in `config/server-config
 CLI flag to change this in this phase, deliberately. Binding to `0.0.0.0` would expose Hall Core
 (and, transitively, whatever coding agent it's driving) to the local network; nothing in this
 phase's threat model calls for that, and adding it prematurely would be adding attack surface with
-no corresponding requirement.
+no corresponding requirement. This remains true as of Phase 6, which only adds a browser client on
+a _different_ local port (`apps/web`, `127.0.0.1:3000`) — see "Exact-origin CORS policy" and
+"WebSocket Origin validation" below for how Hall Core now allows exactly that one cross-origin
+caller without loosening its own bind address.
+
+## Exact-origin CORS policy
+
+As of Phase 6, `@fastify/cors` is registered in `app.ts` before every route, with an **exact
+allowlist of one origin** — `[webOrigin]`, where `webOrigin` defaults to `http://127.0.0.1:3000`
+and can be overridden with `--web-origin` (parsed and normalized by `config/web-origin.ts`, the
+same strict http(s)-only/no-credentials/no-fragment/no-path validation `parseWebOrigin()` also
+applies to WebSocket `Origin` headers — see below). This is deliberately **not** `origin: true`,
+**not** a function that reflects the request's `Origin` header back, and **not** `"*"`; `credentials`
+is never enabled. Only `GET`, `POST`, and `OPTIONS` are allowed, with `Content-Type` as the only
+allowed request header, and a 600-second preflight cache. A request with no `Origin` header at all
+(PowerShell, `curl`, any non-browser tool) is unaffected by CORS entirely — CORS is a _browser_
+enforcement mechanism; Hall Core still answers such requests normally, it just never grants a
+disallowed browser origin permission to read the response (see `app.test.ts`'s CORS test suite,
+which asserts on the presence/absence of `Access-Control-Allow-Origin` directly, not on whether the
+server "rejects" a request — it doesn't, and can't, in the HTTP sense; only the header is withheld).
+
+## WebSocket Origin validation
+
+Normal browser CORS enforcement does not apply to the WebSocket upgrade handshake, so
+`routes/task-events.ts` validates the `Origin` header itself, using the exact same
+`parseWebOrigin()`-based exact-match logic as HTTP CORS (never a substring/prefix check — an origin
+like `http://127.0.0.1:3000.evil.example` is not treated as a match for `http://127.0.0.1:3000`).
+The check runs as the very first thing in `handleTaskEventsConnection`, before the task-existence
+check and before any `EventBus` subscription is created — an unapproved origin never learns whether
+a task exists and is never given a live subscription slot. Policy: a **missing** `Origin` header is
+allowed (the normal shape of a non-browser WebSocket client); a **present, matching** origin is
+allowed; a **present, non-matching, or malformed** origin is rejected with the custom close code
+`4403` and a generic reason string (`"origin not allowed"`) that never echoes back the client's
+origin or the configured allowlist — see "WebSocket close codes" for the full table.
+
+## Safe adapter discovery
+
+`GET /api/v1/adapters` (`routes/adapters.ts`) returns a provider-neutral, deterministically sorted
+(by `adapterId`) list of every registered adapter, built from `AgentRegistry.listDescriptors()` plus
+a `detect()` call per adapter. Each adapter's `detect()` is awaited independently and wrapped in its
+own try/catch (`detectSafely()`): a throwing/rejecting `detect()` never fails the whole request — it
+just reports that one adapter as `"unavailable"`, with the real exception logged server-side only
+(`console.error`, bounded, never returned to the caller). The response DTO is a fixed allowlist of
+fields (`adapterId`, `displayName`, `adapterVersion`, `agentId`, `agentDisplayName`, `provider?`,
+`integrationLevel`, `supportedOperatingSystems`, `capabilities`, `availability`) — it never includes
+`executablePath`, `diagnosticMessage`, any other raw `AgentDetectionResult` field, an environment
+value, or the `AgentAdapter`/`AgentRegistry` instance itself. The web client is expected to render
+whatever this endpoint actually returns rather than assuming `hall.mock-agent` is the only adapter.
 
 ## Task orchestration
 
@@ -192,8 +239,9 @@ first delivers it, and the other skips it. No `setTimeout` or arbitrary delay is
 this logic; ordering is enforced structurally, not by timing. A client that sends _any_ application
 data (this endpoint is output-only, and does not accept task-control commands) is closed with code
 `1003`; an unknown task closes with `4404`; an invalid `afterSequence` closes with `4400`; a
-subscriber-limit rejection closes with `4503`. See "WebSocket backpressure policy" below for the
-fourth custom close code, `4504`.
+subscriber-limit rejection closes with `4503`; an unapproved `Origin` closes with `4403` (checked
+before any of the others — see "WebSocket Origin validation" above). See "WebSocket backpressure
+policy" below for the fifth custom close code, `4504`.
 
 The connection-handling logic (`handleTaskEventsConnection` in `routes/task-events.ts`) is factored
 out from Fastify route registration behind a minimal `TaskEventsSocket` interface (`bufferedAmount`,
@@ -314,10 +362,14 @@ authentication now would be complexity with no corresponding threat this phase a
 would couple this phase to schema and migration concerns unrelated to proving the task/event model
 itself works. Phase 9 (per `0001-initial-architecture.md`'s phase plan) is where persistence enters.
 
-## Why the web interface is deferred
+## The web interface (Phase 6)
 
-Phase 6. This phase's REST/WebSocket API is what a future web UI will call — building the UI before
-the API it depends on is stable would mean building against a moving target.
+Phase 6 built `apps/web`, the first browser client of the REST/WebSocket API this document
+describes. See `docs/architecture/0005-minimal-web-interface.md` for the web application's own
+architecture (Next.js App Router boundary, why no custom server/API routes, URL configuration,
+close-code handling on the client side, accessibility). This document (`0004`) remains the source
+of truth for Hall Core's own contract — the CORS and WebSocket-Origin sections above are the parts
+of that contract Phase 6 specifically required Hall Core to grow.
 
 ## Permanent subagent and plugin usage rules
 
@@ -330,4 +382,14 @@ did not spawn any read-only investigatory subagents — the corrections were sco
 fully read during Phase 5 and its review, so delegation would not have provided the "clear benefit"
 `CLAUDE.md`'s resource-control section requires; the design itself was checked against a stronger
 reviewer before implementation began, per this project's standing "call advisor before committing to
-an approach" discipline.
+an approach" discipline. Phase 6 launched five read-only, parallel review subagents after
+implementation (frontend-architecture, WebSocket-protocol, accessibility/UX, security, and
+documentation). Three found real, fixed issues: the WebSocket-protocol review found the client
+treating the `4403` (Origin not allowed) close code as retryable when it should never retry, and
+found the reconnect retry budget never resetting after a successful reconnection (both fixed in
+`hooks/use-task-events.ts`); the accessibility review found the task-creation form's Description
+field validation error rendering no message and no `aria-invalid`/`aria-describedby` at all (fixed
+in `components/task-create-form.tsx`, along with adding `role="alert"` to every field error so
+assistive technology is actually notified on a failed submit). The security and frontend-architecture
+reviews found no issues requiring a fix. See `docs/architecture/0005-minimal-web-interface.md` and
+the Phase 6 report for full findings.

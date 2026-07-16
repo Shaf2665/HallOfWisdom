@@ -3,6 +3,9 @@ export const DEFAULT_PORT = 4310;
 /** Hall Core binds to loopback only; there is deliberately no config option to change this in this phase. */
 export const LOCAL_ONLY_HOST = "127.0.0.1";
 
+/** The one browser origin allowed by CORS and WebSocket Origin validation, unless `--web-origin` overrides it. */
+export const DEFAULT_WEB_ORIGIN = "http://127.0.0.1:3000";
+
 export interface ServerLimits {
   readonly maxTasks: number;
   readonly maxEventsPerTask: number;

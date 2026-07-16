@@ -76,6 +76,8 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     taskStore: composition.taskStore,
     eventStore: composition.eventStore,
     eventBus: composition.eventBus,
+    registry: composition.registry,
+    webOrigin: cliOptions.webOrigin,
     limits: DEFAULT_LIMITS,
   });
 
@@ -89,7 +91,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
   }
 
   app.log.info(
-    `Hall Core is listening on http://${LOCAL_ONLY_HOST}:${String(port)} — bound to localhost only, not reachable from the network.`,
+    `Hall Core is listening on http://${LOCAL_ONLY_HOST}:${String(port)} — bound to localhost only, not reachable from the network. Approved web origin: ${cliOptions.webOrigin}.`,
   );
 
   let resolveExitCode!: (code: number) => void;

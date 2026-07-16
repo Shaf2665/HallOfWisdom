@@ -5,6 +5,7 @@ import type { NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
 import { SubscriberLimitReachedError, type EventBus } from "../events/event-bus.js";
 import type { EventStore } from "../events/event-store.js";
 import type { TaskStore } from "../tasks/task-store.js";
+import { parseWebOrigin } from "../config/web-origin.js";
 
 export interface TaskEventsRouteDeps {
   readonly taskStore: TaskStore;
@@ -12,6 +13,8 @@ export interface TaskEventsRouteDeps {
   readonly eventBus: EventBus;
   /** A client is disconnected (not silently skipped) once its `bufferedAmount` exceeds this many bytes. */
   readonly maxBufferedBytes: number;
+  /** The one browser origin allowed to open this connection; a present-but-different Origin header is rejected. */
+  readonly allowedOrigin: string;
 }
 
 interface TaskEventsParams {
@@ -44,6 +47,17 @@ export const CLOSE_CODE_SUBSCRIBER_LIMIT = 4503;
 export const CLOSE_CODE_NORMAL = 1000;
 export const CLOSE_CODE_UNSUPPORTED_DATA = 1003;
 /**
+ * Custom application close code for a WebSocket upgrade whose `Origin`
+ * header is present but not the one configured browser origin (an exact
+ * match, never a substring/prefix check). A *missing* Origin header is
+ * allowed — that's the normal shape of a non-browser client (PowerShell,
+ * a CLI tool, a test) which browsers never send a forged Origin for
+ * anyway. `4403` echoes HTTP's `403 Forbidden` into the WebSocket
+ * private-use close-code range. See "WebSocket Origin validation" in
+ * `docs/architecture/0005-minimal-web-interface.md`.
+ */
+export const CLOSE_CODE_ORIGIN_NOT_ALLOWED = 4403;
+/**
  * Custom application close code for a client that fell behind: its
  * `bufferedAmount` exceeded `maxBufferedBytes`. In the 4000-4999 private-use
  * range reserved for application-specific WebSocket close codes (RFC 6455
@@ -61,10 +75,28 @@ function parseAfterSequence(raw: string | undefined): number | undefined {
 }
 
 /**
- * Drives one WebSocket connection end to end: validates the task and
- * `afterSequence`, subscribes to live events, replays stored history, and
- * delivers events until a terminal event, a slow-client disconnect, an
- * unsupported client message, or the socket itself closing/erroring.
+ * `undefined` (no Origin header at all) is allowed — normal for non-browser
+ * clients. A present header must parse as a valid origin and match
+ * `allowedOrigin` exactly (never a substring/prefix check); anything else
+ * is rejected. Never logs or returns the allowlist itself — only whether
+ * this one request passed.
+ */
+function isOriginAllowed(originRaw: string | undefined, allowedOrigin: string): boolean {
+  if (originRaw === undefined) return true;
+  try {
+    return parseWebOrigin(originRaw) === allowedOrigin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Drives one WebSocket connection end to end: validates the request's
+ * `Origin` header first (before anything else, including whether the task
+ * exists), then the task and `afterSequence`, subscribes to live events,
+ * replays stored history, and delivers events until a terminal event, a
+ * slow-client disconnect, an unsupported client message, or the socket
+ * itself closing/erroring.
  *
  * Replay-then-live consistency (documented in full in
  * `docs/architecture/0004-hall-core-server.md` "WebSocket replay and live
@@ -87,10 +119,22 @@ function parseAfterSequence(raw: string | undefined): number | undefined {
  */
 export function handleTaskEventsConnection(
   socket: TaskEventsSocket,
-  params: { readonly taskId: string; readonly afterSequenceRaw: string | undefined },
+  params: {
+    readonly taskId: string;
+    readonly afterSequenceRaw: string | undefined;
+    readonly originRaw: string | undefined;
+  },
   deps: TaskEventsRouteDeps,
 ): void {
   const { taskId } = params;
+
+  // Checked first, and before any EventBus subscription is created: an
+  // unapproved Origin must never learn whether a task exists or reach the
+  // subscriber-limit/afterSequence logic at all.
+  if (!isOriginAllowed(params.originRaw, deps.allowedOrigin)) {
+    socket.close(CLOSE_CODE_ORIGIN_NOT_ALLOWED, "origin not allowed");
+    return;
+  }
 
   try {
     deps.taskStore.get(taskId);
@@ -175,7 +219,11 @@ export function registerTaskEventsRoute(app: FastifyInstance, deps: TaskEventsRo
     (socket: WebSocket, request) => {
       handleTaskEventsConnection(
         socket,
-        { taskId: request.params.taskId, afterSequenceRaw: request.query.afterSequence },
+        {
+          taskId: request.params.taskId,
+          afterSequenceRaw: request.query.afterSequence,
+          originRaw: request.headers.origin,
+        },
         deps,
       );
     },

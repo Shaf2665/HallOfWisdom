@@ -1,6 +1,8 @@
 import { parseArgs } from "node:util";
 import { z } from "zod";
 import { boundedNonBlankString } from "@hall-of-wisdom/protocol";
+import { DEFAULT_WEB_ORIGIN } from "./server-config.js";
+import { InvalidWebOriginError, parseWebOrigin } from "./web-origin.js";
 
 export class ServerCliError extends Error {
   constructor(message: string) {
@@ -19,6 +21,7 @@ const serverCliOptionsSchema = z
     // never see this value.
     mockScenario: boundedNonBlankString(50).optional(),
     mockStepDelayMs: z.number().int().min(0).max(5000).optional(),
+    webOrigin: boundedNonBlankString(2048).default(DEFAULT_WEB_ORIGIN),
   })
   .strict();
 
@@ -32,6 +35,19 @@ function parseOptionalInteger(raw: unknown, flagName: string): number | undefine
     throw new ServerCliError(`--${flagName} must be an integer, got "${rawText}"`);
   }
   return parsed;
+}
+
+function parseOptionalWebOrigin(raw: unknown): string | undefined {
+  if (raw === undefined) return undefined;
+  const rawText = typeof raw === "string" ? raw : JSON.stringify(raw);
+  try {
+    return parseWebOrigin(rawText);
+  } catch (error) {
+    if (error instanceof InvalidWebOriginError) {
+      throw new ServerCliError(error.message);
+    }
+    throw error;
+  }
 }
 
 /**
@@ -49,6 +65,7 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
         port: { type: "string" },
         "mock-scenario": { type: "string" },
         "mock-step-delay-ms": { type: "string" },
+        "web-origin": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -61,11 +78,13 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
 
   const { values } = raw;
 
+  const webOrigin = parseOptionalWebOrigin(values["web-origin"]);
   const candidate = {
     workspaceRoot: values["workspace-root"],
     port: parseOptionalInteger(values.port, "port"),
     mockScenario: values["mock-scenario"],
     mockStepDelayMs: parseOptionalInteger(values["mock-step-delay-ms"], "mock-step-delay-ms"),
+    ...(webOrigin === undefined ? {} : { webOrigin }),
   };
 
   const result = serverCliOptionsSchema.safeParse(candidate);
