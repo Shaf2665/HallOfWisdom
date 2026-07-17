@@ -190,6 +190,7 @@ describe("TaskStore", () => {
       store.add(makeReadyRecord("task-1"));
       const result = store.assignIfEligible(
         "task-1",
+        store.getRevision("task-1"),
         { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
         { adapterId: "hall.mock-agent", agentId: "mock-agent" },
       );
@@ -211,6 +212,7 @@ describe("TaskStore", () => {
       );
       const result = store.assignIfEligible(
         "task-1",
+        store.getRevision("task-1"),
         { status: "assigned", runId: undefined, adapterId: "hall.old-agent", agentId: "old-agent" },
         { adapterId: "hall.new-agent", agentId: "new-agent" },
       );
@@ -222,10 +224,12 @@ describe("TaskStore", () => {
     it("rejects when the live status no longer matches the expected snapshot (e.g. moved to blocked)", () => {
       const store = new TaskStore({ maxTasks: 10 });
       store.add(makeReadyRecord("task-1"));
+      const staleRevision = store.getRevision("task-1");
       store.updateStatus("task-1", "blocked");
       expect(() => {
         store.assignIfEligible(
           "task-1",
+          staleRevision,
           { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
           { adapterId: "hall.mock-agent", agentId: "mock-agent" },
         );
@@ -245,10 +249,12 @@ describe("TaskStore", () => {
           agentId: "old-agent",
         }),
       );
+      const staleRevision = store.getRevision("task-1");
       store.setRunId("task-1", "run-1");
       expect(() => {
         store.assignIfEligible(
           "task-1",
+          staleRevision,
           {
             status: "assigned",
             runId: undefined,
@@ -263,17 +269,21 @@ describe("TaskStore", () => {
     it("rejects a stale snapshot even when the live status string still matches (a different assignment already committed)", () => {
       const store = new TaskStore({ maxTasks: 10 });
       store.add(makeReadyRecord("task-1"));
+      const staleRevision = store.getRevision("task-1");
       // First commit: ready -> assigned via hall.first-agent.
       store.assignIfEligible(
         "task-1",
+        staleRevision,
         { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
         { adapterId: "hall.first-agent", agentId: "first-agent" },
       );
       // A second caller's snapshot (also taken while the task was still
-      // "ready") is now stale: the live status is "assigned", not "ready".
+      // "ready", at the same stale revision) is now stale: the live status
+      // is "assigned", not "ready", AND the revision has moved on.
       expect(() => {
         store.assignIfEligible(
           "task-1",
+          staleRevision,
           { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
           { adapterId: "hall.second-agent", agentId: "second-agent" },
         );
@@ -281,11 +291,45 @@ describe("TaskStore", () => {
       expect(store.get("task-1").adapterId).toBe("hall.first-agent");
     });
 
+    it("rejects a stale reassignment after another reassignment already committed at the same observed revision", () => {
+      // The two-concurrent-reassignment case, at the TaskStore level: both
+      // requests read the task while it was `assigned` with the same
+      // adapter and the same revision; only the first commit may win.
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(
+        makeRecord("task-1", {
+          task: makeTask("task-1", { status: "assigned" }),
+          runId: undefined,
+          adapterId: "hall.old-agent",
+          agentId: "old-agent",
+        }),
+      );
+      const revision = store.getRevision("task-1");
+      const snapshot = {
+        status: "assigned" as const,
+        runId: undefined,
+        adapterId: "hall.old-agent",
+        agentId: "old-agent",
+      };
+      store.assignIfEligible("task-1", revision, snapshot, {
+        adapterId: "hall.winner-agent",
+        agentId: "winner-agent",
+      });
+      expect(() => {
+        store.assignIfEligible("task-1", revision, snapshot, {
+          adapterId: "hall.loser-agent",
+          agentId: "loser-agent",
+        });
+      }).toThrow(TaskStateConflictError);
+      expect(store.get("task-1").adapterId).toBe("hall.winner-agent");
+    });
+
     it("rejects assignment on an unknown task", () => {
       const store = new TaskStore({ maxTasks: 10 });
       expect(() => {
         store.assignIfEligible(
           "nonexistent",
+          0,
           { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
           { adapterId: "hall.mock-agent", agentId: "mock-agent" },
         );
@@ -302,10 +346,115 @@ describe("TaskStore", () => {
       expect(() => {
         store.assignIfEligible(
           "task-1",
+          store.getRevision("task-1"),
           { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
           { adapterId: "hall.mock-agent", agentId: "mock-agent" },
         );
       }).toThrow(TaskStateConflictError);
+    });
+
+    it("rejects a stale revision even when all four snapshot fields still coincidentally match (the ABA case)", () => {
+      // The exact gap a four-field-only compare cannot catch: two real
+      // mutations (ready -> blocked -> ready) leave `status` reading
+      // "ready" again — identical to the originally observed snapshot —
+      // but the task's real history moved, and revision proves it.
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeReadyRecord("task-1"));
+      const staleRevision = store.getRevision("task-1");
+      const staleSnapshot = {
+        status: "ready" as const,
+        runId: undefined,
+        adapterId: undefined,
+        agentId: undefined,
+      };
+      store.updateStatus("task-1", "blocked");
+      store.updateStatus("task-1", "ready");
+      expect(store.get("task-1").task.status).toBe("ready");
+      expect(store.getRevision("task-1")).toBe(staleRevision + 2);
+      expect(() => {
+        store.assignIfEligible("task-1", staleRevision, staleSnapshot, {
+          adapterId: "hall.mock-agent",
+          agentId: "mock-agent",
+        });
+      }).toThrow(TaskStateConflictError);
+      // The rejected commit must not have mutated anything.
+      expect(store.get("task-1").adapterId).toBeUndefined();
+      expect(store.get("task-1").task.status).toBe("ready");
+    });
+
+    it("rejects assignment when only the expected revision is stale, independent of the four-field snapshot", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeReadyRecord("task-1"));
+      const correctSnapshot = {
+        status: "ready" as const,
+        runId: undefined,
+        adapterId: undefined,
+        agentId: undefined,
+      };
+      expect(() => {
+        store.assignIfEligible("task-1", 999, correctSnapshot, {
+          adapterId: "hall.mock-agent",
+          agentId: "mock-agent",
+        });
+      }).toThrow(TaskStateConflictError);
+    });
+  });
+
+  describe("internal task revision", () => {
+    it("a new record receives the documented initial revision (0)", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1"));
+      expect(store.getRevision("task-1")).toBe(0);
+    });
+
+    it("a successful mutation increments revision by exactly one", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "assigned" }) }));
+      expect(store.getRevision("task-1")).toBe(0);
+      store.updateStatus("task-1", "running");
+      expect(store.getRevision("task-1")).toBe(1);
+    });
+
+    it("a rejected mutation does not increment revision", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "completed" }) }));
+      expect(store.getRevision("task-1")).toBe(0);
+      expect(() => {
+        // completed -> running is not a valid transition.
+        store.updateStatus("task-1", "running");
+      }).toThrow(InvalidTaskTransitionError);
+      expect(store.getRevision("task-1")).toBe(0);
+    });
+
+    it("two successful sequential mutations produce strictly increasing revisions", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "assigned" }) }));
+      const r0 = store.getRevision("task-1");
+      store.updateStatus("task-1", "running");
+      const r1 = store.getRevision("task-1");
+      store.setStarted("task-1", "2026-07-16T00:00:00.000Z");
+      const r2 = store.getRevision("task-1");
+      expect(r1).toBeGreaterThan(r0);
+      expect(r2).toBeGreaterThan(r1);
+    });
+
+    it("revision is never a key on a public task snapshot from get() or list()", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1"));
+      const snapshot = store.get("task-1");
+      expect(Object.keys(snapshot)).not.toContain("revision");
+      expect(JSON.stringify(snapshot)).not.toContain("revision");
+      const [listed] = store.list();
+      if (!listed) throw new Error("expected one task");
+      expect(Object.keys(listed)).not.toContain("revision");
+    });
+
+    it("revision is never reset or reused after further mutations", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "assigned" }) }));
+      store.updateStatus("task-1", "running");
+      store.updateStatus("task-1", "completed");
+      expect(store.getRevision("task-1")).toBe(2);
     });
   });
 });

@@ -25,6 +25,32 @@ export class TaskStore {
   readonly #records = new Map<string, TaskRecord>();
   readonly #maxTasks: number;
 
+  /**
+   * Internal monotonic per-task revision counter (Phase 7.2), keyed by
+   * `taskId` — deliberately NOT a field on `TaskRecord`. `TaskRecord` is
+   * what `get()`/`list()`/every atomic-commit method return, and what
+   * route handlers (`routes/tasks.ts`) serialize directly as an HTTP
+   * response body — if revision lived on `TaskRecord`, keeping it out of
+   * every response would depend on every current and future route
+   * remembering to strip it, which is exactly the kind of encapsulation
+   * this is meant to avoid weakening. Keeping it in a wholly separate,
+   * never-serialized map makes "revision cannot reach the browser" true
+   * by construction, not by discipline.
+   *
+   * Starts at `0` when a task is created (`add()`) — that is not counted
+   * as a "mutation" (see `#bumpRevision`'s doc comment) — and increments
+   * by exactly `1` on every subsequent successful mutation of that task's
+   * record, across every mutating method below, never only assignment.
+   * Never decremented, never reused, never derived from a timestamp: two
+   * mutations issued within the same millisecond (a real possibility —
+   * `updateStatus` and `setStarted` are both called from the same
+   * `run.started` handler in `TaskOrchestrator#handleEvent`) still produce
+   * two distinct, strictly increasing revisions, which a timestamp cannot
+   * guarantee. See `assignIfEligible()`'s doc comment for why this is what
+   * actually closes the ABA gap a same-content four-field compare cannot.
+   */
+  readonly #revisions = new Map<string, number>();
+
   constructor(options: TaskStoreOptions) {
     this.#maxTasks = options.maxTasks;
   }
@@ -37,6 +63,7 @@ export class TaskStore {
       throw new TaskCapacityReachedError(this.#maxTasks);
     }
     this.#records.set(record.task.taskId, record);
+    this.#revisions.set(record.task.taskId, 0);
   }
 
   get(taskId: string): TaskRecord {
@@ -52,22 +79,40 @@ export class TaskStore {
     return Array.from(this.#records.values(), (record) => structuredClone(record));
   }
 
+  /**
+   * The current internal revision for a task — used by
+   * `TaskOrchestrator.assignTask()` to capture the revision it must still
+   * match when it later calls `assignIfEligible()`, and by tests to assert
+   * revision-increment behavior directly. This is a real, load-bearing
+   * part of the production assignment flow (not a test-only shim); it is
+   * simply never wired to any route, never part of `TaskRecord`, and never
+   * reachable from a request body — see the field-level doc comment on
+   * `#revisions` above for why revision lives here and not on the record.
+   */
+  getRevision(taskId: string): number {
+    this.#mustGetLive(taskId);
+    return this.#revisions.get(taskId) ?? 0;
+  }
+
   updateStatus(taskId: string, nextStatus: TaskStatus): void {
     const record = this.#mustGetLive(taskId);
     if (!isValidTaskTransition(record.task.status, nextStatus)) {
       throw new InvalidTaskTransitionError(taskId, record.task.status, nextStatus);
     }
     record.task = { ...record.task, status: nextStatus, updatedAt: new Date().toISOString() };
+    this.#bumpRevision(taskId);
   }
 
   recordEventMeta(taskId: string, sequence: number): void {
     const record = this.#mustGetLive(taskId);
     record.eventCount += 1;
     record.lastSequence = sequence;
+    this.#bumpRevision(taskId);
   }
 
   setStarted(taskId: string, startedAt: string): void {
     this.#mustGetLive(taskId).startedAt = startedAt;
+    this.#bumpRevision(taskId);
   }
 
   setCompleted(
@@ -80,51 +125,67 @@ export class TaskStore {
     record.completedAt = completedAt;
     record.terminalEventType = terminalEventType;
     record.failure = failure;
+    this.#bumpRevision(taskId);
   }
 
   setCancellationRequested(taskId: string): void {
     this.#mustGetLive(taskId).cancellationRequested = true;
+    this.#bumpRevision(taskId);
   }
 
   /**
    * Atomically re-validates and commits an assignment against the task's
    * CURRENT live state — this is what actually closes the check-then-act
    * race described in `docs/architecture/0006-kanban-board.md` ("Assignment
-   * concurrency policy"): `TaskOrchestrator.assignTask()` reads a snapshot,
-   * `await`s `adapter.detect()`, and only then calls this method with no
-   * further `await` before it runs. JavaScript's single-threaded execution
-   * means nothing else can run between this method's read and write, so
-   * whatever eligibility this method observes is still true at the moment
-   * it writes.
+   * concurrency policy"): `TaskOrchestrator.assignTask()` reads a snapshot
+   * (including the task's revision via `getRevision()`), `await`s
+   * `adapter.detect()`, and only then calls this method with no further
+   * `await` before it runs. JavaScript's single-threaded execution means
+   * nothing else can run between this method's read and write, so whatever
+   * eligibility this method observes is still true at the moment it
+   * writes.
    *
-   * `expected` is the exact eligibility-relevant snapshot the caller
-   * observed and was authorized to act on (`status`, `runId`, `adapterId`,
-   * `agentId` — the same four fields `assignTask()` read before its
-   * `await`). The commit proceeds only if:
+   * `expectedRevision` is the PRIMARY concurrency token and the only check
+   * that actually closes the ABA gap: a same-shape four-field compare
+   * (`status`/`runId`/`adapterId`/`agentId`) cannot distinguish "nothing
+   * changed" from "this task went Ready -> Blocked -> Ready while I was
+   * awaiting `adapter.detect()`" — both leave those four fields reading
+   * exactly as they did originally, but the task's real history differs,
+   * and a manual transition or another assignment that happened in
+   * between must not be silently overwritten. Revision cannot repeat or
+   * go backwards (see the `#revisions` field doc comment), so any mutation
+   * at all in between — even a round trip back to an outwardly identical
+   * status — makes `expectedRevision` stale and this call rejects.
+   *
+   * `expected` (the same four-field snapshot Phase 7.1 introduced) is kept
+   * as secondary defense-in-depth, per the Phase 7.2 request: revision
+   * alone is sufficient and would already catch every case tested here,
+   * but comparing the fields a client-visible response is actually built
+   * from costs nothing extra and fails a little more descriptively if the
+   * two checks were ever to disagree (which would itself indicate a bug
+   * worth surfacing loudly, not silently).
+   *
+   * The commit proceeds only if:
    *
    * 1. The task still exists (`#mustGetLive` throws `TaskNotFoundError`
    *    otherwise).
-   * 2. The live record's `status`/`runId`/`adapterId`/`agentId` still
-   *    exactly match `expected` — i.e. nothing about assignment eligibility
-   *    changed while this caller was awaiting `adapter.detect()`.
-   * 3. The live status is independently still `"ready"` (first assignment)
+   * 2. The live revision still equals `expectedRevision`.
+   * 3. The live record's `status`/`runId`/`adapterId`/`agentId` still
+   *    exactly match `expected`.
+   * 4. The live status is independently still `"ready"` (first assignment)
    *    or `"assigned"` with no run (pre-start reassignment) — re-derived
    *    from the live record, not trusted from the caller, so this method
    *    is self-contained and correct even if a future caller skips
    *    `assignTask()`'s own fast-fail pre-check.
    *
-   * Comparing the full four-field snapshot (not just `status`) is
-   * deliberate: it also closes the narrower race between two concurrent
-   * *reassignments* of an already-assigned, not-yet-started task (the
-   * second reassignment's `expected.adapterId`/`agentId` would no longer
-   * match after the first one committed), not only the Ready -> Assigned
-   * race the security review originally found.
-   *
    * Any mismatch throws `TaskStateConflictError` (409, reused rather than
-   * a new dedicated code — see the ADR) — never last-write-wins.
+   * a new dedicated code — see the ADR) — never last-write-wins. On
+   * success, the revision is bumped exactly once, same as every other
+   * mutating method.
    */
   assignIfEligible(
     taskId: string,
+    expectedRevision: number,
     expected: {
       readonly status: TaskStatus;
       readonly runId: string | undefined;
@@ -134,10 +195,12 @@ export class TaskStore {
     assignment: { readonly adapterId: string; readonly agentId: string },
   ): TaskRecord {
     const record = this.#mustGetLive(taskId);
+    const currentRevision = this.#revisions.get(taskId) ?? 0;
 
     const isFirstAssignment = record.task.status === "ready";
     const isReassignment = record.task.status === "assigned" && record.runId === undefined;
     const stillMatchesExpectation =
+      currentRevision === expectedRevision &&
       record.task.status === expected.status &&
       record.runId === expected.runId &&
       record.adapterId === expected.adapterId &&
@@ -153,6 +216,7 @@ export class TaskStore {
     record.task = isFirstAssignment
       ? { ...record.task, status: "assigned", updatedAt: now }
       : { ...record.task, updatedAt: now };
+    this.#bumpRevision(taskId);
 
     return structuredClone(record);
   }
@@ -162,6 +226,7 @@ export class TaskStore {
     const record = this.#mustGetLive(taskId);
     record.adapterId = undefined;
     record.agentId = undefined;
+    this.#bumpRevision(taskId);
   }
 
   /**
@@ -177,11 +242,13 @@ export class TaskStore {
       throw new TaskStateConflictError(taskId, record.task.status, "started");
     }
     record.runId = runId;
+    this.#bumpRevision(taskId);
   }
 
   /** Rolls back a `setRunId()` claim when starting execution fails before any event was ever produced. */
   clearRunId(taskId: string): void {
     this.#mustGetLive(taskId).runId = undefined;
+    this.#bumpRevision(taskId);
   }
 
   #mustGetLive(taskId: string): TaskRecord {
@@ -190,5 +257,18 @@ export class TaskStore {
       throw new TaskNotFoundError(taskId);
     }
     return record;
+  }
+
+  /**
+   * Bumps `taskId`'s revision by exactly `1`. Called once, at the end,
+   * from every method above that actually wrote to a live record — never
+   * from a method that only reads, and never before the validity checks
+   * that might still cause that method to throw instead (a rejected
+   * mutation must not consume a revision number, or a legitimate later
+   * caller's `expectedRevision` could be invalidated by a mutation that
+   * never actually happened).
+   */
+  #bumpRevision(taskId: string): void {
+    this.#revisions.set(taskId, (this.#revisions.get(taskId) ?? 0) + 1);
   }
 }

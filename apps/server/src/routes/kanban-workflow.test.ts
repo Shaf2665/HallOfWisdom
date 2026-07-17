@@ -657,6 +657,120 @@ describe("Kanban planning workflow (Phase 7)", () => {
       expect(record.eventCount).toBe(0);
       await app.close();
     });
+
+    it("an ABA sequence (Ready -> Blocked -> Ready) defeats a stale assignment even though the four-field snapshot matches again (Phase 7.2)", async () => {
+      // This is the exact gap Phase 7.1's four-field compare-and-set could
+      // not close: after a Ready -> Blocked -> Ready round trip, `status`
+      // reads "ready" again — identical to what the pending assignment
+      // originally observed — but the task's real history moved twice.
+      // Only the internal revision counter (bumped by both transitions)
+      // can tell the two situations apart. This test must fail against a
+      // four-field-only implementation and pass with revision checking.
+      const { app, harness } = await buildTestApp({ workspaceRoot: tempRoot });
+      const taskId = await createReadyTask(app);
+      const gated = createGatedAdapter();
+      harness.registry.register(gated.adapter);
+
+      const assignPromise = app.inject({
+        method: "POST",
+        url: `/api/v1/tasks/${taskId}/assign`,
+        payload: { adapterId: "hall.gated-agent" },
+      });
+      await gated.controller.waitForParked(1);
+
+      const toBlocked = await app.inject({
+        method: "POST",
+        url: `/api/v1/tasks/${taskId}/transition`,
+        payload: { targetStatus: "blocked" },
+      });
+      expect(toBlocked.statusCode).toBe(200);
+      const backToReady = await app.inject({
+        method: "POST",
+        url: `/api/v1/tasks/${taskId}/transition`,
+        payload: { targetStatus: "ready" },
+      });
+      expect(backToReady.statusCode).toBe(200);
+      expect(backToReady.json<TaskRecordJson>().task.status).toBe("ready");
+
+      gated.controller.release();
+      const assignResponse = await assignPromise;
+
+      expect(assignResponse.statusCode).toBe(409);
+      expect(assignResponse.json<ErrorResponseJson>().error.code).toBe("TASK_STATE_CONFLICT");
+      const record = harness.taskStore.get(taskId);
+      expect(record.task.status).toBe("ready");
+      expect(record.adapterId).toBeUndefined();
+      expect(record.runId).toBeUndefined();
+      expect(record.eventCount).toBe(0);
+      await app.close();
+    });
+
+    it("an ABA sequence within the Assigned lifecycle (assigned -> ready -> reassigned to the same adapter) defeats a stale reassignment (Phase 7.2)", async () => {
+      // A racer begins reassigning an already-assigned task via a gated
+      // adapter; while its detect() is parked, the task is moved away
+      // (assigned -> ready, which clears the assignment) and then
+      // reassigned back to the SAME original adapter through a separate,
+      // ordinary (non-gated) request — restoring status/runId/adapterId/
+      // agentId to exactly what the racer originally observed. Only
+      // revision distinguishes "nothing happened" from "this happened
+      // twice."
+      const { app, harness } = await buildTestApp({ workspaceRoot: tempRoot });
+      const taskId = await createAssignedTask(app); // assigned to hall.mock-agent
+      const gated = createGatedAdapter();
+      harness.registry.register(gated.adapter);
+
+      const racerPromise = app.inject({
+        method: "POST",
+        url: `/api/v1/tasks/${taskId}/assign`,
+        payload: { adapterId: "hall.gated-agent" },
+      });
+      await gated.controller.waitForParked(1);
+
+      const toReady = await app.inject({
+        method: "POST",
+        url: `/api/v1/tasks/${taskId}/transition`,
+        payload: { targetStatus: "ready" },
+      });
+      expect(toReady.statusCode).toBe(200);
+      expect(toReady.json<TaskRecordJson>().adapterId).toBeUndefined();
+
+      const reassigned = await app.inject({
+        method: "POST",
+        url: `/api/v1/tasks/${taskId}/assign`,
+        payload: { adapterId: "hall.mock-agent" },
+      });
+      expect(reassigned.statusCode).toBe(200);
+      const reassignedBody = reassigned.json<TaskRecordJson>();
+      expect(reassignedBody.task.status).toBe("assigned");
+      expect(reassignedBody.adapterId).toBe("hall.mock-agent");
+
+      gated.controller.release();
+      const racerResponse = await racerPromise;
+
+      expect(racerResponse.statusCode).toBe(409);
+      const record = harness.taskStore.get(taskId);
+      expect(record.task.status).toBe("assigned");
+      // The winner's adapter (from the ordinary reassignment above) must
+      // survive untouched — the stale racer must never have committed.
+      expect(record.adapterId).toBe("hall.mock-agent");
+      expect(record.runId).toBeUndefined();
+      await app.close();
+    });
+
+    it("never returns an internal revision field in the JSON response body", async () => {
+      const { app } = await buildTestApp({ workspaceRoot: tempRoot });
+      const taskId = await createReadyTask(app);
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/v1/tasks/${taskId}/assign`,
+        payload: { adapterId: "hall.mock-agent" },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.body.toLowerCase()).not.toContain("revision");
+      const listResponse = await app.inject({ method: "GET", url: "/api/v1/tasks" });
+      expect(listResponse.body.toLowerCase()).not.toContain("revision");
+      await app.close();
+    });
   });
 
   describe("starting an assigned task", () => {

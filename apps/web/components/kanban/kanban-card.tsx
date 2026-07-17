@@ -51,6 +51,19 @@ export function KanbanCard({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const actionsButtonRef = useRef<HTMLButtonElement>(null);
   const titleButtonRef = useRef<HTMLButtonElement>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    // Entering either confirmation state swaps the Actions/Start button
+    // out for a "Confirm"/"Cancel" pair in the same render — the element
+    // that was focused (Start task, or the Cancel-task menu item) is gone
+    // from the DOM by the time this commits, and nothing else claims
+    // focus on its own, so it falls to <body>. Claim it here instead,
+    // same pattern as the mount-focus effect below.
+    if (localState === "confirming-start" || localState === "confirming-cancel") {
+      confirmButtonRef.current?.focus();
+    }
+  }, [localState]);
 
   useEffect(() => {
     if (!shouldFocusOnMount) return;
@@ -90,6 +103,20 @@ export function KanbanCard({
   async function handleAction(action: CardAction): Promise<void> {
     setErrorMessage(null);
     if (action.kind === "assign") {
+      // Move focus to the stable, always-rendered "Actions" trigger BEFORE
+      // opening the dialog, synchronously within this event handler — not
+      // after. The element actually focused right now is the "Assign
+      // agent" popover item button, which unmounts (MoveMenu closes) in
+      // the same React commit that mounts AssignDialog; if we let that
+      // commit happen first, Dialog's own mount effect captures whatever
+      // `document.activeElement` happens to be by then (often already
+      // reverted to <body>, since the item button is gone), and its
+      // close/Escape handler restores focus to that already-detached
+      // reference — a silent no-op that drops focus to <body>. Refocusing
+      // the trigger here, before any state update is flushed, guarantees
+      // Dialog captures a real, still-mounted element that will still be
+      // there when the dialog closes.
+      actionsButtonRef.current?.focus();
       onOpenAssign(record);
       return;
     }
@@ -225,6 +252,7 @@ export function KanbanCard({
                   Start this task with the assigned agent?
                 </span>
                 <button
+                  ref={confirmButtonRef}
                   type="button"
                   disabled={busy}
                   onClick={() => {
@@ -263,6 +291,7 @@ export function KanbanCard({
             <span className="flex items-center gap-2">
               <span className="text-xs text-stone-600 dark:text-stone-300">Cancel this task?</span>
               <button
+                ref={confirmButtonRef}
                 type="button"
                 disabled={busy}
                 onClick={() => {

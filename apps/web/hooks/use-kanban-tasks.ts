@@ -14,8 +14,17 @@ export interface UseKanbanTasksResult {
   readonly state: KanbanTasksState;
   /** A bounded, safe warning shown alongside the last-known task list — never clears existing cards. */
   readonly warning: string | null;
-  /** Re-fetches immediately and resets the poll schedule. Call after every transition/assignment/start/cancellation. */
-  readonly refresh: () => void;
+  /**
+   * Re-fetches immediately and resets the poll schedule. Call after every
+   * transition/assignment/start/cancellation. Returns a promise that
+   * resolves once this fetch has settled (successfully or not) and, if it
+   * was still the current generation, `tasks` has been updated — callers
+   * that need to react to the task's new column (see `KanbanBoard`'s
+   * `lastActedOnTaskId` focus handoff) must `await` this rather than
+   * treating it as fire-and-forget, or they risk reading/acting on stale
+   * `tasks` state.
+   */
+  readonly refresh: () => Promise<void>;
 }
 
 /**
@@ -36,7 +45,7 @@ export function useKanbanTasks(baseUrl: string): UseKanbanTasksResult {
   const generationRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const loadRef = useRef<() => void>(() => undefined);
+  const loadRef = useRef<() => Promise<void>>(() => Promise.resolve());
 
   const clearPollTimer = useCallback(() => {
     if (pollTimerRef.current !== null) {
@@ -56,11 +65,11 @@ export function useKanbanTasks(baseUrl: string): UseKanbanTasksResult {
     const delay = hasActiveTask ? ACTIVE_POLL_INTERVAL_MS : IDLE_POLL_INTERVAL_MS;
     pollTimerRef.current = setTimeout(() => {
       pollTimerRef.current = null;
-      loadRef.current();
+      void loadRef.current();
     }, delay);
   }, [clearPollTimer]);
 
-  const load = useCallback(() => {
+  const load = useCallback((): Promise<void> => {
     // Superseding an in-flight request (rather than letting two overlap)
     // is what "no overlapping list requests" and "stale responses are
     // ignored" both reduce to: only the request tied to the current
@@ -70,7 +79,7 @@ export function useKanbanTasks(baseUrl: string): UseKanbanTasksResult {
     abortRef.current = controller;
     const generation = ++generationRef.current;
 
-    listTasks(baseUrl, { signal: controller.signal })
+    return listTasks(baseUrl, { signal: controller.signal })
       .then((response) => {
         if (generationRef.current !== generation) return;
         tasksRef.current = response.tasks;
@@ -96,14 +105,14 @@ export function useKanbanTasks(baseUrl: string): UseKanbanTasksResult {
   }, [load]);
 
   useEffect(() => {
-    load();
+    void load();
 
     function handleVisibilityOrFocus(): void {
       if (document.visibilityState === "hidden") {
         clearPollTimer();
         return;
       }
-      loadRef.current();
+      void loadRef.current();
     }
 
     document.addEventListener("visibilitychange", handleVisibilityOrFocus);

@@ -1,6 +1,7 @@
 # 0006 — Kanban Board
 
-Status: Draft (Phase 7; assignment concurrency hardened in Phase 7.1).
+Status: Draft (Phase 7; assignment concurrency hardened in Phase 7.1; ABA gap closed with an internal
+task revision in Phase 7.2).
 
 ## Context
 
@@ -166,6 +167,58 @@ the fact that Node never preempts synchronous code. See `apps/server/src/tasks/t
 deterministic tests (a gated fake adapter holds `detect()` open so a test can force two requests to
 overlap on demand, rather than relying on incidental Promise-microtask ordering).
 
+## Closing the ABA gap: internal task revision (Phase 7.2)
+
+The Phase 7.1 four-field compare (`status`/`runId`/`adapterId`/`agentId`) closes every _direct_
+stale-write race, but not an **ABA** sequence: a task can go `ready -> blocked -> ready` (two real,
+legitimate transitions) while an assignment request's `detect()` call is still pending, and all four
+fields end up reading exactly what the request originally observed — `status: "ready"`, no run, no
+adapter — even though the task's real history moved twice in between. A same-shape snapshot compare
+structurally cannot tell "nothing happened" apart from "this happened and then un-happened"; only
+something that strictly increases on every mutation, and never repeats, can.
+
+**The fix — an internal monotonic revision.** `TaskStore` now keeps a private `taskId -> revision`
+map, entirely separate from `TaskRecord`:
+
+- A new task's revision starts at `0` when `add()` creates it (not counted as a "mutation").
+- Every subsequent successful mutation of that task's record — `updateStatus`, `recordEventMeta`,
+  `setStarted`, `setCompleted`, `setCancellationRequested`, `assignIfEligible`, `clearAssignment`,
+  `setRunId`, `clearRunId` — increments it by exactly `1`, always as the last step, always after
+  whatever validity check that method performs (a rejected mutation, e.g. an invalid transition,
+  never increments revision, since nothing actually happened).
+- It is never decremented, never reused, and deliberately **not** derived from `updatedAt` or any
+  timestamp: two mutations can legitimately land in the same millisecond (`updateStatus("running")`
+  and `setStarted(...)` are both called back-to-back from the same `run.started` handler in
+  `TaskOrchestrator#handleEvent`), and a wall-clock value cannot promise two such mutations produce
+  two distinguishable tokens the way a counter does.
+- It is exposed only through `TaskStore.getRevision(taskId)` — never added to `TaskRecord`, never
+  touched by any route handler, never present in any HTTP response body, and never read from request
+  input. Keeping it out of `TaskRecord` entirely (rather than adding a field and trusting every route
+  to strip it before responding) is what makes "revision cannot reach the browser" true by
+  construction, not by discipline that could later be forgotten by a new endpoint.
+
+**Revision-aware commit.** `TaskOrchestrator.assignTask()` now captures `taskStore.getRevision(taskId)`
+in the same synchronous block as its existing snapshot read, before `await adapter.detect()`.
+`TaskStore.assignIfEligible()`'s signature grew an `expectedRevision` parameter, checked first and
+treated as the _primary_ concurrency token; the four-field snapshot is kept as secondary defense in
+depth (redundant with revision for every case tested here, but cheap to keep, and a disagreement
+between the two would itself indicate a bug worth surfacing loudly rather than silently). Any mismatch
+— revision or snapshot — still throws the same `409 TASK_STATE_CONFLICT` used since Phase 7.1; no new
+error code, no change to the client-visible contract.
+
+**What this deliberately is not**: `updatedAt` is not the token (timestamps can collide and are
+observable/predictable in a way a private counter isn't); there is no external locking package, no
+database-style row lock, and no client-supplied version — the browser has no way to read, submit, or
+influence a revision number, since it never appears in any response this server sends. This remains a
+plain, in-process optimistic-concurrency compare-and-set, extended from four compared fields to five
+(revision plus the original four), still exploiting the same single-threaded, no-`await`-in-between
+guarantee Phase 7.1 established.
+
+See `apps/server/src/tasks/task-store.ts` (the `#revisions` field and `getRevision()`/`#bumpRevision()`
+doc comments) and `apps/server/src/routes/kanban-workflow.test.ts`'s two "ABA sequence" tests — one
+for a Ready round trip, one for a same-adapter reassignment round trip — both constructed to fail
+against a revision-less, four-field-only implementation and pass with revision checking.
+
 ## Why drag cannot start agent execution automatically
 
 Dragging a card onto the Assigned column from Ready opens the assignment dialog rather than
@@ -212,6 +265,79 @@ parent change even with a stable `key`. The board tracks which `taskId` was just
 (`lastActedOnTaskId`) and passes that down; the newly mounted card (or, on failure, the same
 surviving instance) claims focus on its own Actions button once rendered. See the doc comments on
 `KanbanCard`'s `shouldFocusOnMount` prop for the full reasoning.
+
+### Real-browser bugs found in Phase 7.2, invisible to component tests
+
+Phase 7.2's mandated genuine Playwright verification (not jsdom) found and fixed four real defects
+that every prior automated test — including the accessibility-focused ones — had missed, because
+each depends on actual browser layout, paint, or hit-testing that jsdom never performs:
+
+1. **`lastActedOnTaskId` was set before the refetch that makes it meaningful.** `handleMove`/
+   `handleStart`/`handleCancel`/`handleAssigned` called `refresh()` (fire-and-forget) and
+   `setLastActedOnTaskId(taskId)` together in the same `finally` block. Because `refresh()` is
+   asynchronous, the flag change was observed first by the _still-mounted, soon-to-be-unmounted_
+   card instance in its _old_ column (a plain prop update, not a mount), which claimed focus and
+   immediately cleared the flag via `onFocusHandled()` — before the real column change had even
+   landed. The genuinely new instance in the new column then mounted with the flag already `false`
+   and never claimed focus at all, dropping it to `<body>`. **Fix**: `useKanbanTasks`'s `refresh()`
+   now returns a `Promise<void>` that resolves once `tasks` has actually been updated, and every
+   caller `await`s it before setting `lastActedOnTaskId` — so the flag is only ever set once the DOM
+   already reflects the new column, and only the correct (new, or on-failure surviving) instance can
+   observe it.
+2. **Entering a confirmation state (`confirming-start`/`confirming-cancel`) unmounts the button that
+   was focused, with nothing claiming the new one.** Clicking "Start task" or the "Cancel task" menu
+   item swaps that control out for a "Confirm"/"Cancel" pair in the same render; the just-clicked
+   element is gone from the DOM by the time it commits, and focus fell to `<body>`. **Fix**: a
+   `confirmButtonRef` + effect in `KanbanCard` claims focus on the "Confirm" button the moment either
+   confirmation state is entered.
+3. **`AssignDialog`'s focus-restore-on-close target could already be gone.** `Dialog` captures
+   `document.activeElement` on mount to restore it later, but the "Assign agent" _menu item_ that
+   opened the dialog is itself removed from the DOM in the same commit that mounts the dialog
+   (`MoveMenu` closes its popover), so the captured reference was frequently already detached —
+   restoring focus to it on close/Escape was then a silent no-op, dropping focus to `<body>`. **Fix**:
+   `KanbanCard`'s `handleAction` now explicitly refocuses the stable, always-rendered "Actions"
+   trigger button _synchronously, before_ calling `onOpenAssign` — so `Dialog` always captures a real,
+   still-attached element to restore focus to.
+4. **`MoveMenu`'s open popover could be clipped and pointer-unreachable.** Each Kanban column's card
+   list (`KanbanColumn`'s `<ul>`) is `overflow-y-auto` so long columns scroll. `MoveMenu` originally
+   rendered its popover as a plain `position: absolute` child of the trigger; CSS's overflow-clipping
+   rule applies to absolutely-positioned descendants of a `overflow-y-auto` (as well as `overflow-x-auto`)
+   ancestor exactly the same as normal-flow ones. Whenever a card sat near the bottom of a scrolled
+   column, the popover's own action buttons rendered in a region the `<ul>` clipped — confirmed live via
+   `document.elementFromPoint()` landing on the column's `<section>` instead of the button, meaning a
+   real mouse/touch user genuinely could not click "Cancel task"/"Move to Ready"/etc. in that
+   position, while keyboard Tab still reached the (invisible) button — exactly why this escaped every
+   prior review. **Fix**: `MoveMenu` now renders its open popover through a `react-dom` portal into
+   `document.body`, `position: fixed`, positioned from the trigger's own `getBoundingClientRect()` —
+   fully escaping the column's clipping box — and closes on any scroll or resize while open rather
+   than tracking a moving target.
+
+Only (1) was genuinely unreachable from `@testing-library/react` + jsdom: it depends on the _relative
+timing_ of a real async fetch racing a real cross-component-identity remount (the stale instance
+observing the flag before the new instance mounts), a real-event-loop race that jsdom's synchronous test
+harness doesn't reproduce the same way a browser does. (2), (3), and (4) turned out to be reachable
+after all — each is a deterministic consequence of a single render/commit, not a timing race — and each
+now has a direct jsdom regression test added after the fact: `kanban-card.test.tsx`'s "moves focus to
+the Confirm button when entering the start/cancel-confirmation state" tests cover (2), "refocuses the
+stable Actions trigger before opening the assign dialog" covers (3), and "renders the open Move menu
+popover through a portal into document.body" covers (4)'s DOM placement (with a companion test described
+below guarding the keyboard-reachability regression the portal fix itself introduced). The original
+claim that all four were only reachable via genuine browser testing was an overstatement for (2)–(4):
+genuine Playwright verification is still what actually _found_ all four (component tests had reported
+this area as covered before Phase 7.2's browser pass), but jsdom tests were achievable in hindsight and
+are what now guard against silent regression. Only (1) remains a case where real-browser verification is
+the only practical way to both find and guard the bug.
+
+**A fifth bug, introduced by the fix for (4) and found only by re-doing the live keyboard pass after
+making that fix:** portaling `MoveMenu`'s popover to `document.body` moved it out of DOM order relative
+to its trigger button. Sequential Tab navigation follows DOM order, not visual position, so once the
+popover was portaled, Tab from "Actions" no longer landed inside the menu — it fell through to whatever
+came next in `document.body` order (typically the next card), leaving the menu keyboard-unreachable even
+though every earlier keyboard verification pass (done before the portal fix existed) had found the
+pre-portal, DOM-adjacent version fully Tab-reachable. **Fix**: `MoveMenu` now moves focus to its first
+action button in a passive effect the moment it opens. This is a direct, sequencing-only consequence of
+render order, not a timing race, so it too has a jsdom regression test ("moves focus to the first menu
+item when the portaled Move menu opens").
 
 ## dnd-kit boundary
 

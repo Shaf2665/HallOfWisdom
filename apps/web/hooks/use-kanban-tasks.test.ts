@@ -152,7 +152,7 @@ describe("useKanbanTasks", () => {
     const callsBefore = vi.mocked(apiClient.listTasks).mock.calls.length;
 
     act(() => {
-      result.current.refresh();
+      void result.current.refresh();
     });
     await flush();
     expect(apiClient.listTasks).toHaveBeenCalledTimes(callsBefore + 1);
@@ -172,7 +172,7 @@ describe("useKanbanTasks", () => {
     });
     vi.mocked(apiClient.listTasks).mockReturnValueOnce(stale);
     act(() => {
-      result.current.refresh();
+      void result.current.refresh();
     });
     await flush();
     // The stale request is still pending — a second, newer refresh supersedes it.
@@ -180,7 +180,7 @@ describe("useKanbanTasks", () => {
       tasks: [makeTask({ taskId: "task-new" })],
     });
     act(() => {
-      result.current.refresh();
+      void result.current.refresh();
     });
     await flush();
     expect(result.current.tasks.map((t) => t.task.taskId)).toEqual(["task-new"]);
@@ -204,7 +204,7 @@ describe("useKanbanTasks", () => {
       new apiClient.ApiClientError("NETWORK_ERROR", "offline"),
     );
     act(() => {
-      result.current.refresh();
+      void result.current.refresh();
     });
     await flush();
 

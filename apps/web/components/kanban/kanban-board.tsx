@@ -115,8 +115,20 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
           setAnnouncement(safeMessage(error));
           throw error;
         } finally {
+          // `refresh()` must be awaited BEFORE `lastActedOnTaskId` is set —
+          // see the doc comment on that state above. Setting it first would
+          // let the still-mounted, soon-to-be-unmounted OLD-column card
+          // instance observe `shouldFocusOnMount: true` on a plain prop
+          // update (not a mount) and immediately consume/clear it via
+          // `onFocusHandled()`, before `tasks` ever reflects the new
+          // column — leaving the real, freshly-mounted NEW-column instance
+          // with `shouldFocusOnMount: false` on its first render, and focus
+          // falling to <body>. Awaiting first ensures `tasks` (and thus
+          // which column's <ul> this card lives under) is already correct
+          // by the time the flag is set, so only the right instance ever
+          // observes it.
+          await refresh();
           setLastActedOnTaskId(taskId);
-          refresh();
         }
       });
     },
@@ -133,8 +145,10 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
           setAnnouncement(safeMessage(error));
           throw error;
         } finally {
+          // See handleMove's comment above for why refresh() is awaited
+          // before the focus flag is set.
+          await refresh();
           setLastActedOnTaskId(taskId);
-          refresh();
         }
       });
     },
@@ -155,19 +169,23 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
           setAnnouncement(safeMessage(error));
           throw error;
         } finally {
+          // See handleMove's comment above for why refresh() is awaited
+          // before the focus flag is set.
+          await refresh();
           setLastActedOnTaskId(record.task.taskId);
-          refresh();
         }
       });
     },
     [baseUrl, refresh],
   );
 
-  function handleAssigned(updated: TaskRecord): void {
+  async function handleAssigned(updated: TaskRecord): Promise<void> {
     setAssigningRecord(null);
     setAnnouncement(`${updated.task.title} assigned.`);
+    // See handleMove's comment above for why refresh() is awaited before
+    // the focus flag is set.
+    await refresh();
     setLastActedOnTaskId(updated.task.taskId);
-    refresh();
   }
 
   // Memoized so its identity stays stable across the board's frequent
@@ -182,7 +200,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
 
   function handleCreated(created: CreateTaskResponse): void {
     setAnnouncement(`${created.task.title} added to Backlog.`);
-    refresh();
+    void refresh();
   }
 
   function handleDragStart(event: DragStartEvent): void {
@@ -258,7 +276,9 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
         <BacklogTaskForm baseUrl={baseUrl} onCreated={handleCreated} />
         <button
           type="button"
-          onClick={refresh}
+          onClick={() => {
+            void refresh();
+          }}
           className="rounded border border-stone-300 px-3 py-1.5 text-sm font-medium text-stone-700 hover:bg-stone-100 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
         >
           Refresh
@@ -318,7 +338,9 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
         <AssignDialog
           baseUrl={baseUrl}
           record={assigningRecord}
-          onAssigned={handleAssigned}
+          onAssigned={(updated) => {
+            void handleAssigned(updated);
+          }}
           onClose={handleCloseAssign}
         />
       ) : null}

@@ -1,6 +1,7 @@
 # 0004 — Hall Core Server
 
-Status: Draft (Phase 5, hardened in Phase 5.1; extended in Phase 6 and Phase 7).
+Status: Draft (Phase 5, hardened in Phase 5.1; extended in Phase 6 and Phase 7; assignment
+concurrency hardened in Phase 7.1 and 7.2).
 
 ## Context
 
@@ -348,9 +349,17 @@ requests for the same task can never both begin a run.
 with no further `await` — re-validating the exact snapshot it read against the task's live state
 before writing. Two concurrent `POST /assign` requests for the same task, or an assignment racing a
 manual transition or cancellation, can never both succeed or leave mixed state; exactly one commits
-and every other caller receives `409 TASK_STATE_CONFLICT`. See
-`docs/architecture/0006-kanban-board.md`, "Assignment concurrency policy (Phase 7.1)", for the full
-design and the races it closes.
+and every other caller receives `409 TASK_STATE_CONFLICT`.
+
+A same-shape snapshot compare alone cannot detect an ABA sequence (the task moves away from and back
+to an outwardly identical state while a request is still `await`ing `adapter.detect()`), so Phase 7.2
+added a private, monotonically-increasing per-task revision counter to `TaskStore` — never part of
+`TaskRecord`, never serialized in any response, never readable from or influenced by client input —
+that every successful mutating `TaskStore` method bumps exactly once. `assignIfEligible()` now checks
+the caller's expected revision first, as the primary concurrency token, with the original four-field
+snapshot kept as secondary defense in depth. See `docs/architecture/0006-kanban-board.md`, "Assignment
+concurrency policy (Phase 7.1)" and "Closing the ABA gap: internal task revision (Phase 7.2)", for the
+full design and the races each phase closes.
 
 ## Graceful shutdown
 

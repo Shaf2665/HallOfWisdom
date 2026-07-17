@@ -125,21 +125,28 @@ export class TaskOrchestrator {
    * I/O. It is NOT what makes this method race-safe — `assignTask()` reads
    * a snapshot, then `await`s, and Node can run arbitrary other code
    * (another request's handler) during that `await`. The snapshot taken
-   * here could be stale by the time `detect()` resolves.
+   * here — including `taskStore.getRevision(taskId)` — could be stale by
+   * the time `detect()` resolves.
    *
-   * `TaskStore.assignIfEligible()` is what actually closes that race: it
-   * re-validates the exact same four-field snapshot (`status`, `runId`,
-   * `adapterId`, `agentId`) against the task's CURRENT live state and
-   * applies the assignment in one synchronous call with no `await` in
-   * between — see its own doc comment for the full policy. If the task's
-   * lifecycle moved on while this request was awaiting `adapter.detect()`
-   * (blocked, cancelled, started, or already committed by a racing
-   * assignment), this throws `TaskStateConflictError` (409) instead of
-   * silently overwriting whatever the task's current state actually is.
+   * `TaskStore.assignIfEligible()` is what actually closes that race,
+   * including the ABA case a plain four-field compare cannot (Ready ->
+   * Blocked -> Ready while this request was awaiting `adapter.detect()`,
+   * which restores every one of those four fields to what this request
+   * originally observed): it re-validates `expectedRevision` — captured
+   * here, before the `await` — against the task's CURRENT live revision,
+   * plus the same four-field snapshot as defense-in-depth, and applies the
+   * assignment in one synchronous call with no `await` in between. See its
+   * own doc comment for the full policy. If the task's lifecycle moved on
+   * at all while this request was awaiting `adapter.detect()` — blocked,
+   * cancelled, started, reassigned, or any round trip back to an
+   * outwardly identical state — this throws `TaskStateConflictError` (409)
+   * instead of silently overwriting whatever the task's current state
+   * actually is.
    */
   async assignTask(taskId: string, rawRequest: unknown): Promise<TaskRecord> {
     const parsed = this.#parseAssignRequest(rawRequest);
     const preCheck = this.#taskStore.get(taskId);
+    const expectedRevision = this.#taskStore.getRevision(taskId);
 
     const isFirstAssignment = preCheck.task.status === "ready";
     const isReassignment = preCheck.task.status === "assigned" && preCheck.runId === undefined;
@@ -163,6 +170,7 @@ export class TaskOrchestrator {
     // than the already-completed `adapter.detect()`.
     const record = this.#taskStore.assignIfEligible(
       taskId,
+      expectedRevision,
       {
         status: preCheck.task.status,
         runId: preCheck.runId,

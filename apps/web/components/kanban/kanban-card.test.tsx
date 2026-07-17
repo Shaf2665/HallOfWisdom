@@ -56,7 +56,7 @@ function renderCard(
     vi.fn<(record: TaskRecord) => Promise<void>>().mockResolvedValue(undefined);
   const onFocusHandled = vi.fn();
 
-  render(
+  const { container } = render(
     <DndContext>
       <ul>
         <KanbanCard
@@ -73,7 +73,7 @@ function renderCard(
     </DndContext>,
   );
 
-  return { onMove, onOpenAssign, onStart, onCancel, onFocusHandled };
+  return { container, onMove, onOpenAssign, onStart, onCancel, onFocusHandled };
 }
 
 describe("KanbanCard", () => {
@@ -175,6 +175,24 @@ describe("KanbanCard", () => {
     expect(screen.queryByRole("button", { name: /Move to In Progress/ })).not.toBeInTheDocument();
   });
 
+  it("renders the open Move menu popover through a portal into document.body, never as a descendant of the card's own wrapper (Phase 7.2 — an overflow:auto column list would otherwise clip it, hiding it from mouse/touch hit-testing even though it remains focusable)", async () => {
+    const user = userEvent.setup();
+    const { container } = renderCard(makeRecord({ status: "backlog" }));
+    await user.click(screen.getByRole("button", { name: "Actions" }));
+    const menuItem = screen.getByRole("button", { name: "Move to Ready" });
+    expect(container.contains(menuItem)).toBe(false);
+    expect(document.body.contains(menuItem)).toBe(true);
+  });
+
+  it("moves focus to the first menu item when the portaled Move menu opens (Phase 7.2 — portaling to document.body took the popover out of DOM order relative to the trigger, so without an explicit focus move, Tab from the trigger would land on the next card instead of the menu)", async () => {
+    const user = userEvent.setup();
+    renderCard(makeRecord({ status: "backlog" }));
+    const trigger = screen.getByRole("button", { name: "Actions" });
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: "Move to Ready" })).toHaveFocus();
+  });
+
   it("Move menu works with keyboard: Tab to it, Enter opens, Escape closes and returns focus", async () => {
     const user = userEvent.setup();
     renderCard(makeRecord({ status: "backlog" }));
@@ -204,6 +222,15 @@ describe("KanbanCard", () => {
     expect(onMove).not.toHaveBeenCalled();
   });
 
+  it("refocuses the stable Actions trigger before opening the assign dialog (Phase 7.2 — the clicked 'Assign agent' popover item unmounts in the same commit that opens the dialog, so the dialog must capture a still-mounted refocus target rather than the about-to-vanish item)", async () => {
+    const user = userEvent.setup();
+    renderCard(makeRecord({ status: "ready" }));
+    const trigger = screen.getByRole("button", { name: "Actions" });
+    await user.click(trigger);
+    await user.click(screen.getByRole("button", { name: "Assign agent" }));
+    expect(trigger).toHaveFocus();
+  });
+
   it("Start task requires confirmation before calling onStart", async () => {
     const user = userEvent.setup();
     const { onStart } = renderCard(makeRecord({ status: "assigned" }, undefined));
@@ -211,6 +238,21 @@ describe("KanbanCard", () => {
     expect(onStart).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "Confirm" }));
     expect(onStart).toHaveBeenCalledWith("task-1");
+  });
+
+  it("moves focus to the Confirm button when entering the start-confirmation state (Phase 7.2 — the just-clicked 'Start task' button is replaced by a Confirm/Cancel pair in the same render, and nothing else claims focus on the new element)", async () => {
+    const user = userEvent.setup();
+    renderCard(makeRecord({ status: "assigned" }, undefined));
+    await user.click(screen.getByRole("button", { name: "Start task" }));
+    expect(screen.getByRole("button", { name: "Confirm" })).toHaveFocus();
+  });
+
+  it("moves focus to the Confirm button when entering the cancel-confirmation state (Phase 7.2)", async () => {
+    const user = userEvent.setup();
+    renderCard(makeRecord({ status: "backlog" }));
+    await user.click(screen.getByRole("button", { name: "Actions" }));
+    await user.click(screen.getByRole("button", { name: "Cancel task" }));
+    expect(screen.getByRole("button", { name: "Confirm" })).toHaveFocus();
   });
 
   it("a pending card disables the action menu and is not draggable", () => {
