@@ -7,8 +7,13 @@ import type { CancelTaskResponse, TaskRecord } from "../lib/api-schemas";
 
 vi.mock("../lib/api-client", async () => {
   const actual = await vi.importActual<typeof import("../lib/api-client")>("../lib/api-client");
-  return { ...actual, cancelTask: vi.fn() };
+  return { ...actual, cancelTask: vi.fn(), ensureTaskBoard: vi.fn() };
 });
+
+const mockRouter = { push: vi.fn(), replace: vi.fn() };
+vi.mock("next/navigation", () => ({
+  useRouter: () => mockRouter,
+}));
 
 class InertWebSocket {
   static readonly CONNECTING = 0;
@@ -63,6 +68,8 @@ describe("TaskDetail", () => {
   beforeEach(() => {
     vi.stubGlobal("WebSocket", InertWebSocket);
     vi.mocked(apiClient.cancelTask).mockReset();
+    vi.mocked(apiClient.ensureTaskBoard).mockReset();
+    mockRouter.push.mockReset();
   });
 
   afterEach(() => {
@@ -174,5 +181,58 @@ describe("TaskDetail", () => {
     // Still shows the original "running" badge — only a real run.cancelled
     // event or a refreshed snapshot may change the displayed status.
     expect(screen.getByText("Running")).toBeInTheDocument();
+  });
+
+  it("Open discussion calls ensureTaskBoard and navigates to /boards?boardId=<encoded boardId>", async () => {
+    vi.mocked(apiClient.ensureTaskBoard).mockResolvedValueOnce({
+      board: {
+        boardId: "task:task-1",
+        kind: "task",
+        title: "Discussion: Sample task",
+        taskId: "task-1",
+        projectId: "project-1",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 0,
+      },
+      messagesPath: "/api/v1/boards/task:task-1/messages",
+      livePath: "/api/v1/boards/task:task-1/messages/live",
+    });
+    const user = userEvent.setup();
+    render(
+      <TaskDetail
+        baseUrl={BASE_URL}
+        wsBaseUrl={WS_BASE_URL}
+        record={makeRecord({ status: "running" })}
+        onTaskTerminal={vi.fn()}
+      />,
+    );
+    await user.click(screen.getByRole("button", { name: "Open discussion" }));
+    await waitFor(() => {
+      expect(apiClient.ensureTaskBoard).toHaveBeenCalledWith(BASE_URL, "task-1");
+    });
+    expect(mockRouter.push).toHaveBeenCalledWith(
+      `/boards?boardId=${encodeURIComponent("task:task-1")}`,
+    );
+  });
+
+  it("Open discussion works for a terminal task and shows a safe error on failure", async () => {
+    vi.mocked(apiClient.ensureTaskBoard).mockRejectedValueOnce(
+      new apiClient.ApiClientError("NETWORK_ERROR", "Could not reach Hall Core."),
+    );
+    const user = userEvent.setup();
+    render(
+      <TaskDetail
+        baseUrl={BASE_URL}
+        wsBaseUrl={WS_BASE_URL}
+        record={makeRecord({ status: "completed" })}
+        onTaskTerminal={vi.fn()}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "Open discussion" });
+    expect(button).toBeInTheDocument();
+    await user.click(button);
+    expect(await screen.findByText("Could not reach Hall Core.")).toBeInTheDocument();
+    expect(mockRouter.push).not.toHaveBeenCalled();
   });
 });

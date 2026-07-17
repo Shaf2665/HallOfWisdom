@@ -221,27 +221,34 @@ export type CardAction =
   | { readonly kind: "move"; readonly targetStatus: TaskStatus; readonly label: string }
   | { readonly kind: "assign"; readonly label: string }
   | { readonly kind: "start"; readonly label: string }
-  | { readonly kind: "cancel"; readonly label: string };
+  | { readonly kind: "cancel"; readonly label: string }
+  | { readonly kind: "discuss"; readonly label: string };
+
+const DISCUSS_ACTION: CardAction = { kind: "discuss", label: "Open discussion" };
 
 /**
  * The exact action set for each card state, matching the Kanban spec's
  * per-status examples (including the "Return to Ready" wording specific
  * to an assigned card, versus the generic "Move to X" everywhere else).
  * A running task exposes only "Cancel active task"; a locked/launching or
- * terminal card exposes nothing (terminal cards are view-only).
+ * terminal card exposes only "Open discussion" (Phase 8) — a discussion
+ * board may be opened for a task in *any* state, including terminal ones,
+ * so `discuss` is unconditionally appended to every branch below rather
+ * than living inside the planning-only `switch`. Terminal cards remain
+ * otherwise view-only: no other action is ever added back for them.
  */
 export function availableActionsFor(record: TaskRecord): readonly CardAction[] {
   const status = record.task.status;
 
   if (status === "running") {
-    return [{ kind: "cancel", label: "Cancel active task" }];
+    return [{ kind: "cancel", label: "Cancel active task" }, DISCUSS_ACTION];
   }
   if (isExecutionControlledStatus(status) || isTerminalStatus(status)) {
-    return [];
+    return [DISCUSS_ACTION];
   }
   if (status === "assigned" && record.runId !== undefined) {
     // Launching: a run was claimed but run.started has not arrived yet.
-    return [];
+    return [DISCUSS_ACTION];
   }
 
   switch (status) {
@@ -250,6 +257,7 @@ export function availableActionsFor(record: TaskRecord): readonly CardAction[] {
         { kind: "move", targetStatus: "ready", label: "Move to Ready" },
         { kind: "move", targetStatus: "blocked", label: "Move to Blocked" },
         { kind: "cancel", label: "Cancel task" },
+        DISCUSS_ACTION,
       ];
     case "ready":
       return [
@@ -257,6 +265,7 @@ export function availableActionsFor(record: TaskRecord): readonly CardAction[] {
         { kind: "assign", label: "Assign agent" },
         { kind: "move", targetStatus: "blocked", label: "Move to Blocked" },
         { kind: "cancel", label: "Cancel task" },
+        DISCUSS_ACTION,
       ];
     case "assigned":
       return [
@@ -264,15 +273,17 @@ export function availableActionsFor(record: TaskRecord): readonly CardAction[] {
         { kind: "move", targetStatus: "ready", label: "Return to Ready" },
         { kind: "move", targetStatus: "blocked", label: "Move to Blocked" },
         { kind: "cancel", label: "Cancel task" },
+        DISCUSS_ACTION,
       ];
     case "blocked":
       return [
         { kind: "move", targetStatus: "backlog", label: "Move to Backlog" },
         { kind: "move", targetStatus: "ready", label: "Move to Ready" },
         { kind: "cancel", label: "Cancel task" },
+        DISCUSS_ACTION,
       ];
     default:
-      return [];
+      return [DISCUSS_ACTION];
   }
 }
 

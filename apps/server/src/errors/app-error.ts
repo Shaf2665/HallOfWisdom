@@ -151,3 +151,58 @@ export class InternalServerError extends HallCoreError {
     super(message);
   }
 }
+
+export class BoardNotFoundError extends HallCoreError {
+  readonly code = "BOARD_NOT_FOUND";
+  readonly statusCode = 404;
+
+  constructor(boardId: string) {
+    super(`No board found with boardId "${boardId}".`);
+  }
+}
+
+export class BoardCapacityReachedError extends HallCoreError {
+  readonly code = "BOARD_CAPACITY_REACHED";
+  readonly statusCode = 429;
+
+  constructor(limit: number) {
+    super(`The server has reached its configured board capacity (${String(limit)}).`);
+  }
+}
+
+export class MessageCapacityReachedError extends HallCoreError {
+  readonly code = "MESSAGE_CAPACITY_REACHED";
+  readonly statusCode = 429;
+
+  constructor(boardId: string, limit: number) {
+    super(`Board "${boardId}" has reached its configured message capacity (${String(limit)}).`);
+  }
+}
+
+/** A request body failed communication-message validation (blank, oversized, NUL character, unknown field). Distinct code from `InvalidRequestError` so clients can react specifically to a rejected message body. */
+export class InvalidMessageError extends HallCoreError {
+  readonly code = "INVALID_MESSAGE";
+  readonly statusCode = 400;
+  readonly details?: readonly RequestValidationIssue[] | undefined;
+
+  constructor(message: string, details?: readonly RequestValidationIssue[]) {
+    super(message);
+    this.details = details;
+  }
+}
+
+/**
+ * Guards `MessageStore.append()`'s internal invariant that a caller-supplied
+ * message's own `boardId` field matches the `boardId` the append is
+ * targeting — should be unreachable in practice (Hall Core always
+ * constructs both from the same value), the same defense-in-depth reasoning
+ * as `EventIdentityMismatchError` for `EventStore.append()`.
+ */
+export class MessageBoardIdentityMismatchError extends HallCoreError {
+  readonly code = "INTERNAL_ERROR";
+  readonly statusCode = 500;
+
+  constructor(expectedBoardId: string, actualBoardId: string) {
+    super(`Message boardId mismatch: expected "${expectedBoardId}", received "${actualBoardId}".`);
+  }
+}

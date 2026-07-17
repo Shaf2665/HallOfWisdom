@@ -3,15 +3,25 @@ import type { TaskStatus } from "@hall-of-wisdom/protocol";
 import {
   adapterSummarySchema,
   cancelTaskResponseSchema,
+  communicationBoardSchema,
+  communicationMessageSchema,
   createTaskResponseSchema,
+  ensureBoardResponseSchema,
   errorResponseSchema,
   healthResponseSchema,
   listAdaptersResponseSchema,
+  listBoardMessagesResponseSchema,
+  listBoardsResponseSchema,
   listTasksResponseSchema,
   taskRecordSchema,
   type CancelTaskResponse,
+  type CommunicationBoard,
+  type CommunicationMessage,
   type CreateTaskResponse,
+  type EnsureBoardResponse,
   type HealthResponse,
+  type ListBoardMessagesResponse,
+  type ListBoardsResponse,
   type TaskRecord,
 } from "./api-schemas";
 
@@ -310,6 +320,69 @@ export function startTask(
     `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/start`,
     { method: "POST" },
     createTaskResponseSchema,
+    options,
+  );
+}
+
+export function listBoards(
+  baseUrl: string,
+  options: RequestOptions = {},
+): Promise<ListBoardsResponse> {
+  return request(`${baseUrl}/api/v1/boards`, { method: "GET" }, listBoardsResponseSchema, options);
+}
+
+export function getBoard(
+  baseUrl: string,
+  boardId: string,
+  options: RequestOptions = {},
+): Promise<CommunicationBoard> {
+  return request(
+    `${baseUrl}/api/v1/boards/${encodeURIComponent(boardId)}`,
+    { method: "GET" },
+    communicationBoardSchema,
+    options,
+  );
+}
+
+/** Ensures a discussion board exists for `taskId` — idempotent; never starts, assigns, or cancels anything. */
+export function ensureTaskBoard(
+  baseUrl: string,
+  taskId: string,
+  options: RequestOptions = {},
+): Promise<EnsureBoardResponse> {
+  return request(
+    `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/board`,
+    { method: "POST" },
+    ensureBoardResponseSchema,
+    options,
+  );
+}
+
+export function listBoardMessages(
+  baseUrl: string,
+  boardId: string,
+  afterSequence?: number,
+  options: RequestOptions = {},
+): Promise<ListBoardMessagesResponse> {
+  const query = afterSequence === undefined ? "" : `?afterSequence=${String(afterSequence)}`;
+  return request(
+    `${baseUrl}/api/v1/boards/${encodeURIComponent(boardId)}/messages${query}`,
+    { method: "GET" },
+    listBoardMessagesResponseSchema,
+    options,
+  );
+}
+
+export function createBoardMessage(
+  baseUrl: string,
+  boardId: string,
+  text: string,
+  options: RequestOptions = {},
+): Promise<CommunicationMessage> {
+  return request(
+    `${baseUrl}/api/v1/boards/${encodeURIComponent(boardId)}/messages`,
+    { method: "POST", body: { text } },
+    communicationMessageSchema,
     options,
   );
 }

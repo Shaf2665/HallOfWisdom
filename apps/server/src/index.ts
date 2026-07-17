@@ -27,8 +27,20 @@ export {
 export { EventBus, SubscriberLimitReachedError } from "./events/event-bus.js";
 export type { EventBusOptions, EventListener } from "./events/event-bus.js";
 
+export { BoardStore, GENERAL_BOARD_ID, taskBoardId } from "./boards/board-store.js";
+export type { BoardStoreOptions, EnsureTaskBoardResult } from "./boards/board-store.js";
+
+export { MessageStore } from "./boards/message-store.js";
+export type { MessageStoreOptions, AppendMessageInput } from "./boards/message-store.js";
+
+export { MessageBus, MessageSubscriberLimitReachedError } from "./boards/message-bus.js";
+export type { MessageBusOptions, MessageListener } from "./boards/message-bus.js";
+
 export { createTaskRequestSchema } from "./schemas/create-task-request.js";
 export type { CreateTaskRequest } from "./schemas/create-task-request.js";
+
+export { createMessageRequestSchema } from "./schemas/create-message-request.js";
+export type { CreateMessageRequest } from "./schemas/create-message-request.js";
 
 export {
   DEFAULT_LIMITS,
@@ -40,11 +52,16 @@ export type { ServerLimits } from "./config/server-config.js";
 
 export {
   AdapterNotFoundError,
+  BoardCapacityReachedError,
+  BoardNotFoundError,
   DuplicateTaskError,
   HallCoreError,
   InternalServerError,
+  InvalidMessageError,
   InvalidRequestError,
   InvalidTaskTransitionError,
+  MessageBoardIdentityMismatchError,
+  MessageCapacityReachedError,
   TaskCapacityReachedError,
   TaskNotFoundError,
   TaskStateConflictError,

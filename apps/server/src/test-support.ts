@@ -10,6 +10,9 @@ import { TaskStore } from "./tasks/task-store.js";
 import { TaskOrchestrator } from "./tasks/task-orchestrator.js";
 import { EventStore } from "./events/event-store.js";
 import { EventBus } from "./events/event-bus.js";
+import { BoardStore } from "./boards/board-store.js";
+import { MessageStore } from "./boards/message-store.js";
+import { MessageBus } from "./boards/message-bus.js";
 import { DEFAULT_LIMITS, type ServerLimits } from "./config/server-config.js";
 
 /** JSON shape of a `TaskRecord` as it round-trips through an HTTP response body. */
@@ -62,6 +65,9 @@ export interface TestHarness {
   readonly eventStore: EventStore;
   readonly eventBus: EventBus;
   readonly orchestrator: TaskOrchestrator;
+  readonly boardStore: BoardStore;
+  readonly messageStore: MessageStore;
+  readonly messageBus: MessageBus;
   readonly limits: ServerLimits;
 }
 
@@ -84,7 +90,23 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     onExecutionError: options.onExecutionError,
   });
 
-  return { registry, taskStore, eventStore, eventBus, orchestrator, limits };
+  const boardStore = new BoardStore({ maxBoards: limits.maxBoards, taskStore });
+  const messageStore = new MessageStore({ maxMessagesPerBoard: limits.maxMessagesPerBoard });
+  const messageBus = new MessageBus({ maxSubscribersPerBoard: limits.maxSubscribersPerBoard });
+  const generalBoard = boardStore.seedGeneralBoard(new Date().toISOString());
+  messageStore.registerBoard(generalBoard.boardId);
+
+  return {
+    registry,
+    taskStore,
+    eventStore,
+    eventBus,
+    orchestrator,
+    boardStore,
+    messageStore,
+    messageBus,
+    limits,
+  };
 }
 
 export async function buildTestApp(options: TestHarnessOptions): Promise<{
@@ -97,6 +119,9 @@ export async function buildTestApp(options: TestHarnessOptions): Promise<{
     taskStore: harness.taskStore,
     eventStore: harness.eventStore,
     eventBus: harness.eventBus,
+    boardStore: harness.boardStore,
+    messageStore: harness.messageStore,
+    messageBus: harness.messageBus,
     registry: harness.registry,
     webOrigin: options.webOrigin,
     limits: harness.limits,

@@ -1,9 +1,14 @@
 import { z } from "zod";
 import {
   agentCapabilitiesSchema,
+  communicationBoardSchema,
+  communicationMessageSchema,
   hallTaskSchema,
   structuredFailureSchema,
 } from "@hall-of-wisdom/protocol";
+
+export { communicationBoardSchema, communicationMessageSchema };
+export type { CommunicationBoard, CommunicationMessage } from "@hall-of-wisdom/protocol";
 
 /**
  * Hall Core response shapes, kept local to this app rather than in
@@ -130,3 +135,28 @@ export const errorResponseSchema = z
   })
   .strict();
 export type ErrorResponseBody = z.infer<typeof errorResponseSchema>;
+
+/**
+ * Hall-Core-specific wrapper envelopes around the shared, provider-neutral
+ * `communicationBoardSchema`/`communicationMessageSchema` from
+ * `@hall-of-wisdom/protocol` — this one HTTP API's response shapes, not
+ * part of the cross-process communication contract itself.
+ */
+export const listBoardsResponseSchema = z
+  .object({ boards: z.array(communicationBoardSchema) })
+  .strict();
+export type ListBoardsResponse = z.infer<typeof listBoardsResponseSchema>;
+
+export const ensureBoardResponseSchema = z
+  .object({
+    board: communicationBoardSchema,
+    messagesPath: z.string(),
+    livePath: z.string(),
+  })
+  .strict();
+export type EnsureBoardResponse = z.infer<typeof ensureBoardResponseSchema>;
+
+export const listBoardMessagesResponseSchema = z
+  .object({ messages: z.array(communicationMessageSchema) })
+  .strict();
+export type ListBoardMessagesResponse = z.infer<typeof listBoardMessagesResponseSchema>;

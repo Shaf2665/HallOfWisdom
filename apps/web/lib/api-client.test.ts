@@ -3,11 +3,16 @@ import {
   ApiClientError,
   assignTask,
   cancelTask,
+  createBoardMessage,
   createDeferredTask,
   createTask,
+  ensureTaskBoard,
+  getBoard,
   getHealth,
   getTask,
   listAdapters,
+  listBoardMessages,
+  listBoards,
   listTasks,
   startTask,
   transitionTask,
@@ -424,6 +429,197 @@ describe("api-client", () => {
       }),
     );
     await getHealth(BASE_URL);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(init.credentials).toBe("omit");
+  });
+});
+
+const generalBoard = {
+  boardId: "hall.general",
+  kind: "general" as const,
+  title: "General",
+  createdAt: "2026-07-15T12:00:00.000Z",
+  updatedAt: "2026-07-15T12:00:00.000Z",
+  messageCount: 0,
+};
+
+const taskBoard = {
+  boardId: "task:task-1",
+  kind: "task" as const,
+  title: "Discussion: Add login page",
+  taskId: "task-1",
+  projectId: "project-1",
+  createdAt: "2026-07-15T12:00:00.000Z",
+  updatedAt: "2026-07-15T12:00:00.000Z",
+  messageCount: 0,
+};
+
+const message1 = {
+  messageId: "msg-1",
+  boardId: "hall.general",
+  sequence: 0,
+  author: { kind: "human" as const, displayName: "Local Operator" },
+  text: "hello",
+  createdAt: "2026-07-15T12:00:00.000Z",
+};
+
+describe("api-client: boards", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("listBoards: validates and returns the board list, General first", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ boards: [generalBoard, taskBoard] }));
+    const result = await listBoards(BASE_URL);
+    expect(result.boards[0]?.boardId).toBe("hall.general");
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${BASE_URL}/api/v1/boards`,
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("getBoard: validates and returns a single board", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(generalBoard));
+    const result = await getBoard(BASE_URL, "hall.general");
+    expect(result.boardId).toBe("hall.general");
+  });
+
+  it("getBoard: surfaces a 404 unknown-board error", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: { code: "BOARD_NOT_FOUND", message: "No such board." } }, 404),
+    );
+    await expect(getBoard(BASE_URL, "nonexistent")).rejects.toMatchObject({
+      code: "BOARD_NOT_FOUND",
+      statusCode: 404,
+    });
+  });
+
+  it("ensureTaskBoard: validates the 201-newly-created response", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          board: taskBoard,
+          messagesPath: "/api/v1/boards/task:task-1/messages",
+          livePath: "/api/v1/boards/task:task-1/messages/live",
+        },
+        201,
+      ),
+    );
+    const result = await ensureTaskBoard(BASE_URL, "task-1");
+    expect(result.board.kind).toBe("task");
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${BASE_URL}/api/v1/tasks/task-1/board`,
+      expect.objectContaining({ method: "POST" }),
+    );
+  });
+
+  it("ensureTaskBoard: validates the 200-already-existed response identically", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          board: taskBoard,
+          messagesPath: "/api/v1/boards/task:task-1/messages",
+          livePath: "/api/v1/boards/task:task-1/messages/live",
+        },
+        200,
+      ),
+    );
+    const result = await ensureTaskBoard(BASE_URL, "task-1");
+    expect(result.board.boardId).toBe("task:task-1");
+  });
+
+  it("ensureTaskBoard: surfaces a 404 unknown-task error", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: { code: "TASK_NOT_FOUND", message: "No such task." } }, 404),
+    );
+    await expect(ensureTaskBoard(BASE_URL, "nonexistent")).rejects.toMatchObject({
+      code: "TASK_NOT_FOUND",
+      statusCode: 404,
+    });
+  });
+
+  it("listBoardMessages: omits afterSequence from the URL when not given", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [message1] }));
+    await listBoardMessages(BASE_URL, "hall.general");
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${BASE_URL}/api/v1/boards/hall.general/messages`,
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("listBoardMessages: includes afterSequence in the URL when given", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [] }));
+    await listBoardMessages(BASE_URL, "hall.general", 5);
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${BASE_URL}/api/v1/boards/hall.general/messages?afterSequence=5`,
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("listBoardMessages: validates message shape and order", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ messages: [message1] }));
+    const result = await listBoardMessages(BASE_URL, "hall.general");
+    expect(result.messages).toEqual([message1]);
+  });
+
+  it("createBoardMessage: sends only text in the request body", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(message1, 201));
+    await createBoardMessage(BASE_URL, "hall.general", "hello");
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ text: "hello" });
+  });
+
+  it("createBoardMessage: validates and returns the stored message", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(message1, 201));
+    const result = await createBoardMessage(BASE_URL, "hall.general", "hello");
+    expect(result.sequence).toBe(0);
+    expect(result.author.displayName).toBe("Local Operator");
+  });
+
+  it("createBoardMessage: rejects a malformed response (missing required field)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ...message1, sequence: undefined }, 201));
+    await expect(createBoardMessage(BASE_URL, "hall.general", "hello")).rejects.toMatchObject({
+      code: "INVALID_RESPONSE",
+    });
+  });
+
+  it("createBoardMessage: surfaces a 400 INVALID_MESSAGE error for a blank message", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: { code: "INVALID_MESSAGE", message: "text must not be blank." } }, 400),
+    );
+    await expect(createBoardMessage(BASE_URL, "hall.general", "   ")).rejects.toMatchObject({
+      code: "INVALID_MESSAGE",
+      statusCode: 400,
+    });
+  });
+
+  it("createBoardMessage: never automatically retries a failed POST", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+    await expect(createBoardMessage(BASE_URL, "hall.general", "hello")).rejects.toMatchObject({
+      code: "NETWORK_ERROR",
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("encodes boardId safely in the URL path", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(generalBoard));
+    await getBoard(BASE_URL, "board with spaces/slash");
+    expect(fetchMock).toHaveBeenCalledWith(
+      `${BASE_URL}/api/v1/boards/board%20with%20spaces%2Fslash`,
+      expect.objectContaining({ method: "GET" }),
+    );
+  });
+
+  it("does not include credentials on a board request", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ boards: [generalBoard] }));
+    await listBoards(BASE_URL);
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.credentials).toBe("omit");
   });

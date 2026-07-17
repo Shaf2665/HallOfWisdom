@@ -12,6 +12,10 @@ export interface ServerLimits {
   readonly maxSubscribersPerTask: number;
   readonly maxBodyBytes: number;
   readonly maxWebSocketMessageBytes: number;
+  /** Excludes the General board, which is seeded once and does not count against this limit. */
+  readonly maxBoards: number;
+  readonly maxMessagesPerBoard: number;
+  readonly maxSubscribersPerBoard: number;
 }
 
 /**
@@ -26,6 +30,9 @@ export const DEFAULT_LIMITS: ServerLimits = {
   maxSubscribersPerTask: 20,
   maxBodyBytes: 64 * 1024,
   maxWebSocketMessageBytes: 4 * 1024,
+  maxBoards: 500,
+  maxMessagesPerBoard: 1000,
+  maxSubscribersPerBoard: 20,
 };
 
 /** Bounded wait for active runs to reach a terminal state during graceful shutdown. */

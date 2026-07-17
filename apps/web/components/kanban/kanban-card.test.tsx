@@ -43,6 +43,7 @@ function renderCard(
     onOpenAssign: (record: TaskRecord) => void;
     onStart: (taskId: string) => Promise<void>;
     onCancel: (record: TaskRecord) => Promise<void>;
+    onOpenDiscussion: (taskId: string) => Promise<void>;
   }> = {},
 ) {
   const onMove =
@@ -54,6 +55,9 @@ function renderCard(
   const onCancel =
     overrides.onCancel ??
     vi.fn<(record: TaskRecord) => Promise<void>>().mockResolvedValue(undefined);
+  const onOpenDiscussion =
+    overrides.onOpenDiscussion ??
+    vi.fn<(taskId: string) => Promise<void>>().mockResolvedValue(undefined);
   const onFocusHandled = vi.fn();
 
   const { container } = render(
@@ -68,12 +72,13 @@ function renderCard(
           onOpenAssign={onOpenAssign}
           onStart={onStart}
           onCancel={onCancel}
+          onOpenDiscussion={onOpenDiscussion}
         />
       </ul>
     </DndContext>,
   );
 
-  return { container, onMove, onOpenAssign, onStart, onCancel, onFocusHandled };
+  return { container, onMove, onOpenAssign, onStart, onCancel, onOpenDiscussion, onFocusHandled };
 }
 
 describe("KanbanCard", () => {
@@ -108,6 +113,7 @@ describe("KanbanCard", () => {
             onOpenAssign={vi.fn()}
             onStart={vi.fn()}
             onCancel={vi.fn()}
+            onOpenDiscussion={vi.fn()}
           />
         </ul>
       </DndContext>,
@@ -129,6 +135,7 @@ describe("KanbanCard", () => {
             onOpenAssign={vi.fn()}
             onStart={vi.fn()}
             onCancel={vi.fn()}
+            onOpenDiscussion={vi.fn()}
           />
         </ul>
       </DndContext>,
@@ -136,11 +143,16 @@ describe("KanbanCard", () => {
     expect(screen.getByText("Cancellation requested")).toBeInTheDocument();
   });
 
-  it("launching (assigned with a runId): shows Starting…, no Start button, no action menu", () => {
+  it("launching (assigned with a runId): shows Starting…, no Start button, only Open discussion in the action menu", async () => {
+    const user = userEvent.setup();
     renderCard(makeRecord({ status: "assigned" }, "run-1"));
     expect(screen.getByText("Starting…")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Start task" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Actions" })).not.toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: "Actions" });
+    expect(trigger).toBeInTheDocument();
+    await user.click(trigger);
+    expect(screen.getByRole("button", { name: "Open discussion" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Move to/ })).not.toBeInTheDocument();
   });
 
   it("assigned (not started): shows a Start button and an Actions menu", () => {
@@ -149,20 +161,31 @@ describe("KanbanCard", () => {
     expect(screen.getByRole("button", { name: "Actions" })).toBeInTheDocument();
   });
 
-  it("terminal cards have no action menu", () => {
+  it("terminal cards show only an Open discussion action (Phase 8 — a discussion may be opened for any task, including terminal ones; otherwise still view-only)", async () => {
+    const user = userEvent.setup();
     for (const status of ["completed", "failed", "cancelled"] as const) {
       cleanup();
       renderCard(makeRecord({ status }, "run-1"));
-      expect(screen.queryByRole("button", { name: "Actions" })).not.toBeInTheDocument();
+      const trigger = screen.getByRole("button", { name: "Actions" });
+      expect(trigger).toBeInTheDocument();
+      await user.click(trigger);
+      expect(screen.getByRole("button", { name: "Open discussion" })).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: /Move to/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Cancel task" })).not.toBeInTheDocument();
     }
   });
 
-  it("running cards show only a Cancel active task action, and cannot be dragged", () => {
+  it("running cards show only Cancel active task and Open discussion actions, and cannot be dragged", async () => {
+    const user = userEvent.setup();
     renderCard(makeRecord({ status: "running" }, "run-1"));
     const button = screen.getByRole("button", { name: "Actions" });
     expect(button).toBeInTheDocument();
     const dragHandle = screen.getByText("Fix the bug");
     expect(dragHandle).toHaveAttribute("aria-disabled", "true");
+    await user.click(button);
+    expect(screen.getByRole("button", { name: "Cancel active task" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open discussion" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Move to/ })).not.toBeInTheDocument();
   });
 
   it("Move menu lists only the permitted destinations for a backlog card", async () => {
@@ -283,13 +306,9 @@ describe("KanbanCard", () => {
     expect(onCancel.mock.calls[0]?.[0].runId).toBe("run-1");
   });
 
-  it("falls back to the title button for shouldFocusOnMount when the card has no action menu (e.g. just entered the launching state)", () => {
-    // Regression test: availableActionsFor([]) means MoveMenu isn't
-    // rendered at all, so actionsButtonRef.current is null — the mount
-    // effect must fall back to the always-rendered title button rather
-    // than silently no-op and drop focus to <body>.
+  it("focuses the Actions button for shouldFocusOnMount even in the launching state (Phase 8 — Open discussion is always available, so the Actions menu is always rendered)", () => {
     renderCard(makeRecord({ status: "assigned" }, "run-1"), { shouldFocusOnMount: true });
-    expect(screen.getByRole("button", { name: /Fix the bug/ })).toHaveFocus();
+    expect(screen.getByRole("button", { name: "Actions" })).toHaveFocus();
   });
 
   it("focuses the Actions button for shouldFocusOnMount when one is present", () => {

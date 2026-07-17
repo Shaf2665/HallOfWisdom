@@ -1,7 +1,8 @@
 # 0004 — Hall Core Server
 
 Status: Draft (Phase 5, hardened in Phase 5.1; extended in Phase 6 and Phase 7; assignment
-concurrency hardened in Phase 7.1 and 7.2).
+concurrency hardened in Phase 7.1 and 7.2; extended in Phase 8 with Communication Boards — see
+`0007-communication-boards.md`).
 
 ## Context
 
@@ -159,7 +160,10 @@ operation in this phase.
 
 `TaskStore` and `EventStore` are both bounded (`config/server-config.ts`'s `DEFAULT_LIMITS`):
 `maxTasks: 500`, `maxEventsPerTask: 2000`, `maxSubscribersPerTask: 20`, plus a request `bodyLimit`
-and a WebSocket `maxPayload`. These are conservative prototype defaults, not tuned for any real
+and a WebSocket `maxPayload`. As of Phase 8, `BoardStore` and `MessageStore` are bounded the same
+way: `maxBoards: 500` (the always-present General board does not count against this — see
+`0007-communication-boards.md`, "Board and message capacity"), `maxMessagesPerBoard: 1000`,
+`maxSubscribersPerBoard: 20`. These are conservative prototype defaults, not tuned for any real
 workload — the point is that nothing here grows without bound.
 
 Reaching `maxTasks` is HTTP-reachable: `TaskCapacityReachedError` is thrown synchronously from
@@ -361,6 +365,38 @@ snapshot kept as secondary defense in depth. See `docs/architecture/0006-kanban-
 concurrency policy (Phase 7.1)" and "Closing the ABA gap: internal task revision (Phase 7.2)", for the
 full design and the races each phase closes.
 
+## Communication Boards endpoints (Phase 8)
+
+A REST + WebSocket surface for local, human-authored discussion — a General board plus one
+optional discussion board per task — lives alongside the task/event API described above but is
+architecturally independent of it (separate stores, separate schemas, separate WebSocket route,
+no shared sequence space). See `0007-communication-boards.md` for the full design; summarized here
+as a contract reference:
+
+| Endpoint                             | Purpose                                              | Success       | Key failure codes                                                                  |
+| ------------------------------------ | ---------------------------------------------------- | ------------- | ---------------------------------------------------------------------------------- |
+| `GET /boards`                        | List all boards, General first                       | `200`         | —                                                                                  |
+| `GET /boards/:boardId`               | Retrieve one board                                   | `200`         | `BOARD_NOT_FOUND` (404)                                                            |
+| `POST /tasks/:taskId/board`          | Create-or-fetch that task's one discussion board     | `201` / `200` | `TASK_NOT_FOUND` (404), `BOARD_CAPACITY_REACHED` (429)                             |
+| `GET /boards/:boardId/messages`      | List messages, optionally after a sequence           | `200`         | `BOARD_NOT_FOUND` (404)                                                            |
+| `POST /boards/:boardId/messages`     | Append a message (server assigns id/sequence/author) | `201`         | `BOARD_NOT_FOUND` (404), `INVALID_MESSAGE` (400), `MESSAGE_CAPACITY_REACHED` (429) |
+| `GET /boards/:boardId/messages/live` | WebSocket: replay then live stream                   | `101`         | `4400`/`4403`/`4404`/`4503`/`4504`/`1003` (see below)                              |
+
+Creating a task's discussion board never changes that task's `status`, never claims or touches a
+`runId`, and never creates an `AgentRun` or a `NormalizedAgentEvent` — `BoardStore.ensureTaskBoard`
+only ever reads a task's existence and title through `TaskStore`, and is idempotent by
+construction: the board's ID is deterministically derived as `` `task:${taskId}` ``, so "does this
+task already have a board" is one map lookup at a known key, never an index that could drift out of
+sync (the same "correct by construction" reasoning behind Phase 7.2's task revision counter — see
+`0006-kanban-board.md`).
+
+The WebSocket route (`routes/board-messages.ts`) reuses the exact-origin validation, subscribe-
+before-replay ordering, and close-code semantics (`4400`/`4403`/`4404`/`4503`/`4504`/`1003`)
+established by `routes/task-events.ts` above, with one structural difference: a board discussion
+has no terminal state, so this route never self-closes a healthy connection the way a task's event
+stream closes on `run.completed`/`run.failed`/`run.cancelled` — it stays open until the client
+disconnects, the server shuts down, or a policy violation closes it.
+
 ## Graceful shutdown
 
 `process/signal-shutdown.ts` listens for both `SIGINT` and `SIGTERM` (deliberately a small,
@@ -370,7 +406,12 @@ run, and process managers send `SIGTERM`, which a server needs to handle). The f
 triggers `TaskOrchestrator.shutdown(timeoutMs)` (which aborts every active run's controller and
 waits, bounded, for their promises to settle) followed by `app.close()`; a second signal forces an
 immediate `process.exit()`. `process.exit()` appears in exactly one place in this whole package —
-`server.ts`'s forced-shutdown path — mirroring Hall Runner's own discipline.
+`server.ts`'s forced-shutdown path — mirroring Hall Runner's own discipline. As of Phase 8,
+`app.close()` also tears down every open Communication Boards WebSocket connection and clears
+`MessageBus`'s subscriber lists — the same `@fastify/websocket` connection lifecycle that already
+closes task-event sockets on `app.close()` closes board-message sockets identically, since both
+routes are registered on the same Fastify instance; no separate shutdown path was needed. See
+`0007-communication-boards.md`, "Shutdown", for what was specifically verified here.
 
 ## stdout/stderr and logging policy
 
@@ -424,17 +465,19 @@ authentication now would be complexity with no corresponding threat this phase a
 would couple this phase to schema and migration concerns unrelated to proving the task/event model
 itself works. Phase 9 (per `0001-initial-architecture.md`'s phase plan) is where persistence enters.
 
-## The web interface (Phases 6 and 7)
+## The web interface (Phases 6, 7, and 8)
 
 Phase 6 built `apps/web`, the first browser client of the REST/WebSocket API this document
 describes. See `docs/architecture/0005-minimal-web-interface.md` for the Task Console's own
 architecture (Next.js App Router boundary, why no custom server/API routes, URL configuration,
-close-code handling on the client side, accessibility) and
+close-code handling on the client side, accessibility),
 `docs/architecture/0006-kanban-board.md` for the Kanban Board Phase 7 added on top of it (planning
-tasks, the assign/start separation, drag-and-drop with accessible non-drag equivalents, polling).
-This document (`0004`) remains the source of truth for Hall Core's own contract — the CORS,
-WebSocket-Origin, and "Planning task endpoints" sections above are the parts of that contract the
-web application specifically required Hall Core to grow.
+tasks, the assign/start separation, drag-and-drop with accessible non-drag equivalents, polling),
+and `docs/architecture/0007-communication-boards.md` for the Communication Boards page Phase 8
+added (`/boards`: board list, message history, composer, live WebSocket updates). This document
+(`0004`) remains the source of truth for Hall Core's own contract — the CORS, WebSocket-Origin,
+"Planning task endpoints", and "Communication Boards endpoints" sections above are the parts of
+that contract the web application specifically required Hall Core to grow.
 
 ## Permanent subagent and plugin usage rules
 
@@ -457,4 +500,12 @@ field validation error rendering no message and no `aria-invalid`/`aria-describe
 in `components/task-create-form.tsx`, along with adding `role="alert"` to every field error so
 assistive technology is actually notified on a failed submit). The security and frontend-architecture
 reviews found no issues requiring a fix. See `docs/architecture/0005-minimal-web-interface.md` and
-the Phase 6 report for full findings.
+the Phase 6 report for full findings. Phase 8 (Communication Boards) was implemented directly by
+the main session rather than delegated to subagents: every store, route, hook, and component
+followed shapes and patterns already established in Phases 5–7.2 (`EventBus`/`EventStore`-style
+stores, the `task-events.ts` WebSocket route's Origin/replay/close-code discipline, the
+`use-task-events.ts` reconnect hook's backoff schedule), so re-deriving that context through a
+fresh subagent would not have provided the "clear benefit" `CLAUDE.md`'s resource-control section
+requires. The security and bug review checklist (25 items) was walked directly rather than through
+a dedicated subagent, cross-referenced against the store/route/hook/component tests that already
+targeted each item — see the Phase 8 report's "Security and Bug Review" section for the outcome.

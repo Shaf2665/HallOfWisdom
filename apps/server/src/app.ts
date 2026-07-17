@@ -7,10 +7,15 @@ import { registerHealthRoute } from "./routes/health.js";
 import { registerTaskRoutes } from "./routes/tasks.js";
 import { registerTaskEventsRoute } from "./routes/task-events.js";
 import { registerAdapterRoutes } from "./routes/adapters.js";
+import { registerBoardRoutes } from "./routes/boards.js";
+import { registerBoardMessagesRoute } from "./routes/board-messages.js";
 import type { TaskOrchestrator } from "./tasks/task-orchestrator.js";
 import type { TaskStore } from "./tasks/task-store.js";
 import type { EventStore } from "./events/event-store.js";
 import type { EventBus } from "./events/event-bus.js";
+import type { BoardStore } from "./boards/board-store.js";
+import type { MessageStore } from "./boards/message-store.js";
+import type { MessageBus } from "./boards/message-bus.js";
 import { DEFAULT_WEB_ORIGIN, type ServerLimits } from "./config/server-config.js";
 
 export interface CreateHallCoreAppOptions {
@@ -18,6 +23,9 @@ export interface CreateHallCoreAppOptions {
   readonly taskStore: TaskStore;
   readonly eventStore: EventStore;
   readonly eventBus: EventBus;
+  readonly boardStore: BoardStore;
+  readonly messageStore: MessageStore;
+  readonly messageBus: MessageBus;
   readonly registry: AgentRegistry;
   readonly limits: ServerLimits;
   /** The single browser origin allowed by CORS and WebSocket Origin validation. */
@@ -76,6 +84,18 @@ export async function createHallCoreApp(
     taskStore: options.taskStore,
     eventStore: options.eventStore,
     eventBus: options.eventBus,
+    maxBufferedBytes: options.limits.maxWebSocketMessageBytes * 16,
+    allowedOrigin: webOrigin,
+  });
+  registerBoardRoutes(app, {
+    boardStore: options.boardStore,
+    messageStore: options.messageStore,
+    messageBus: options.messageBus,
+  });
+  registerBoardMessagesRoute(app, {
+    boardStore: options.boardStore,
+    messageStore: options.messageStore,
+    messageBus: options.messageBus,
     maxBufferedBytes: options.limits.maxWebSocketMessageBytes * 16,
     allowedOrigin: webOrigin,
   });

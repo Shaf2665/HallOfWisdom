@@ -14,8 +14,15 @@ vi.mock("../lib/api-client", async () => {
     listTasks: vi.fn(),
     createTask: vi.fn(),
     getTask: vi.fn(),
+    ensureTaskBoard: vi.fn(),
   };
 });
+
+const mockRouter = { push: vi.fn(), replace: vi.fn() };
+vi.mock("next/navigation", () => ({
+  useRouter: () => mockRouter,
+  usePathname: () => "/",
+}));
 
 class InertWebSocket {
   static readonly CONNECTING = 0;

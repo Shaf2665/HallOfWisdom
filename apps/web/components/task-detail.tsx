@@ -1,7 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { ApiClientError, cancelTask, transitionTask } from "../lib/api-client";
+import { useRouter } from "next/navigation";
+import { ApiClientError, cancelTask, ensureTaskBoard, transitionTask } from "../lib/api-client";
 import type { TaskRecord } from "../lib/api-schemas";
 import { useTaskEvents } from "../hooks/use-task-events";
 import { StatusBadge } from "./task-list-item";
@@ -11,6 +12,11 @@ import { TaskEventTimeline } from "./task-event-timeline";
 const TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 type CancelState = "idle" | "confirming" | "pending" | "requested" | "conflict";
+type DiscussionState = "idle" | "pending";
+
+function safeMessage(error: unknown): string {
+  return error instanceof ApiClientError ? error.message : "The discussion could not be opened.";
+}
 
 export function TaskDetail({
   baseUrl,
@@ -24,11 +30,15 @@ export function TaskDetail({
   readonly onTaskTerminal: (taskId: string) => void;
 }) {
   const { task } = record;
+  const router = useRouter();
   // No reset-on-taskId-change effect needed: the parent renders this
   // component with `key={task.taskId}` (see app/page.tsx), so React itself
   // remounts it — and therefore reinitializes all of its local state,
-  // `cancelState` included — whenever the selected task changes.
+  // `cancelState` and `discussionState` included — whenever the selected
+  // task changes.
   const [cancelState, setCancelState] = useState<CancelState>("idle");
+  const [discussionState, setDiscussionState] = useState<DiscussionState>("idle");
+  const [discussionError, setDiscussionError] = useState<string | null>(null);
 
   // A planning task (no run yet) has nothing to stream — never opens a
   // WebSocket connection until it has actually started (`runId` set).
@@ -43,6 +53,26 @@ export function TaskDetail({
   );
 
   const isTerminal = TERMINAL_STATUSES.has(task.status);
+
+  /**
+   * Idempotent and safe for any task state, including terminal ones — see
+   * `docs/architecture/0007-communication-boards.md`, "Task-discussion
+   * idempotency". `discussionState` guards against a duplicate board
+   * request from repeated clicks while one is already in flight, the same
+   * pending-lock discipline the Kanban card's own discuss action uses.
+   */
+  async function handleOpenDiscussion(): Promise<void> {
+    if (discussionState === "pending") return;
+    setDiscussionState("pending");
+    setDiscussionError(null);
+    try {
+      const { board } = await ensureTaskBoard(baseUrl, task.taskId);
+      router.push(`/boards?boardId=${encodeURIComponent(board.boardId)}`);
+    } catch (error) {
+      setDiscussionError(safeMessage(error));
+      setDiscussionState("idle");
+    }
+  }
 
   async function handleConfirmCancel(): Promise<void> {
     setCancelState("pending");
@@ -73,12 +103,27 @@ export function TaskDetail({
         <h2 id="task-detail-heading" className="text-lg font-semibold break-words">
           {task.title}
         </h2>
-        <div className="mt-1 flex items-center gap-2">
+        <div className="mt-1 flex flex-wrap items-center gap-2">
           <StatusBadge status={task.status} />
           {record.agentId ? (
             <span className="text-sm text-stone-500 dark:text-stone-400">{record.agentId}</span>
           ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              void handleOpenDiscussion();
+            }}
+            disabled={discussionState === "pending"}
+            className="rounded border border-stone-300 px-2 py-1 text-xs font-medium text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+          >
+            {discussionState === "pending" ? "Opening discussion…" : "Open discussion"}
+          </button>
         </div>
+        {discussionError ? (
+          <p role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">
+            {discussionError}
+          </p>
+        ) : null}
       </div>
 
       {task.description ? (

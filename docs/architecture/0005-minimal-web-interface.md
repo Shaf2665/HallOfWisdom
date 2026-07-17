@@ -1,7 +1,8 @@
 # 0005 — Minimal Web Interface
 
 Status: Draft (Phase 6; `TaskRecord`'s optional run fields noted below were extended in Phase 7,
-see `0006-kanban-board.md`).
+see `0006-kanban-board.md`; Communication Boards added in Phase 8, see
+`0007-communication-boards.md`).
 
 ## Context
 
@@ -217,10 +218,16 @@ larger feature (multi-column layout, drag interactions, its own accessibility re
 non-pointer users) that deserves its own phase rather than being folded into "the first UI exists at
 all."
 
-## Why Communication Boards are deferred to Phase 8
+## Communication Boards (Phase 8)
 
-Nothing in this phase's scope — task creation, live event streaming, cancellation — requires any
-cross-agent or cross-user communication surface. Building one now would be speculative.
+A third page, `/boards`, was added in Phase 8 on top of the same API client, schema-validation, and
+WebSocket-reconnect discipline this document describes — reusing `lib/api-client.ts`'s validated-
+response pattern and `hooks/use-task-events.ts`'s reconnect/backoff/generation-guard structure for
+its own `useBoardMessages` hook, but as a deliberately separate hook operating on
+`CommunicationMessage`, never on `NormalizedAgentEvent` (the two domains — agent execution events
+and human discussion — are kept structurally distinct end to end, protocol package through UI). See
+`0007-communication-boards.md` for the full design: board list, message history, composer, scroll
+behavior, and accessibility.
 
 ## Why authentication is still deferred
 

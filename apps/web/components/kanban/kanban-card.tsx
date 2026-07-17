@@ -24,6 +24,7 @@ export function KanbanCard({
   onOpenAssign,
   onStart,
   onCancel,
+  onOpenDiscussion,
 }: {
   readonly record: TaskRecord;
   readonly isPending: boolean;
@@ -45,6 +46,7 @@ export function KanbanCard({
   readonly onOpenAssign: (record: TaskRecord) => void;
   readonly onStart: (taskId: string) => Promise<void>;
   readonly onCancel: (record: TaskRecord) => Promise<void>;
+  readonly onOpenDiscussion: (taskId: string) => Promise<void>;
 }) {
   const { task } = record;
   const [localState, setLocalState] = useState<LocalState>("idle");
@@ -67,18 +69,14 @@ export function KanbanCard({
 
   useEffect(() => {
     if (!shouldFocusOnMount) return;
-    // The Actions menu isn't rendered at all once a card becomes locked
-    // (e.g. Start succeeding moves it into the "launching" window, or a
-    // successful Cancel lands it in a terminal column) — `availableActionsFor`
-    // returns an empty list there, so `actionsButtonRef.current` is `null`
-    // and focusing it would silently no-op, dropping focus to <body>. The
-    // title button is always rendered (locked or not), so it's the
-    // reliable fallback target.
-    if (actionsButtonRef.current) {
-      actionsButtonRef.current.focus();
-    } else {
-      titleButtonRef.current?.focus();
-    }
+    // Phase 8 made `availableActionsFor` unconditionally include an "Open
+    // discussion" action for every status, so the Actions menu (and
+    // therefore `actionsButtonRef.current`) is now always rendered once
+    // this card has mounted in its default `"idle"` local state —
+    // `actions.length === 0` can no longer occur. The title button
+    // (`titleButtonRef`) remains the draggable element itself but is no
+    // longer needed as a focus fallback here.
+    actionsButtonRef.current?.focus();
     onFocusHandled();
     // Covers both cases: a card that stays in the same column (state
     // update on an already-mounted instance — e.g. Start, which leaves
@@ -126,6 +124,29 @@ export function KanbanCard({
     }
     if (action.kind === "cancel") {
       setLocalState("confirming-cancel");
+      return;
+    }
+    if (action.kind === "discuss") {
+      // No confirmation step: opening (or creating) a discussion never
+      // changes task state and is safe to repeat — a second click while
+      // one is already in flight is prevented by the board's own
+      // `pendingTaskIds` tracking (see `isPending`/`busy` below), the same
+      // mechanism move/start/cancel already use.
+      setLocalState("busy");
+      try {
+        await onOpenDiscussion(task.taskId);
+      } catch (error) {
+        setErrorMessage(safeMessage(error));
+        // On success this card navigates away entirely, so there is
+        // nothing to refocus. On failure, though, the just-clicked "Open
+        // discussion" popover item has already unmounted (MoveMenu
+        // closed) with nothing else claiming focus — the same silent
+        // drop-to-<body> gap the assign-dialog trigger-refocus fix above
+        // exists for. Reclaim the stable "Actions" trigger explicitly.
+        actionsButtonRef.current?.focus();
+      } finally {
+        setLocalState("idle");
+      }
       return;
     }
     setLocalState("busy");

@@ -23,3 +23,13 @@ if (typeof window.matchMedia !== "function") {
       dispatchEvent: () => false,
     }) as MediaQueryList;
 }
+
+// jsdom does not implement scroll methods (no real layout engine). Message
+// history scrolling (`components/communication/message-list.tsx`) only
+// needs `scrollTo` to not throw in tests — jsdom's lack of real layout
+// already makes scroll-position assertions meaningless here regardless.
+if (typeof Element.prototype.scrollTo !== "function") {
+  Element.prototype.scrollTo = function scrollTo(): void {
+    // no-op: jsdom has no layout engine to scroll within.
+  };
+}

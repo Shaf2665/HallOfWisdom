@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as apiClient from "../../lib/api-client";
-import type { TaskRecord } from "../../lib/api-schemas";
+import type { EnsureBoardResponse, TaskRecord } from "../../lib/api-schemas";
 import { KanbanBoard } from "./kanban-board";
 
 vi.mock("../../lib/api-client", async () => {
@@ -17,8 +17,14 @@ vi.mock("../../lib/api-client", async () => {
     assignTask: vi.fn(),
     startTask: vi.fn(),
     cancelTask: vi.fn(),
+    ensureTaskBoard: vi.fn(),
   };
 });
+
+const mockRouter = { push: vi.fn(), replace: vi.fn() };
+vi.mock("next/navigation", () => ({
+  useRouter: () => mockRouter,
+}));
 
 const BASE_URL = "http://127.0.0.1:4310";
 
@@ -195,6 +201,87 @@ describe("KanbanBoard", () => {
       const card = screen.getByText("Fix the bug").closest("li");
       if (!card) throw new Error("card not found");
       expect(within(card).getByText("Ready")).toBeInTheDocument();
+    });
+  });
+
+  it("Open discussion calls ensureTaskBoard and navigates to /boards?boardId=<encoded boardId>", async () => {
+    const user = userEvent.setup();
+    vi.mocked(apiClient.listTasks).mockResolvedValue({
+      tasks: [makeRecord({ status: "backlog" })],
+    });
+    vi.mocked(apiClient.ensureTaskBoard).mockResolvedValueOnce({
+      board: {
+        boardId: "task:task-1",
+        kind: "task",
+        title: "Discussion: Fix the bug",
+        taskId: "task-1",
+        projectId: "project-1",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 0,
+      },
+      messagesPath: "/api/v1/boards/task:task-1/messages",
+      livePath: "/api/v1/boards/task:task-1/messages/live",
+    });
+    render(<KanbanBoard baseUrl={BASE_URL} />);
+    await screen.findByText("Fix the bug");
+
+    const [firstActionsButton] = screen.getAllByRole("button", { name: "Actions" });
+    if (!firstActionsButton) throw new Error("Actions button not found");
+    await user.click(firstActionsButton);
+    await user.click(screen.getByRole("button", { name: "Open discussion" }));
+
+    await waitFor(() => {
+      expect(apiClient.ensureTaskBoard).toHaveBeenCalledWith(BASE_URL, "task-1");
+    });
+    await waitFor(() => {
+      expect(mockRouter.push).toHaveBeenCalledWith(
+        `/boards?boardId=${encodeURIComponent("task:task-1")}`,
+      );
+    });
+  });
+
+  it("repeated Open discussion clicks select the same board (no duplicate creation attempted mid-flight)", async () => {
+    const user = userEvent.setup();
+    vi.mocked(apiClient.listTasks).mockResolvedValue({
+      tasks: [makeRecord({ status: "backlog" })],
+    });
+    let resolveEnsure!: (value: EnsureBoardResponse) => void;
+    vi.mocked(apiClient.ensureTaskBoard).mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveEnsure = resolve;
+      }),
+    );
+    render(<KanbanBoard baseUrl={BASE_URL} />);
+    await screen.findByText("Fix the bug");
+
+    const [firstActionsButton] = screen.getAllByRole("button", { name: "Actions" });
+    if (!firstActionsButton) throw new Error("Actions button not found");
+    await user.click(firstActionsButton);
+    await user.click(screen.getByRole("button", { name: "Open discussion" }));
+
+    // The card is now pending (busy) — its Actions button is disabled, so a
+    // second click cannot even reach handleAction while the first request
+    // is still in flight.
+    expect(screen.getByRole("button", { name: "Actions" })).toBeDisabled();
+
+    resolveEnsure({
+      board: {
+        boardId: "task:task-1",
+        kind: "task",
+        title: "Discussion: Fix the bug",
+        taskId: "task-1",
+        projectId: "project-1",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        messageCount: 0,
+      },
+      messagesPath: "/api/v1/boards/task:task-1/messages",
+      livePath: "/api/v1/boards/task:task-1/messages/live",
+    });
+
+    await waitFor(() => {
+      expect(apiClient.ensureTaskBoard).toHaveBeenCalledTimes(1);
     });
   });
 

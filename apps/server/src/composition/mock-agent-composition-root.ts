@@ -8,6 +8,9 @@ import { TaskStore } from "../tasks/task-store.js";
 import { TaskOrchestrator } from "../tasks/task-orchestrator.js";
 import { EventStore } from "../events/event-store.js";
 import { EventBus } from "../events/event-bus.js";
+import { BoardStore } from "../boards/board-store.js";
+import { MessageStore } from "../boards/message-store.js";
+import { MessageBus } from "../boards/message-bus.js";
 import type { ServerLimits } from "../config/server-config.js";
 import { ServerCliError } from "../config/server-cli-args.js";
 
@@ -26,6 +29,9 @@ export interface ServerComposition {
   readonly eventStore: EventStore;
   readonly eventBus: EventBus;
   readonly orchestrator: TaskOrchestrator;
+  readonly boardStore: BoardStore;
+  readonly messageStore: MessageStore;
+  readonly messageBus: MessageBus;
 }
 
 function resolveScenario(rawScenario: string | undefined): MockAgentScenario {
@@ -69,5 +75,27 @@ export function createMockAgentServerComposition(
     onExecutionError: options.onExecutionError,
   });
 
-  return { registry, taskStore, eventStore, eventBus, orchestrator };
+  // A fresh, isolated store per call (never shared module-level state — see
+  // `BoardStore`'s own test coverage for this) with the one General board
+  // seeded immediately, before this composition is ever handed to a route.
+  const boardStore = new BoardStore({ maxBoards: options.limits.maxBoards, taskStore });
+  const messageStore = new MessageStore({
+    maxMessagesPerBoard: options.limits.maxMessagesPerBoard,
+  });
+  const messageBus = new MessageBus({
+    maxSubscribersPerBoard: options.limits.maxSubscribersPerBoard,
+  });
+  const generalBoard = boardStore.seedGeneralBoard(new Date().toISOString());
+  messageStore.registerBoard(generalBoard.boardId);
+
+  return {
+    registry,
+    taskStore,
+    eventStore,
+    eventBus,
+    orchestrator,
+    boardStore,
+    messageStore,
+    messageBus,
+  };
 }

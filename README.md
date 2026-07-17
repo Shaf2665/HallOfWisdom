@@ -13,17 +13,19 @@ rules coding agents working in this repository must follow.
 
 ## Status
 
-**Phase 7 — Kanban Board.** Six packages now exist: `@hall-of-wisdom/protocol` (the wire contract),
-`@hall-of-wisdom/agent-adapter-sdk` (the adapter contract), `@hall-of-wisdom/mock-agent` (the first
-concrete adapter), `@hall-of-wisdom/hall-runner` (a local CLI that runs one task and streams
-normalized events as JSON Lines), `@hall-of-wisdom/hall-core` (a local Fastify HTTP + WebSocket
-server that creates and runs tasks in memory, calling Hall Runner's public API in-process, with an
-exact-origin CORS/WebSocket-Origin allowlist for the web app below), and `@hall-of-wisdom/web` — a
-Next.js browser dashboard with two pages: the Task Console (`/`, Phase 6, immediate task execution)
-and the Kanban Board (`/board`, Phase 7, planning tasks — Backlog → Ready → Assigned → In Progress
-→ a terminal outcome — with drag-and-drop and full keyboard-accessible equivalents). No
-authentication, persistence, Communication Boards, Git integration, or real coding-agent
-integration exists yet.
+**Phase 8 — Communication Boards.** Six packages now exist: `@hall-of-wisdom/protocol` (the wire
+contract), `@hall-of-wisdom/agent-adapter-sdk` (the adapter contract), `@hall-of-wisdom/mock-agent`
+(the first concrete adapter), `@hall-of-wisdom/hall-runner` (a local CLI that runs one task and
+streams normalized events as JSON Lines), `@hall-of-wisdom/hall-core` (a local Fastify HTTP +
+WebSocket server that creates and runs tasks in memory, calling Hall Runner's public API
+in-process, with an exact-origin CORS/WebSocket-Origin allowlist for the web app below, plus a
+General board and per-task discussion boards for local human communication), and
+`@hall-of-wisdom/web` — a Next.js browser dashboard with three pages: the Task Console (`/`, Phase
+6, immediate task execution), the Kanban Board (`/board`, Phase 7, planning tasks — Backlog → Ready
+→ Assigned → In Progress → a terminal outcome — with drag-and-drop and full keyboard-accessible
+equivalents), and Communication Boards (`/boards`, Phase 8, a General board plus one discussion
+board per task, with live WebSocket message delivery). No authentication, persistence, agent-to-
+agent or agent-to-human messaging, Git integration, or real coding-agent integration exists yet.
 
 ## Requirements
 
@@ -73,14 +75,14 @@ pnpm --filter @hall-of-wisdom/hall-core run verify:package-entry
 
 ## Packages
 
-| Package                                                           | Purpose                                                                                                                                                                                                             |
-| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@hall-of-wisdom/protocol`](packages/protocol)                   | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation.                                                                   |
-| [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                                |
-| [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                               |
-| [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events.                |
-| [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, and binds to `127.0.0.1` only.                      |
-| [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: the Task Console (`/`) for immediate execution and the Kanban Board (`/board`) for planning tasks — talks to Hall Core directly (no proxy, no custom server); binds to `127.0.0.1` only. |
+| Package                                                           | Purpose                                                                                                                                                                                                                                                                            |
+| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@hall-of-wisdom/protocol`](packages/protocol)                   | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation.                                                                                                                                  |
+| [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                                                                                               |
+| [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                                                                                              |
+| [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events.                                                                               |
+| [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, hosts a General board and per-task discussion boards for local human communication, and binds to `127.0.0.1` only. |
+| [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: the Task Console (`/`) for immediate execution, the Kanban Board (`/board`) for planning tasks, and Communication Boards (`/boards`) for local discussion — talks to Hall Core directly (no proxy, no custom server); binds to `127.0.0.1` only.        |
 
 ## Running Hall Runner
 
@@ -433,6 +435,67 @@ See [`docs/architecture/0006-kanban-board.md`](docs/architecture/0006-kanban-boa
 design: the column/status mapping, why drag can never start execution on its own, the accessible
 non-drag controls, the dnd-kit boundary, and the polling strategy.
 
+## Running Communication Boards
+
+Communication Boards (`/boards`) share the same Hall Core process and the same two-terminal setup
+as Hall Web above — no extra flags, no extra terminal. All in-memory data (boards and messages) is
+cleared whenever Hall Core restarts — see step 9 below.
+
+**Terminal 1 — Hall Core:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario success `
+  --web-origin "http://127.0.0.1:3000"
+```
+
+**Terminal 2 — Hall Web:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/web run dev
+```
+
+**Walkthrough** (browser):
+
+1. Start Hall Core and Hall Web as above.
+2. Open `http://127.0.0.1:3000` and confirm Hall Web is reachable (server status shows "Online" in
+   the top bar).
+3. Click **"Communication Boards"** in the top navigation (or go directly to
+   `http://127.0.0.1:3000/boards`) — confirm the **General** board is selected by default and its
+   message history loads (empty at first: "No messages yet. Start the discussion.").
+4. Type a message in the composer (e.g. "Hello from General") and click **Send** — confirm it
+   appears in the message list with your author name ("Local Operator") and a timestamp, and that
+   the composer clears on success.
+5. Go to `http://127.0.0.1:3000/board`, create a backlog task (or use an existing one), open its
+   Actions menu, and click **"Open discussion"** — confirm you're navigated to `/boards` with that
+   task's discussion board selected (a fresh board, "No messages yet.").
+6. Send a message in this task's discussion (e.g. "Notes for this task") — confirm it appears only
+   in this board's history, not in General's (switch back to General to confirm the two boards'
+   messages never cross).
+7. Go back to `/board`, open the **same** task's Actions menu again, and click **"Open discussion"**
+   a second time — confirm you land on the identical board (same message still there, board count in
+   the board list unchanged) rather than a second board being created for the same task.
+8. **Reconnect test** (keeps Hall Core running the whole time): with a board open and its status
+   showing "Live", open DevTools and set Network conditions to **Offline** for a few seconds, then
+   restore **Online** — confirm the status briefly shows "Reconnecting…" then "Live" again, and that
+   no messages are duplicated or lost.
+9. **Restart data-loss test**: stop Hall Core (Ctrl+C in Terminal 1), start it again with the same
+   command, then click **Refresh** in the board list (or reload the page) — confirm only a fresh,
+   empty General board remains (`0` messages) and the task discussion board from steps 5–7 is gone.
+   This is expected: Communication Boards, like tasks and events, are in-memory only and do not
+   survive a Hall Core restart.
+10. **Keyboard-only verification**: `Tab` to a board in the board list and press `Enter`/`Space` to
+    select it (confirm the selection is visible and announced); `Tab` into the message composer,
+    type a message, and press **Ctrl+Enter** (or **Cmd+Enter** on macOS) to send without touching the
+    mouse — confirm the message sends and focus remains sensible afterward.
+
+See [`docs/architecture/0007-communication-boards.md`](docs/architecture/0007-communication-boards.md)
+for the full design: the board/message model, capacity limits, the REST and WebSocket contracts,
+the replay/at-least-once delivery guarantee, and why editing, deletion, agent messaging, and
+persistence remain deferred.
+
 ## Full workspace verification
 
 ```powershell
@@ -468,7 +531,7 @@ hall-of-wisdom/
   README.md               this file
 ```
 
-Future phases will add more `packages/` (database, source-control, work-management), Communication
-Boards on top of `apps/web`, and more `adapters/` (Claude Code, Codex, ...) as each becomes
-necessary. See the architecture documents for the full planned layout and the Phase 3/4/5/6/7
-boundary decisions.
+Future phases will add more `packages/` (database, source-control, work-management), a real
+coding-agent adapter, and more `adapters/` (Claude Code, Codex, ...) as each becomes necessary. See
+the architecture documents for the full planned layout and the Phase 3/4/5/6/7/8 boundary
+decisions.

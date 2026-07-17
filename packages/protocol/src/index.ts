@@ -24,6 +24,23 @@ export { runStatusSchema, agentRunSchema, parseAgentRun } from "./agent-run.js";
 export type { RunStatus, AgentRun } from "./agent-run.js";
 
 export {
+  communicationBoardKindSchema,
+  communicationAuthorSchema,
+  communicationBoardSchema,
+  parseCommunicationBoard,
+  MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH,
+  communicationMessageTextSchema,
+  communicationMessageSchema,
+  parseCommunicationMessage,
+} from "./communication.js";
+export type {
+  CommunicationBoardKind,
+  CommunicationAuthor,
+  CommunicationBoard,
+  CommunicationMessage,
+} from "./communication.js";
+
+export {
   fileChangeOperationSchema,
   approvalRiskLevelSchema,
   cancelledBySchema,

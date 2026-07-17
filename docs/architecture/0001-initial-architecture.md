@@ -1,13 +1,14 @@
 # 0001 — Initial Architecture
 
-Status: Draft (Phase 7). This document will be revised as later phases add real packages. See
+Status: Draft (Phase 8). This document will be revised as later phases add real packages. See
 [`0002-agent-adapter-boundary.md`](0002-agent-adapter-boundary.md) for the Phase 3 adapter/SDK
 boundary decisions, [`0003-hall-runner-boundary.md`](0003-hall-runner-boundary.md) for the Phase 4
 Hall Runner boundary decisions, [`0004-hall-core-server.md`](0004-hall-core-server.md) for the
 Phase 5 / 5.1 Hall Core server decisions,
 [`0005-minimal-web-interface.md`](0005-minimal-web-interface.md) for the Phase 6 web dashboard
-decisions, and [`0006-kanban-board.md`](0006-kanban-board.md) for the Phase 7 Kanban board
-decisions.
+decisions, [`0006-kanban-board.md`](0006-kanban-board.md) for the Phase 7 Kanban board decisions,
+and [`0007-communication-boards.md`](0007-communication-boards.md) for the Phase 8 Communication
+Boards decisions.
 
 ## Vision
 
@@ -41,9 +42,10 @@ this repository does not contain empty placeholder packages ahead of time.
 hall-of-wisdom/
   apps/
     web/                    @hall-of-wisdom/web - Next.js + React + Tailwind browser dashboard:
-                             Task Console (Phase 6, see 0005-minimal-web-interface.md) and Kanban
-                             Board (Phase 7, see 0006-kanban-board.md). Talks to Hall Core directly
-                             from the browser — no proxy, no custom Next.js server.
+                             Task Console (Phase 6, see 0005-minimal-web-interface.md), Kanban
+                             Board (Phase 7, see 0006-kanban-board.md), and Communication Boards
+                             (Phase 8, see 0007-communication-boards.md). Talks to Hall Core
+                             directly from the browser — no proxy, no custom Next.js server.
     server/                 @hall-of-wisdom/hall-core - Fastify + WebSocket backend (Phase 5).
                              Calls Hall Runner's public runTask()/AgentRegistry/validateWorkspace
                              in-process (see 0004-hall-core-server.md); no changes were needed to
@@ -76,7 +78,7 @@ hall-of-wisdom/
   pnpm-workspace.yaml
 ```
 
-## Current state (end of Phase 7)
+## Current state (end of Phase 8)
 
 ```
 hall-of-wisdom/
@@ -88,12 +90,14 @@ hall-of-wisdom/
   runners/
     hall-runner/               @hall-of-wisdom/hall-runner - local task runner (see 0003)
   apps/
-    server/                    @hall-of-wisdom/hall-core - HTTP + WebSocket server (see 0004, 0006)
-    web/                       @hall-of-wisdom/web - Task Console (/, see 0005) and Kanban Board
-                               (/board, see 0006)
+    server/                    @hall-of-wisdom/hall-core - HTTP + WebSocket server (see 0004, 0006,
+                               0007)
+    web/                       @hall-of-wisdom/web - Task Console (/, see 0005), Kanban Board
+                               (/board, see 0006), and Communication Boards (/boards, see 0007)
   docs/architecture/0001-initial-architecture.md, 0002-agent-adapter-boundary.md,
                      0003-hall-runner-boundary.md, 0004-hall-core-server.md,
-                     0005-minimal-web-interface.md, 0006-kanban-board.md
+                     0005-minimal-web-interface.md, 0006-kanban-board.md,
+                     0007-communication-boards.md
   AGENTS.md
   CLAUDE.md
   README.md
@@ -187,6 +191,17 @@ their shapes only; it does not enforce "exactly one terminal event per run" or "
 termination" itself. As of Phase 3, that lifecycle rule _is_ enforced — by `TerminalEventGuard` in
 `@hall-of-wisdom/agent-adapter-sdk`, which every adapter (Mock Agent now, others later) is required
 to use rather than reimplement. See `0002-agent-adapter-boundary.md` for the full design.
+
+## Human communication is a separate vocabulary from agent events (Phase 8)
+
+`packages/protocol/src/communication.ts` (Phase 8) adds `CommunicationBoard` and
+`CommunicationMessage` — schemas for human-authored, human-readable discussion, deliberately kept
+independent from the nine `NormalizedAgentEvent` variants above rather than added as a tenth event
+type. A discussion message is not something an agent adapter emits, has no `runId`/`agentId`, and
+has its own independent per-board sequence counter — conflating the two vocabularies would force
+every future agent-event consumer to also handle human chat, and vice versa. See
+`0007-communication-boards.md` for the full design and for why this is explicitly not the channel
+future CEO Agent or agent-to-agent messaging will use.
 
 ## Open questions for later phases
 

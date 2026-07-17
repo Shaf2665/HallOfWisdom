@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   DndContext,
   DragOverlay,
@@ -13,7 +14,13 @@ import {
   type DragStartEvent,
 } from "@dnd-kit/core";
 import type { TaskStatus } from "@hall-of-wisdom/protocol";
-import { ApiClientError, cancelTask, startTask, transitionTask } from "../../lib/api-client";
+import {
+  ApiClientError,
+  cancelTask,
+  ensureTaskBoard,
+  startTask,
+  transitionTask,
+} from "../../lib/api-client";
 import type { CreateTaskResponse, TaskRecord } from "../../lib/api-schemas";
 import { useKanbanTasks } from "../../hooks/use-kanban-tasks";
 import {
@@ -62,6 +69,7 @@ function usePrefersReducedMotion(): boolean {
  * the same `useTaskEvents` hook from Phase 6 unchanged.
  */
 export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
+  const router = useRouter();
   const { tasks, state, warning, refresh } = useKanbanTasks(baseUrl);
   const [filters, setFilters] = useState<KanbanFilters>(DEFAULT_KANBAN_FILTERS);
   const [pendingTaskIds, setPendingTaskIds] = useState<ReadonlySet<string>>(new Set());
@@ -177,6 +185,29 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
       });
     },
     [baseUrl, refresh],
+  );
+
+  /**
+   * Never changes task state — `POST .../board` only ensures a discussion
+   * board exists (idempotently) and this handler navigates to it. No
+   * `refresh()`/`lastActedOnTaskId` bookkeeping is needed here (unlike
+   * move/start/cancel/assign): there is no column change or task-count
+   * update for this card to reflect, and the page is about to navigate
+   * away on success anyway.
+   */
+  const handleOpenDiscussion = useCallback(
+    async (taskId: string): Promise<void> => {
+      await withPending(taskId, async () => {
+        try {
+          const { board } = await ensureTaskBoard(baseUrl, taskId);
+          router.push(`/boards?boardId=${encodeURIComponent(board.boardId)}`);
+        } catch (error) {
+          setAnnouncement(safeMessage(error));
+          throw error;
+        }
+      });
+    },
+    [baseUrl, router],
   );
 
   async function handleAssigned(updated: TaskRecord): Promise<void> {
@@ -321,6 +352,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
                 onOpenAssign={setAssigningRecord}
                 onStart={handleStart}
                 onCancel={handleCancel}
+                onOpenDiscussion={handleOpenDiscussion}
               />
             ))}
           </div>

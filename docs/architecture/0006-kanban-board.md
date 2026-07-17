@@ -1,7 +1,8 @@
 # 0006 — Kanban Board
 
 Status: Draft (Phase 7; assignment concurrency hardened in Phase 7.1; ABA gap closed with an internal
-task revision in Phase 7.2).
+task revision in Phase 7.2; each card gained an "Open discussion" action in Phase 8, see
+`0007-communication-boards.md`).
 
 ## Context
 
@@ -401,12 +402,19 @@ automated yet — a later phase" note — lets the board's shape match the event
 without pretending review-agent execution or human-approval logic exists yet. No code path in this
 server or this phase ever transitions a task into either status.
 
-## Why Communication Boards remain deferred to Phase 8
+## Open discussion action (Phase 8)
 
-Nothing in this phase — planning tasks, manual transitions, assignment, starting execution — needs
-inter-agent or agent-to-human messaging. Communication Boards are a materially separate feature
-(message threads, notification delivery, presence) that deserves its own phase rather than being
-folded into "tasks can now be planned before they run."
+Every Kanban card exposes an "Open discussion" action in its Actions menu, unconditionally — the
+one card action never gated by status (`lib/kanban.ts`'s `DISCUSS_ACTION`, appended to every
+status's action list including terminal/running/launching, which previously returned `[]` for
+those). This is deliberately the one action that always exists: a discussion has no relationship to
+whether a task is still runnable, so it needed no place in `availableActionsFor`'s status-based
+branching at all. Clicking it calls `POST /tasks/:taskId/board` (idempotent — creates the task's one
+discussion board on first use, returns the existing one on every subsequent click) and navigates to
+`/boards?boardId=<encoded>`; it never changes the task's status, assigns an adapter, or touches
+`AgentRun`/event state. See `0007-communication-boards.md` for the full Communication Boards design
+this action opens into, and "Why Communication Boards remain deferred" no longer applies as of
+Phase 8 — the feature that section originally deferred is now implemented.
 
 ## Cancellation: two operations, one decision
 

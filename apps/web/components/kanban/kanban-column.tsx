@@ -18,6 +18,7 @@ export function KanbanColumn({
   onOpenAssign,
   onStart,
   onCancel,
+  onOpenDiscussion,
 }: {
   readonly column: ColumnDefinition;
   readonly tasks: readonly TaskRecord[];
@@ -31,6 +32,7 @@ export function KanbanColumn({
   readonly onOpenAssign: (record: TaskRecord) => void;
   readonly onStart: (taskId: string) => Promise<void>;
   readonly onCancel: (record: TaskRecord) => Promise<void>;
+  readonly onOpenDiscussion: (taskId: string) => Promise<void>;
 }) {
   const { setNodeRef, isOver } = useDroppable({ id: column.status });
 
@@ -92,6 +94,7 @@ export function KanbanColumn({
               onOpenAssign={onOpenAssign}
               onStart={onStart}
               onCancel={onCancel}
+              onOpenDiscussion={onOpenDiscussion}
             />
           ))
         )}

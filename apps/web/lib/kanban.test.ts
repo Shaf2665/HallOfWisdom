@@ -252,63 +252,71 @@ describe("isCardLocked / canDrag", () => {
 });
 
 describe("availableActionsFor", () => {
-  it("backlog: Move to Ready, Move to Blocked, Cancel task", () => {
+  it("backlog: Move to Ready, Move to Blocked, Cancel task, Open discussion", () => {
     const actions = availableActionsFor(makeRecord({ status: "backlog" }));
     expect(actions.map((a) => a.label)).toEqual([
       "Move to Ready",
       "Move to Blocked",
       "Cancel task",
+      "Open discussion",
     ]);
   });
 
-  it("ready: Move to Backlog, Assign agent, Move to Blocked, Cancel task", () => {
+  it("ready: Move to Backlog, Assign agent, Move to Blocked, Cancel task, Open discussion", () => {
     const actions = availableActionsFor(makeRecord({ status: "ready" }));
     expect(actions.map((a) => a.label)).toEqual([
       "Move to Backlog",
       "Assign agent",
       "Move to Blocked",
       "Cancel task",
+      "Open discussion",
     ]);
   });
 
-  it("assigned (not started): Start task, Return to Ready, Move to Blocked, Cancel task", () => {
+  it("assigned (not started): Start task, Return to Ready, Move to Blocked, Cancel task, Open discussion", () => {
     const actions = availableActionsFor(makeRecord({ status: "assigned" }, undefined));
     expect(actions.map((a) => a.label)).toEqual([
       "Start task",
       "Return to Ready",
       "Move to Blocked",
       "Cancel task",
+      "Open discussion",
     ]);
   });
 
-  it("assigned (launching, has runId): no actions", () => {
+  it("assigned (launching, has runId): Open discussion only (Phase 8 — a discussion may always be opened)", () => {
     const actions = availableActionsFor(makeRecord({ status: "assigned" }, "run-1"));
-    expect(actions).toEqual([]);
+    expect(actions.map((a) => a.label)).toEqual(["Open discussion"]);
   });
 
-  it("blocked: Move to Backlog, Move to Ready, Cancel task", () => {
+  it("blocked: Move to Backlog, Move to Ready, Cancel task, Open discussion", () => {
     const actions = availableActionsFor(makeRecord({ status: "blocked" }));
     expect(actions.map((a) => a.label)).toEqual([
       "Move to Backlog",
       "Move to Ready",
       "Cancel task",
+      "Open discussion",
     ]);
   });
 
-  it("running: Cancel active task only", () => {
+  it("running: Cancel active task, Open discussion", () => {
     const actions = availableActionsFor(makeRecord({ status: "running" }, "run-1"));
-    expect(actions.map((a) => a.label)).toEqual(["Cancel active task"]);
+    expect(actions.map((a) => a.label)).toEqual(["Cancel active task", "Open discussion"]);
   });
 
-  it("reviewing / waiting_for_approval: no actions", () => {
+  it("reviewing / waiting_for_approval: Open discussion only", () => {
     for (const status of ["reviewing", "waiting_for_approval"] as const) {
-      expect(availableActionsFor(makeRecord({ status }, "run-1"))).toEqual([]);
+      expect(availableActionsFor(makeRecord({ status }, "run-1")).map((a) => a.label)).toEqual([
+        "Open discussion",
+      ]);
     }
   });
 
-  it("terminal statuses: no actions (view details only)", () => {
+  it("terminal statuses: Open discussion only (still otherwise view details only)", () => {
     for (const status of ["completed", "failed", "cancelled"] as const) {
-      expect(availableActionsFor(makeRecord({ status }, "run-1"))).toEqual([]);
+      expect(availableActionsFor(makeRecord({ status }, "run-1")).map((a) => a.label)).toEqual([
+        "Open discussion",
+      ]);
     }
   });
 
