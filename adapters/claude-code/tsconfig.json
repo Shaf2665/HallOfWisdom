@@ -2,14 +2,10 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
-    "types": ["node"],
     // See packages/agent-adapter-sdk/tsconfig.json for why typecheck
     // resolves workspace dependencies against source, not dist.
     "paths": {
       "@hall-of-wisdom/agent-adapter-sdk": ["../../packages/agent-adapter-sdk/src/index.ts"],
-      "@hall-of-wisdom/claude-code-adapter": ["../../adapters/claude-code/src/index.ts"],
-      "@hall-of-wisdom/hall-runner": ["../../runners/hall-runner/src/index.ts"],
-      "@hall-of-wisdom/mock-agent": ["../../adapters/mock-agent/src/index.ts"],
       "@hall-of-wisdom/protocol": ["../../packages/protocol/src/index.ts"]
     }
   },

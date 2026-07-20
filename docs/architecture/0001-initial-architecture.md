@@ -53,13 +53,16 @@ hall-of-wisdom/
   packages/
     protocol/               Hall protocol: agent identity, tasks, runs, normalized events (Phase 2)
     agent-adapter-sdk/      Shared contract all coding-agent adapters implement (Phase 3)
-    database/                Prisma schema and data access (Phase 9)
+    database/                Prisma schema and data access (originally planned for Phase 9; that
+                             slot was redirected to the Claude Code adapter instead — see below)
     source-control/         Provider-neutral Git/GitHub/Azure Repos interfaces (Phase 10, 18, 19)
     work-management/        Provider-neutral work-item interfaces (Boards, etc.)
   adapters/
     mock-agent/              Deterministic, no-network adapter used to prove the pipeline (Phase 3)
-    claude-code/              Claude Code detection + execution adapter (Phase 12, 14)
-    codex/                     Codex detection + execution adapter (Phase 13, 15)
+    claude-code/              @hall-of-wisdom/claude-code-adapter - real, subscription-authenticated
+                             Claude Code CLI adapter (delivered Phase 9, brought forward from the
+                             originally-planned Phase 12/14 — see 0008-claude-code-adapter.md)
+    codex/                     Codex detection + execution adapter (deferred; not yet scheduled)
   runners/
     hall-runner/            Local process: registers adapters, validates workspace/working
                              directory, runs one task, streams JSON Lines events (Phase 4).
@@ -78,7 +81,7 @@ hall-of-wisdom/
   pnpm-workspace.yaml
 ```
 
-## Current state (end of Phase 8)
+## Current state (end of Phase 9)
 
 ```
 hall-of-wisdom/
@@ -87,17 +90,19 @@ hall-of-wisdom/
     agent-adapter-sdk/        @hall-of-wisdom/agent-adapter-sdk - adapter contract (see 0002)
   adapters/
     mock-agent/                @hall-of-wisdom/mock-agent - deterministic, network-free adapter
+    claude-code/                @hall-of-wisdom/claude-code-adapter - real, subscription-
+                               authenticated Claude Code CLI adapter (see 0008)
   runners/
     hall-runner/               @hall-of-wisdom/hall-runner - local task runner (see 0003)
   apps/
     server/                    @hall-of-wisdom/hall-core - HTTP + WebSocket server (see 0004, 0006,
-                               0007)
+                               0007, 0008)
     web/                       @hall-of-wisdom/web - Task Console (/, see 0005), Kanban Board
                                (/board, see 0006), and Communication Boards (/boards, see 0007)
   docs/architecture/0001-initial-architecture.md, 0002-agent-adapter-boundary.md,
                      0003-hall-runner-boundary.md, 0004-hall-core-server.md,
                      0005-minimal-web-interface.md, 0006-kanban-board.md,
-                     0007-communication-boards.md
+                     0007-communication-boards.md, 0008-claude-code-adapter.md
   AGENTS.md
   CLAUDE.md
   README.md
@@ -107,7 +112,10 @@ hall-of-wisdom/
 
 No `integrations/` directory exists yet, and no Git-related or database packages exist yet — the
 remaining packages listed in "Planned module structure" above are created only when the phase that
-needs them arrives.
+needs them arrives. `database/` was originally slotted for "Phase 9" in that planned structure; the
+user's actual Phase 9 kickoff redirected this phase slot to the Claude Code adapter instead (brought
+forward from its originally-planned Phase 12/14) — the database/Prisma work remains unscheduled, not
+cancelled.
 
 ## The Hall protocol (`@hall-of-wisdom/protocol`, Phase 2)
 

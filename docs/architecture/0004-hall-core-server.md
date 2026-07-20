@@ -115,6 +115,23 @@ fields (`adapterId`, `displayName`, `adapterVersion`, `agentId`, `agentDisplayNa
 value, or the `AgentAdapter`/`AgentRegistry` instance itself. The web client is expected to render
 whatever this endpoint actually returns rather than assuming `hall.mock-agent` is the only adapter.
 
+## Provider-neutral adapter composition (Phase 9)
+
+Registering a second, real adapter (Claude Code — see
+[`0008-claude-code-adapter.md`](0008-claude-code-adapter.md)) alongside Mock Agent did not require
+touching `TaskOrchestrator`, `TaskStore`, any generic route, or any Hall Web component — the same
+provider-neutral guarantee `0002-agent-adapter-boundary.md` establishes for adapters generally holds
+across two real registrations, not just one. `apps/server/src/composition/` now has two composition
+roots, each the sole file in this package allowed to know about its specific adapter:
+`mock-agent-composition-root.ts` (unchanged since Phase 5) and the new
+`claude-code-composition-root.ts`, which registers the Claude Code adapter unconditionally — no
+`--enable-claude-code` startup flag exists, since the safe default is "register it and let `detect()`
+report whatever its real availability is," identical to how Mock Agent has always behaved.
+`server-composition.ts` composes both roots onto one shared `AgentRegistry` without either knowing
+the other exists. `GET /api/v1/adapters` (see "Safe adapter discovery" above) lists both without any
+change to that route's own code, and an unavailable Claude Code adapter (CLI not installed, not
+logged in, auth unverifiable) never prevents Mock Agent from remaining fully operational.
+
 ## Task orchestration
 
 `TaskOrchestrator` (`tasks/task-orchestrator.ts`) is provider-neutral: it never references Mock

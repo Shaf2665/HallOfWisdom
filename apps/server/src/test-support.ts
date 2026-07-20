@@ -57,6 +57,8 @@ export interface TestHarnessOptions {
   readonly logger?: boolean | undefined;
   readonly onExecutionError?: ((taskId: string, error: unknown) => void) | undefined;
   readonly webOrigin?: string | undefined;
+  /** Extra adapters registered alongside Mock Agent, e.g. a `ClaudeCodeAdapter` for coexistence tests. Defaults to none — existing callers are unaffected. */
+  readonly additionalAdapters?: readonly AgentAdapter[] | undefined;
 }
 
 export interface TestHarness {
@@ -76,6 +78,9 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
   const adapter = new MockAgentAdapter(options.mockAgentConfig ?? { scenario: "success" });
   const registry = new AgentRegistry();
   registry.register(adapter);
+  for (const additionalAdapter of options.additionalAdapters ?? []) {
+    registry.register(additionalAdapter);
+  }
 
   const taskStore = new TaskStore({ maxTasks: limits.maxTasks });
   const eventStore = new EventStore({ maxEventsPerTask: limits.maxEventsPerTask });

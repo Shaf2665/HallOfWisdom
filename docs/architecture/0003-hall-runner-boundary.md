@@ -34,8 +34,16 @@ own `adapters/<name>` package, never inside the runner. Concretely in this phase
 any Mock-Agent-specific type. The _only_ file that imports `@hall-of-wisdom/mock-agent` is
 `mock-agent-composition-root.ts` — a small, clearly-named development composition root that
 converts validated CLI options into a `MockAgentConfig`, constructs the adapter, and registers it.
-When Claude Code and Codex adapters exist (Phase 12+), each gets its own composition root next to
-this one; `runner-service.ts` does not change, because it never knew which adapter it was running.
+When Claude Code and Codex adapters exist, each gets its own composition root next to this one;
+`runner-service.ts` does not change, because it never knew which adapter it was running. In
+practice, Phase 9's real Claude Code adapter was wired directly into Hall Core (`apps/server`)
+rather than into this CLI — its composition root
+(`apps/server/src/composition/claude-code-composition-root.ts`) follows the identical pattern one
+layer up, alongside Hall Core's own pre-existing `mock-agent-composition-root.ts` (see
+[`0008-claude-code-adapter.md`](0008-claude-code-adapter.md) and
+[`0004-hall-core-server.md`](0004-hall-core-server.md)'s "Provider-neutral adapter composition"
+section); this CLI's own composition-root mechanism remains available, unmodified, for a future
+adapter that needs it here instead.
 
 ## Agent Registry behavior
 

@@ -13,19 +13,24 @@ rules coding agents working in this repository must follow.
 
 ## Status
 
-**Phase 8 — Communication Boards.** Six packages now exist: `@hall-of-wisdom/protocol` (the wire
-contract), `@hall-of-wisdom/agent-adapter-sdk` (the adapter contract), `@hall-of-wisdom/mock-agent`
-(the first concrete adapter), `@hall-of-wisdom/hall-runner` (a local CLI that runs one task and
-streams normalized events as JSON Lines), `@hall-of-wisdom/hall-core` (a local Fastify HTTP +
-WebSocket server that creates and runs tasks in memory, calling Hall Runner's public API
-in-process, with an exact-origin CORS/WebSocket-Origin allowlist for the web app below, plus a
-General board and per-task discussion boards for local human communication), and
-`@hall-of-wisdom/web` — a Next.js browser dashboard with three pages: the Task Console (`/`, Phase
-6, immediate task execution), the Kanban Board (`/board`, Phase 7, planning tasks — Backlog → Ready
-→ Assigned → In Progress → a terminal outcome — with drag-and-drop and full keyboard-accessible
-equivalents), and Communication Boards (`/boards`, Phase 8, a General board plus one discussion
-board per task, with live WebSocket message delivery). No authentication, persistence, agent-to-
-agent or agent-to-human messaging, Git integration, or real coding-agent integration exists yet.
+**Phase 9.1 — Claude Configuration Isolation and Authentication Output Hygiene.** Seven packages
+now exist: `@hall-of-wisdom/protocol` (the wire contract), `@hall-of-wisdom/agent-adapter-sdk` (the
+adapter contract), `@hall-of-wisdom/mock-agent` (the first, deterministic adapter),
+`@hall-of-wisdom/claude-code-adapter` (Phase 9 — a real `AgentAdapter` that spawns the operator's
+own locally-installed, subscription-authenticated Claude Code CLI, hardened in Phase 9.1 with
+`--safe-mode`, no discretionary `--setting-sources`, and stricter authentication-output handling —
+see [`docs/architecture/0008-claude-code-adapter.md`](docs/architecture/0008-claude-code-adapter.md)),
+`@hall-of-wisdom/hall-runner` (a local CLI that runs one task and streams normalized events as JSON
+Lines), `@hall-of-wisdom/hall-core` (a local Fastify HTTP + WebSocket server that creates and runs
+tasks in memory, calling Hall Runner's public API in-process, with an exact-origin
+CORS/WebSocket-Origin allowlist for the web app below, plus a General board and per-task discussion
+boards for local human communication), and `@hall-of-wisdom/web` — a Next.js browser dashboard with
+three pages: the Task Console (`/`, Phase 6, immediate task execution), the Kanban Board (`/board`,
+Phase 7, planning tasks — Backlog → Ready → Assigned → In Progress → a terminal outcome — with
+drag-and-drop and full keyboard-accessible equivalents), and Communication Boards (`/boards`, Phase
+8, a General board plus one discussion board per task, with live WebSocket message delivery). No
+authentication, persistence, agent-to-agent or agent-to-human messaging, Git integration, human
+approval workflow, or Codex/other-provider integration exists yet.
 
 ## Requirements
 
@@ -80,6 +85,7 @@ pnpm --filter @hall-of-wisdom/hall-core run verify:package-entry
 | [`@hall-of-wisdom/protocol`](packages/protocol)                   | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation.                                                                                                                                  |
 | [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                                                                                               |
 | [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                                                                                              |
+| [`@hall-of-wisdom/claude-code-adapter`](adapters/claude-code)     | Real `AgentAdapter` that spawns your locally-installed, subscription-authenticated Claude Code CLI as a child process — never an API key, never cloud billing. See [`docs/architecture/0008-claude-code-adapter.md`](docs/architecture/0008-claude-code-adapter.md).               |
 | [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events.                                                                               |
 | [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, hosts a General board and per-task discussion boards for local human communication, and binds to `127.0.0.1` only. |
 | [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: the Task Console (`/`) for immediate execution, the Kanban Board (`/board`) for planning tasks, and Communication Boards (`/boards`) for local discussion — talks to Hall Core directly (no proxy, no custom server); binds to `127.0.0.1` only.        |
@@ -496,6 +502,111 @@ for the full design: the board/message model, capacity limits, the REST and WebS
 the replay/at-least-once delivery guarantee, and why editing, deletion, agent messaging, and
 persistence remain deferred.
 
+## Running the Claude Code Adapter
+
+The Claude Code adapter (`@hall-of-wisdom/claude-code-adapter`) spawns your own locally-installed,
+subscription-authenticated Claude Code CLI as a real child process — never an API key, never a
+cloud-billing source. See [`docs/architecture/0008-claude-code-adapter.md`](docs/architecture/0008-claude-code-adapter.md)
+for the full design. Steps 1–2 below never spend any usage; steps 10–11 spend one real, billed
+Claude Code invocation each — do not repeat them casually.
+
+**1. Check the installed CLI version (no usage spent):**
+
+```powershell
+claude --version
+```
+
+**2. Check authentication status safely (no usage spent).** This prints your account email, org ID,
+and org name — **do not paste this output anywhere it could be shared** (a report, a commit, a
+chat log). Only its safe classification (installed / subscription-verified yes-or-no) belongs
+anywhere outside your own terminal:
+
+```powershell
+claude auth status
+```
+
+**3. Build the adapter package:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/claude-code-adapter run build
+```
+
+**4. Run the adapter's deterministic test suite** (no real Claude Code invocation — a fake process
+supervisor drives every test):
+
+```powershell
+pnpm --filter @hall-of-wisdom/claude-code-adapter run test
+```
+
+**5. Typecheck and lint the adapter package:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/claude-code-adapter run typecheck
+pnpm --filter @hall-of-wisdom/claude-code-adapter run lint
+```
+
+**6. Verify the package resolves correctly through its public entry point** (does not spawn any
+real task):
+
+```powershell
+pnpm --filter @hall-of-wisdom/claude-code-adapter run verify:package-entry
+```
+
+**7. Start Hall Core with both adapters registered** (Claude Code registers unconditionally — no
+extra flag needed; it simply reports whatever `detect()` finds):
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310
+```
+
+**8. Confirm both adapters are listed**, in a second terminal:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:4310/api/v1/adapters | ConvertTo-Json -Depth 5
+```
+
+Expect both `hall.mock-agent` and `hall.claude-code` in the `adapters` array. Confirm the response
+contains no `executablePath` or `diagnosticMessage` field anywhere.
+
+**9. Confirm Claude Code's reported availability matches your real auth state**: `"available"` only
+if step 2 showed a verified Pro/Max/Team/Enterprise subscription login; `"logged_out"` if not logged
+in; `"unavailable"` if the CLI isn't installed or couldn't be resolved to a native executable.
+
+**10. Create an isolated fixture — never the Hall of Wisdom source tree** — and run one real,
+isolated task through the actual adapter (spends one real Claude Code invocation):
+
+```powershell
+New-Item -ItemType Directory -Force "D:\HallOfWisdom\.tmp\claude-adapter-smoke" | Out-Null
+Set-Content "D:\HallOfWisdom\.tmp\claude-adapter-smoke\greeting.txt" "hello"
+```
+
+Then, with Hall Core (step 7) and Hall Web (`pnpm --filter @hall-of-wisdom/web run dev`) both
+running, open `http://127.0.0.1:3000/board`, create a backlog task with **Working directory** set to
+`.tmp/claude-adapter-smoke` and a description asking for a small, verifiable edit to
+`greeting.txt`, move it to Ready, use **Assign agent** to assign **Claude Code**, then click
+**Start task** and confirm. Watch the card move through Assigned → In Progress → Completed while
+normalized events stream in over the task-events WebSocket.
+
+**11. Confirm the real edit actually happened:**
+
+```powershell
+Get-Content "D:\HallOfWisdom\.tmp\claude-adapter-smoke\greeting.txt"
+```
+
+**12. Clean up** — delete the fixture, and confirm no `claude.exe` process (beyond your own
+interactive session, if any) or lingering Hall Core/Hall Web `node.exe` process remains:
+
+```powershell
+Remove-Item -Recurse -Force "D:\HallOfWisdom\.tmp\claude-adapter-smoke"
+Get-Process claude -ErrorAction SilentlyContinue | Select-Object Id, ProcessName
+```
+
+**13. Confirm Communication Boards were unaffected** by the real task run: open
+`http://127.0.0.1:3000/boards` and confirm the **General** board's message count is unchanged from
+before step 10 — a Claude Code task never posts to a Communication Board.
+
 ## Full workspace verification
 
 ```powershell
@@ -507,7 +618,7 @@ pnpm test
 pnpm build
 ```
 
-`typecheck`/`test`/`build` run recursively across all six packages (including `apps/web`'s own
+`typecheck`/`test`/`build` run recursively across all seven packages (including `apps/web`'s own
 `next build` for production output and `vitest run` for its component/hook/library test suite);
 `lint`/`format` run once across the whole repository.
 
@@ -520,6 +631,8 @@ hall-of-wisdom/
     agent-adapter-sdk/   @hall-of-wisdom/agent-adapter-sdk - adapter contract
   adapters/
     mock-agent/            @hall-of-wisdom/mock-agent - deterministic, network-free adapter
+    claude-code/            @hall-of-wisdom/claude-code-adapter - real, subscription-authenticated
+                            Claude Code CLI adapter
   runners/
     hall-runner/            @hall-of-wisdom/hall-runner - local task runner CLI
   apps/
@@ -531,7 +644,6 @@ hall-of-wisdom/
   README.md               this file
 ```
 
-Future phases will add more `packages/` (database, source-control, work-management), a real
-coding-agent adapter, and more `adapters/` (Claude Code, Codex, ...) as each becomes necessary. See
-the architecture documents for the full planned layout and the Phase 3/4/5/6/7/8 boundary
-decisions.
+Future phases will add more `packages/` (database, source-control, work-management) and more
+`adapters/` (Codex, ...) as each becomes necessary. See the architecture documents for the full
+planned layout and the Phase 3/4/5/6/7/8/9 boundary decisions.

@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 import { validateWorkspace } from "@hall-of-wisdom/hall-runner";
 import { createHallCoreApp } from "./app.js";
-import { createMockAgentServerComposition } from "./composition/mock-agent-composition-root.js";
+import { createServerComposition } from "./composition/server-composition.js";
 import { parseServerCliArguments, ServerCliError } from "./config/server-cli-args.js";
 import {
   DEFAULT_LIMITS,
@@ -54,7 +54,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
 
   let composition;
   try {
-    composition = createMockAgentServerComposition({
+    composition = createServerComposition({
       workspaceRoot,
       mockScenario: cliOptions.mockScenario,
       mockStepDelayMs: cliOptions.mockStepDelayMs,

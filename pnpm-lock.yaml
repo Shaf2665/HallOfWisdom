@@ -48,6 +48,22 @@ importers:
         specifier: ^3.0.4
         version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(jsdom@25.0.1)(lightningcss@1.32.0)
 
+  adapters/claude-code:
+    dependencies:
+      '@hall-of-wisdom/agent-adapter-sdk':
+        specifier: workspace:*
+        version: link:../../packages/agent-adapter-sdk
+      '@hall-of-wisdom/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+
   adapters/mock-agent:
     dependencies:
       '@hall-of-wisdom/agent-adapter-sdk':
@@ -75,6 +91,9 @@ importers:
       '@hall-of-wisdom/agent-adapter-sdk':
         specifier: workspace:*
         version: link:../../packages/agent-adapter-sdk
+      '@hall-of-wisdom/claude-code-adapter':
+        specifier: workspace:*
+        version: link:../../adapters/claude-code
       '@hall-of-wisdom/hall-runner':
         specifier: workspace:*
         version: link:../../runners/hall-runner

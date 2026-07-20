@@ -32,3 +32,9 @@ Thumbs.db
 *.sqlite
 *.sqlite-journal
 .hall/
+
+# Throwaway local fixtures (e.g. Claude Code adapter smoke-test fixtures)
+.tmp/
+
+# Playwright MCP tool's local snapshot/console dump artifacts
+.playwright-mcp/

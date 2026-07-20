@@ -153,3 +153,12 @@ adapter's captured output is free of secrets. A dedicated redaction layer — ap
 constructing any protocol object from captured process output — remains unbuilt and is now also a
 concern for future adapters' `detect()` results (`diagnosticMessage`) and any future failure
 payloads they construct, not just `StructuredFailure`.
+
+**Update (Phase 9):** the first real adapter, Claude Code (see
+[`0008-claude-code-adapter.md`](0008-claude-code-adapter.md)), does implement exactly this kind of
+redaction layer for its own captured process output — an allowlist-based child-environment sanitizer,
+a stream parser that never forwards raw provider payloads, and an event mapper that deliberately
+never reads a tool's actual result content into any Hall event. This closes the gap described above
+for this one adapter's own captured output; it is not a generic mechanism future adapters inherit
+automatically; each real adapter is still responsible for its own redaction discipline, the same way
+Claude Code's own was reviewed and fixed adapter-by-adapter rather than pushed down into the SDK.
