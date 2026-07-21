@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    // Clears the "paths" override inherited from tsconfig.json: the build
+    // must resolve workspace dependencies the same way the published
+    // package does at runtime (node_modules -> dist), not against source.
+    "paths": {}
+  },
+  "include": ["src"],
+  "exclude": ["dist", "node_modules", "src/**/*.test.ts", "src/test-support.ts"]
+}

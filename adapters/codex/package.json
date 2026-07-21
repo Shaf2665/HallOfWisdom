@@ -1,9 +1,9 @@
 {
-  "name": "@hall-of-wisdom/hall-core",
+  "name": "@hall-of-wisdom/codex-adapter",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Local Hall Core HTTP + WebSocket server: creates and runs tasks through Hall Runner's public API and streams normalized events.",
+  "description": "Coding-agent adapter that executes the locally installed, ChatGPT-authenticated Codex CLI non-interactively and translates its JSONL output into normalized Hall agent events.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "sideEffects": false,
@@ -24,24 +24,16 @@
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint .",
     "test": "vitest run",
-    "dev": "tsc -p tsconfig.build.json && node dist/server.js",
     "verify:package-entry": "node verify-package-entry.mjs"
   },
   "dependencies": {
-    "@fastify/cors": "^11.3.0",
-    "@fastify/websocket": "^11.3.0",
     "@hall-of-wisdom/agent-adapter-sdk": "workspace:*",
-    "@hall-of-wisdom/claude-code-adapter": "workspace:*",
-    "@hall-of-wisdom/codex-adapter": "workspace:*",
-    "@hall-of-wisdom/hall-runner": "workspace:*",
-    "@hall-of-wisdom/mock-agent": "workspace:*",
     "@hall-of-wisdom/protocol": "workspace:*",
-    "fastify": "^5.10.0",
+    "cross-spawn": "^7.0.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
-    "@types/node": "^24.0.0",
-    "@types/ws": "^8.5.13",
-    "ws": "^8.18.0"
+    "@types/cross-spawn": "^6.0.6",
+    "@types/node": "^24.0.0"
   }
 }

@@ -162,3 +162,11 @@ never reads a tool's actual result content into any Hall event. This closes the 
 for this one adapter's own captured output; it is not a generic mechanism future adapters inherit
 automatically; each real adapter is still responsible for its own redaction discipline, the same way
 Claude Code's own was reviewed and fixed adapter-by-adapter rather than pushed down into the SDK.
+
+**Update (Phase 10):** the second real adapter, Codex (see
+[`0009-codex-adapter.md`](0009-codex-adapter.md)), independently reimplements the same discipline —
+its own allowlist-based environment sanitizer, JSONL parser, and event mapper — rather than sharing
+Claude Code's modules, confirming the "each adapter owns its own redaction, not inherited from the
+SDK" pattern generalizes to a second, structurally different CLI (stdin-delivered prompt, a
+different auth-output shape and stream, a different Windows shim story) without requiring a shared
+abstraction.

@@ -62,7 +62,9 @@ hall-of-wisdom/
     claude-code/              @hall-of-wisdom/claude-code-adapter - real, subscription-authenticated
                              Claude Code CLI adapter (delivered Phase 9, brought forward from the
                              originally-planned Phase 12/14 — see 0008-claude-code-adapter.md)
-    codex/                     Codex detection + execution adapter (deferred; not yet scheduled)
+    codex/                     @hall-of-wisdom/codex-adapter - real, ChatGPT-authenticated Codex CLI
+                             adapter (delivered Phase 10 — see 0009-codex-adapter.md; file-editing
+                             capability is a disclosed, unresolved gap)
   runners/
     hall-runner/            Local process: registers adapters, validates workspace/working
                              directory, runs one task, streams JSON Lines events (Phase 4).
@@ -92,6 +94,8 @@ hall-of-wisdom/
     mock-agent/                @hall-of-wisdom/mock-agent - deterministic, network-free adapter
     claude-code/                @hall-of-wisdom/claude-code-adapter - real, subscription-
                                authenticated Claude Code CLI adapter (see 0008)
+    codex/                      @hall-of-wisdom/codex-adapter - real, ChatGPT-authenticated Codex
+                               CLI adapter (see 0009)
   runners/
     hall-runner/               @hall-of-wisdom/hall-runner - local task runner (see 0003)
   apps/
