@@ -102,6 +102,79 @@ describe("AssignDialog", () => {
     });
   });
 
+  it("Phase 10.2: shows the trusted-local limitationNotice for an available adapter that carries one", async () => {
+    vi.mocked(apiClient.listAdapters).mockResolvedValue({
+      adapters: [
+        makeAdapter({
+          adapterId: "hall.codex",
+          agentDisplayName: "Codex",
+          limitationNotice:
+            "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.",
+        }),
+      ],
+    });
+    render(
+      <AssignDialog
+        baseUrl={BASE_URL}
+        record={makeRecord()}
+        onAssigned={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: /Codex.*see notice below/ })).toBeInTheDocument();
+    });
+    expect(screen.getByText(/Trusted-local mode: Codex sandbox/)).toBeInTheDocument();
+  });
+
+  it(
+    "the option-list suffix is generic, safe wording — never asserts 'trusted-local mode' for an " +
+      "adapter that isn't in that mode (the full, accurate text lives in the notice below the dropdown)",
+    async () => {
+      vi.mocked(apiClient.listAdapters).mockResolvedValue({
+        adapters: [
+          makeAdapter({
+            agentDisplayName: "Claude Code",
+            limitationNotice:
+              "Claude Code is installed and authenticated with a Claude subscription.",
+          }),
+        ],
+      });
+      render(
+        <AssignDialog
+          baseUrl={BASE_URL}
+          record={makeRecord()}
+          onAssigned={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      await waitFor(() => {
+        expect(
+          screen.getByRole("option", { name: /Claude Code.*see notice below/ }),
+        ).toBeInTheDocument();
+      });
+      expect(screen.queryByRole("option", { name: /trusted-local mode/i })).not.toBeInTheDocument();
+    },
+  );
+
+  it("never shows a limitationNotice for an adapter that does not carry one", async () => {
+    vi.mocked(apiClient.listAdapters).mockResolvedValue({
+      adapters: [makeAdapter({ agentDisplayName: "Agent A" })],
+    });
+    render(
+      <AssignDialog
+        baseUrl={BASE_URL}
+        record={makeRecord()}
+        onAssigned={vi.fn()}
+        onClose={vi.fn()}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByRole("option", { name: "Agent A" })).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/see notice below/i)).not.toBeInTheDocument();
+  });
+
   it("has dialog role, aria-modal, and a labelled title", () => {
     vi.mocked(apiClient.listAdapters).mockResolvedValue({ adapters: [makeAdapter()] });
     render(

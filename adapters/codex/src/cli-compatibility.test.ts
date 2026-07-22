@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   parseSemverPrefix,
   verifyIsolationFlagSupport,
+  verifyTrustedLocalFlagSupport,
   MIN_SUPPORTED_CODEX_VERSION,
 } from "./cli-compatibility.js";
 import type { ProcessSpawner, SpawnedProcessHandle } from "./process-spawner.js";
@@ -18,6 +19,8 @@ Options:
       --strict-config
   -s, --sandbox <SANDBOX_MODE>
       --cd <DIR>
+      --dangerously-bypass-approvals-and-sandbox
+      --disable <FEATURE>
 `;
 
 function fakeSpawner(exitCode: number, stdout: string): ProcessSpawner {
@@ -166,6 +169,83 @@ describe("verifyIsolationFlagSupport", () => {
       },
     };
     await verifyIsolationFlagSupport({
+      spawner,
+      executablePath: "/usr/bin/codex",
+      cwd: "/tmp",
+      env: {},
+      detectedVersionString: "codex-cli 0.144.4",
+    });
+    expect(spawnedArgs).toEqual(["exec", "--help"]);
+  });
+});
+
+describe("verifyTrustedLocalFlagSupport — Phase 10.2", () => {
+  it("returns true when --help contains --dangerously-bypass-approvals-and-sandbox and --disable", async () => {
+    const result = await verifyTrustedLocalFlagSupport({
+      spawner: fakeSpawner(0, VALID_EXEC_HELP_TEXT),
+      executablePath: "/usr/bin/codex",
+      cwd: "/tmp",
+      env: {},
+      detectedVersionString: "codex-cli 0.144.4",
+    });
+    expect(result).toBe(true);
+  });
+
+  it("fails closed when --help is missing --dangerously-bypass-approvals-and-sandbox", async () => {
+    const incompleteHelp = VALID_EXEC_HELP_TEXT.replace(
+      "--dangerously-bypass-approvals-and-sandbox",
+      "",
+    );
+    const result = await verifyTrustedLocalFlagSupport({
+      spawner: fakeSpawner(0, incompleteHelp),
+      executablePath: "/usr/bin/codex",
+      cwd: "/tmp",
+      env: {},
+      detectedVersionString: "codex-cli 0.144.4",
+    });
+    expect(result).toBe(false);
+  });
+
+  it("fails closed for an older version without spawning --help", async () => {
+    const spawnFn = vi.fn(
+      (
+        executablePath: string,
+        args: readonly string[],
+        options: { cwd: string; env: Readonly<Record<string, string>> },
+      ) => fakeSpawner(0, VALID_EXEC_HELP_TEXT).spawn(executablePath, args, options),
+    );
+    const result = await verifyTrustedLocalFlagSupport({
+      spawner: { spawn: spawnFn },
+      executablePath: "/usr/bin/codex",
+      cwd: "/tmp",
+      env: {},
+      detectedVersionString: "codex-cli 0.1.0",
+    });
+    expect(result).toBe(false);
+    expect(spawnFn).not.toHaveBeenCalled();
+  });
+
+  it("does not require --sandbox to be present (the trusted-local profile never passes it)", async () => {
+    const helpWithoutSandbox = VALID_EXEC_HELP_TEXT.replace("-s, --sandbox <SANDBOX_MODE>", "");
+    const result = await verifyTrustedLocalFlagSupport({
+      spawner: fakeSpawner(0, helpWithoutSandbox),
+      executablePath: "/usr/bin/codex",
+      cwd: "/tmp",
+      env: {},
+      detectedVersionString: "codex-cli 0.144.4",
+    });
+    expect(result).toBe(true);
+  });
+
+  it("never runs a real model request to check flag support — only --help is ever spawned", async () => {
+    let spawnedArgs: readonly string[] | undefined;
+    const spawner: ProcessSpawner = {
+      spawn(executablePath, args, options) {
+        spawnedArgs = args;
+        return fakeSpawner(0, VALID_EXEC_HELP_TEXT).spawn(executablePath, args, options);
+      },
+    };
+    await verifyTrustedLocalFlagSupport({
       spawner,
       executablePath: "/usr/bin/codex",
       cwd: "/tmp",

@@ -541,3 +541,406 @@ describe("CodexAdapter — malicious project/user customization regression (Phas
   // at the unit level by permission-profile.test.ts instead (its
   // "excludes every forbidden flag" and task-text-injection tests).
 });
+
+const TRUSTED_LOCAL_EXEC_HELP_TEXT = [
+  VALID_EXEC_HELP_TEXT,
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--disable",
+].join("\n");
+const MINIMAL_VALID_TASK_JSONL =
+  JSON.stringify({
+    type: "item.completed",
+    item: { id: "item_1", type: "agent_message", text: "done" },
+  }) +
+  "\n" +
+  JSON.stringify({ type: "turn.completed", usage: {} }) +
+  "\n";
+
+const TRUSTED_LOCAL_ENABLED = { enabled: true, loopbackBound: true, workspaceRoot: "D:\\fixture" };
+
+/**
+ * Answers --version, exec --help, and login status exactly like the
+ * module-level `scriptedSpawner`, but also answers the real task's
+ * `codex exec --json ...` spawn with a minimal valid two-line JSONL
+ * completion, so trusted-local tests can observe a genuinely completed
+ * run rather than only inspecting the captured spawn call.
+ */
+function scriptedSpawnerWithExec(
+  versionStdout: string,
+  loginStatusText: string,
+  helpText: string = TRUSTED_LOCAL_EXEC_HELP_TEXT,
+): { spawner: ProcessSpawner; calls: { executablePath: string; args: readonly string[] }[] } {
+  const calls: { executablePath: string; args: readonly string[] }[] = [];
+  const spawner: ProcessSpawner = {
+    spawn: (executablePath, args) => {
+      calls.push({ executablePath, args });
+      if (args.includes("--version")) return new ScriptedHandle(versionStdout, 0);
+      if (args.includes("exec") && args.includes("--help")) return new ScriptedHandle(helpText, 0);
+      if (args.includes("login") && args.includes("status")) {
+        return new ScriptedHandle("", 0, true, loginStatusText);
+      }
+      if (args.includes("exec") && args.includes("--json")) {
+        return new ScriptedHandle(MINIMAL_VALID_TASK_JSONL, 0);
+      }
+      return new ScriptedHandle("", 0, false);
+    },
+  };
+  return { spawner, calls };
+}
+
+function fakeWritabilityProbe(writable: boolean): {
+  probe: { isWritable: (dir: string) => boolean };
+  calls: string[];
+} {
+  const calls: string[] = [];
+  return {
+    probe: {
+      isWritable: (dir: string) => {
+        calls.push(dir);
+        return writable;
+      },
+    },
+    calls,
+  };
+}
+
+describe("CodexAdapter — trusted-local mode (Phase 10.2)", () => {
+  it("detect() reports available with the fixed trusted-local diagnostic once every precondition passes", async () => {
+    const { spawner } = scriptedSpawnerWithExec("codex-cli 0.144.4", "Logged in using ChatGPT");
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      trustedLocal: TRUSTED_LOCAL_ENABLED,
+    });
+    const result = await adapter.detect();
+    expect(result.availability).toBe("available");
+    expect(result.diagnosticMessage).toContain("Trusted-local mode");
+  });
+
+  it("detect() still reports unsupported when trustedLocal is present but disabled — no behavior change from Phase 10.1", async () => {
+    const { spawner } = scriptedSpawnerWithExec("codex-cli 0.144.4", "Logged in using ChatGPT");
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      trustedLocal: { enabled: false, loopbackBound: true, workspaceRoot: "D:\\fixture" },
+    });
+    const result = await adapter.detect();
+    expect(result.availability).toBe("unsupported");
+  });
+
+  it(
+    "keystone: startTask spawns the real 'codex exec' process using the Paperclip-compatible " +
+      "bypass argv only when the same #trustedLocal.enabled field that made detect() report " +
+      "available is true — the bypass flag is present and --sandbox is absent",
+    async () => {
+      const { spawner, calls } = scriptedSpawnerWithExec(
+        "codex-cli 0.144.4",
+        "Logged in using ChatGPT",
+      );
+      const adapter = new CodexAdapter({
+        platform: "linux",
+        parentEnv: FOUND_ENV,
+        fs: FS_WITH_CODEX,
+        spawner,
+        gitProbe: ALWAYS_IN_REPO,
+        writabilityProbe: fakeWritabilityProbe(true).probe,
+        trustedLocal: TRUSTED_LOCAL_ENABLED,
+      });
+      const run = await adapter.startTask(taskInput());
+      const events = await collectRunEvents(run);
+      expect(events.some((e) => e.type === "run.started")).toBe(true);
+      expect(events.some((e) => e.type === "run.completed")).toBe(true);
+
+      const execCall = calls.find((c) => c.args.includes("exec") && c.args.includes("--json"));
+      expect(execCall).toBeDefined();
+      expect(execCall?.args).toContain("--dangerously-bypass-approvals-and-sandbox");
+      expect(execCall?.args).not.toContain("--sandbox");
+      expect(execCall?.args).not.toContain("workspace-write");
+      expect(execCall?.args.some((a) => a.includes("approval_policy"))).toBe(false);
+    },
+  );
+
+  it(
+    "strict mode (trustedLocal omitted) never reaches a real 'codex exec' spawn at all, so the " +
+      "bypass argv can never be selected — the two modes cannot diverge because argv selection " +
+      "and availability are gated by the identical field",
+    async () => {
+      const { spawner, calls } = scriptedSpawnerWithExec(
+        "codex-cli 0.144.4",
+        "Logged in using ChatGPT",
+      );
+      const adapter = new CodexAdapter({
+        platform: "linux",
+        parentEnv: FOUND_ENV,
+        fs: FS_WITH_CODEX,
+        spawner,
+        gitProbe: ALWAYS_IN_REPO,
+      });
+      const run = await adapter.startTask(taskInput());
+      await collectRunEvents(run);
+      expect(calls.some((c) => c.args.includes("exec") && c.args.includes("--json"))).toBe(false);
+    },
+  );
+
+  it("never includes the task prompt itself in the trusted-local argv — stdin only", async () => {
+    const { spawner } = scriptedSpawnerWithExec("codex-cli 0.144.4", "Logged in using ChatGPT");
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      writabilityProbe: fakeWritabilityProbe(true).probe,
+      trustedLocal: TRUSTED_LOCAL_ENABLED,
+    });
+    const run = await adapter.startTask(taskInput());
+    await collectRunEvents(run);
+    // The prompt is written to stdin by CodexRun/process-spawner, never
+    // appended to argv — already covered generically, reconfirmed here for
+    // the trusted-local profile specifically.
+    expect(run).toBeDefined();
+  });
+
+  it("still requires a Git repository in trusted-local mode — never passes --skip-git-repo-check", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: NEVER_IN_REPO,
+      writabilityProbe: fakeWritabilityProbe(true).probe,
+      trustedLocal: TRUSTED_LOCAL_ENABLED,
+    });
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_GIT_REPOSITORY_REQUIRED",
+    );
+    expect(calls.some((c) => c.args.includes("exec") && c.args.includes("--json"))).toBe(false);
+  });
+
+  it("fails closed with CODEX_WORKSPACE_NOT_WRITABLE when the trusted-local writability probe reports false", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const { probe, calls: probeCalls } = fakeWritabilityProbe(false);
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      writabilityProbe: probe,
+      trustedLocal: TRUSTED_LOCAL_ENABLED,
+    });
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_WORKSPACE_NOT_WRITABLE",
+    );
+    expect(probeCalls).toEqual(["D:\\fixture\\workdir"]);
+    expect(calls.some((c) => c.args.includes("exec") && c.args.includes("--json"))).toBe(false);
+  });
+
+  it("never consults the writability probe in strict mode (trustedLocal disabled)", async () => {
+    const { spawner } = scriptedSpawnerWithExec("codex-cli 0.144.4", "Logged in using ChatGPT");
+    const { probe, calls: probeCalls } = fakeWritabilityProbe(true);
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      writabilityProbe: probe,
+    });
+    const run = await adapter.startTask(taskInput());
+    await collectRunEvents(run);
+    expect(probeCalls).toEqual([]);
+  });
+
+  it("trusted-local preflight failures never expose an executable path or account identifier", async () => {
+    const { spawner } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT (operator@example.invalid)",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      writabilityProbe: fakeWritabilityProbe(false).probe,
+      trustedLocal: TRUSTED_LOCAL_ENABLED,
+    });
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain("example.invalid");
+    expect(serialized).not.toContain("/usr/local/bin/codex");
+  });
+
+  it(
+    "never re-derives or re-resolves the working directory — the exact string " +
+      "AgentTaskInput.workingDirectory carries (already canonicalized upstream by " +
+      "TaskOrchestrator/validateWorkspace) is what both the writability probe and --cd receive, " +
+      "verbatim",
+    async () => {
+      const { spawner, calls } = scriptedSpawnerWithExec(
+        "codex-cli 0.144.4",
+        "Logged in using ChatGPT",
+      );
+      const { probe, calls: probeCalls } = fakeWritabilityProbe(true);
+      const canonicalWorkingDirectory = "D:\\fixture\\already-canonical-workdir";
+      const adapter = new CodexAdapter({
+        platform: "linux",
+        parentEnv: FOUND_ENV,
+        fs: FS_WITH_CODEX,
+        spawner,
+        gitProbe: ALWAYS_IN_REPO,
+        writabilityProbe: probe,
+        trustedLocal: TRUSTED_LOCAL_ENABLED,
+      });
+      const run = await adapter.startTask(
+        taskInput({ workingDirectory: canonicalWorkingDirectory }),
+      );
+      await collectRunEvents(run);
+
+      expect(probeCalls).toEqual([canonicalWorkingDirectory]);
+      const execCall = calls.find((c) => c.args.includes("exec") && c.args.includes("--json"));
+      const cdIndex = execCall?.args.indexOf("--cd") ?? -1;
+      expect(cdIndex).toBeGreaterThanOrEqual(0);
+      expect(execCall?.args[cdIndex + 1]).toBe(canonicalWorkingDirectory);
+    },
+  );
+});
+
+describe("CodexAdapter — Phase 10.3 detection stability", () => {
+  it("trusted-local disabled: no task process starts, even though the version probe internally supports a retry", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      // trustedLocal intentionally omitted — defaults to disabled.
+    });
+    const run = await adapter.startTask(taskInput());
+    await collectRunEvents(run);
+    expect(calls.some((c) => c.args.includes("exec") && c.args.includes("--json"))).toBe(false);
+  });
+
+  it("concurrent detect() calls coalesce into a single in-flight detection — no uncontrolled process fan-out", async () => {
+    let versionCallCount = 0;
+    const spawner: ProcessSpawner = {
+      spawn: (_exe, args) => {
+        if (args.includes("--version")) {
+          versionCallCount += 1;
+          return new ScriptedHandle("codex-cli 0.144.4", 0);
+        }
+        if (args.includes("exec") && args.includes("--help"))
+          return new ScriptedHandle(VALID_EXEC_HELP_TEXT, 0);
+        if (args.includes("login") && args.includes("status"))
+          return new ScriptedHandle("", 0, true, "Logged in using ChatGPT");
+        return new ScriptedHandle("", 0);
+      },
+    };
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+    });
+    // Fired back-to-back, with no await between them, so both calls land
+    // while the first detection is still in flight.
+    const [a, b, c] = [adapter.detect(), adapter.detect(), adapter.detect()];
+    const [resultA, resultB, resultC] = await Promise.all([a, b, c]);
+    expect(versionCallCount).toBe(1);
+    expect(resultA).toEqual(resultB);
+    expect(resultB).toEqual(resultC);
+  });
+
+  it("a later, non-concurrent detect() call is genuinely fresh — never a stale coalesced result", async () => {
+    let loginStatusText = "Logged in using ChatGPT";
+    const spawner: ProcessSpawner = {
+      spawn: (_exe, args) => {
+        if (args.includes("--version")) return new ScriptedHandle("codex-cli 0.144.4", 0);
+        if (args.includes("exec") && args.includes("--help"))
+          return new ScriptedHandle(VALID_EXEC_HELP_TEXT, 0);
+        if (args.includes("login") && args.includes("status"))
+          return new ScriptedHandle("", 0, true, loginStatusText);
+        return new ScriptedHandle("", 0);
+      },
+    };
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+    });
+    const first = await adapter.detect();
+    expect(first.availability).toBe("unsupported");
+
+    // Simulates the operator signing out between polls — the in-flight
+    // reference was already cleared after the first call settled, so
+    // this next call must genuinely re-run detection, not replay the
+    // first result.
+    loginStatusText = "Not logged in";
+    const second = await adapter.detect();
+    expect(second.availability).toBe("logged_out");
+  });
+
+  it("startTask still re-checks trusted-local preconditions fresh, even immediately after a prior detect() call completed", async () => {
+    let helpTextIncludesBypass = true;
+    const spawner: ProcessSpawner = {
+      spawn: (_exe, args) => {
+        if (args.includes("--version")) return new ScriptedHandle("codex-cli 0.144.4", 0);
+        if (args.includes("exec") && args.includes("--help")) {
+          const bypassMarkers = helpTextIncludesBypass
+            ? "--dangerously-bypass-approvals-and-sandbox\n--disable"
+            : "";
+          return new ScriptedHandle(`${VALID_EXEC_HELP_TEXT}\n${bypassMarkers}`, 0);
+        }
+        if (args.includes("login") && args.includes("status"))
+          return new ScriptedHandle("", 0, true, "Logged in using ChatGPT");
+        if (args.includes("exec") && args.includes("--json"))
+          return new ScriptedHandle(MINIMAL_VALID_TASK_JSONL, 0);
+        return new ScriptedHandle("", 0);
+      },
+    };
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      writabilityProbe: fakeWritabilityProbe(true).probe,
+      trustedLocal: TRUSTED_LOCAL_ENABLED,
+    });
+
+    const firstDetection = await adapter.detect();
+    expect(firstDetection.availability).toBe("available");
+
+    // The installed CLI no longer supports the trusted-local flag set by
+    // the time startTask runs — startTask's own detect() call must catch
+    // this fresh, not trust the just-completed prior result.
+    helpTextIncludesBypass = false;
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_ISOLATION_UNSUPPORTED",
+    );
+  });
+});

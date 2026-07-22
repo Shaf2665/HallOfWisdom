@@ -21,6 +21,9 @@ export type { ServerComposition, ServerCompositionOptions };
 export function createServerComposition(options: ServerCompositionOptions): ServerComposition {
   const composition = createMockAgentServerComposition(options);
   registerClaudeCodeAdapter(composition.registry);
-  registerCodexAdapter(composition.registry);
+  registerCodexAdapter(composition.registry, {
+    workspaceRoot: options.workspaceRoot,
+    enableCodexTrustedLocal: options.enableCodexTrustedLocal,
+  });
   return composition;
 }

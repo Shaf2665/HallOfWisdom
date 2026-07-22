@@ -13,8 +13,8 @@ rules coding agents working in this repository must follow.
 
 ## Status
 
-**Phase 10.1 — Codex Event-Channel Isolation, Capability Accuracy and Sandbox Diagnosis.** Eight
-packages now exist: `@hall-of-wisdom/protocol` (the wire contract), `@hall-of-wisdom/agent-adapter-sdk`
+**Phase 10.3 — Codex Detection Retry Hardening.** Eight packages now exist:
+`@hall-of-wisdom/protocol` (the wire contract), `@hall-of-wisdom/agent-adapter-sdk`
 (the adapter contract), `@hall-of-wisdom/mock-agent` (the first, deterministic adapter),
 `@hall-of-wisdom/claude-code-adapter` (Phase 9 — a real `AgentAdapter` that spawns the operator's own
 locally-installed, subscription-authenticated Claude Code CLI, hardened in Phase 9.1 with
@@ -22,12 +22,21 @@ locally-installed, subscription-authenticated Claude Code CLI, hardened in Phase
 see [`docs/architecture/0008-claude-code-adapter.md`](docs/architecture/0008-claude-code-adapter.md)),
 `@hall-of-wisdom/codex-adapter` (Phase 10 — a real `AgentAdapter` that spawns the operator's own
 locally-installed, ChatGPT-authenticated Codex CLI; message and command-execution event mapping are
-verified live over stdout only (Phase 10.1 removed stderr from the JSONL parsing path entirely),
-but **`detect()` never reports Codex as available** — it always reports `unsupported` with a fixed
-diagnostic, since file-edit execution capability remains unverified (Phase 10.1's free, live
-Windows-sandbox diagnosis found the local sandbox helper's dedicated restricted account is denied
-write access to the operator's own directories, the likely root cause) — see
-[`docs/architecture/0009-codex-adapter.md`](docs/architecture/0009-codex-adapter.md)),
+verified live over stdout only (Phase 10.1 removed stderr from the JSONL parsing path entirely)).
+**By default, `detect()` still never reports Codex as available** — it reports `unsupported` with a
+fixed diagnostic, since Phase 10.1's free, live Windows-sandbox diagnosis found the local sandbox
+helper's dedicated restricted account is denied write access to the operator's own directories.
+Phase 10.2 adds an explicitly opt-in **trusted-local mode** (`--enable-codex-trusted-local` at Hall
+Core startup, default off) that reproduces Paperclip's own working Codex execution path — Codex's
+internal sandbox/approval enforcement is bypassed, not fixed, and this is never the default — see
+[`docs/architecture/0009-codex-adapter.md`](docs/architecture/0009-codex-adapter.md) and
+[`docs/architecture/0010-paperclip-compatible-codex-mode.md`](docs/architecture/0010-paperclip-compatible-codex-mode.md).
+Phase 10.3 hardened `detect()` against a transient cold-start flake observed during real
+verification: the `--version` probe now gets exactly one bounded retry on a spawn failure or
+timeout (never on any other failure kind), and concurrent `detect()` callers coalesce into a single
+in-flight detection rather than each starting an independent spawn sequence — see
+[`docs/architecture/0009-codex-adapter.md`](docs/architecture/0009-codex-adapter.md), "Phase 10.3 —
+Bounded detection retry and in-flight coalescing",
 `@hall-of-wisdom/hall-runner` (a local CLI that runs one task and streams normalized events as JSON
 Lines), `@hall-of-wisdom/hall-core` (a local Fastify HTTP + WebSocket server that creates and runs
 tasks in memory, calling Hall Runner's public API in-process, with an exact-origin
@@ -625,18 +634,19 @@ ChatGPT-authenticated Codex CLI as a real child process — never an API key, ne
 See [`docs/architecture/0009-codex-adapter.md`](docs/architecture/0009-codex-adapter.md) for the
 full design.
 
-**As of Phase 10.1, Codex is never assignable through Hall Web.** `detect()` always reports it as
-`unsupported` (never `available`), with the fixed diagnostic "Codex file-edit execution is not
+**By default (strict mode), Codex is never assignable through Hall Web.** `detect()` always reports
+it as `unsupported` (never `available`), with the fixed diagnostic "Codex file-edit execution is not
 verified in the current sandbox." — regardless of how your CLI/ChatGPT-auth state looks. This is
 intentional, fail-closed capability accuracy, not a bug: Phase 10's real task executions never
 successfully modified a file, and Phase 10.1's free (no-model) Windows-sandbox diagnosis found the
 likely root cause — the local sandbox helper runs commands under a dedicated, low-privilege Windows
 account (`CodexSandboxOffline`) that is explicitly denied write access to directories owned by your
 own account. Steps 1–9 below (detection, build, test, typecheck, lint, adapter-listing) never spend
-any usage and remain useful for verifying the adapter itself. Steps 10 onward, which walk through
-actually assigning and starting a Codex task, describe what **would** happen once file-edit
-capability is verified in a later, explicitly approved phase — they are not currently reachable
-through Hall Web and are kept here as forward-looking documentation, clearly marked below.
+any usage and remain useful for verifying the adapter itself.
+
+**Phase 10.2 adds an explicitly opt-in trusted-local mode** that makes Codex assignable — see
+"Enabling trusted-local mode" below before continuing to steps 10+, which otherwise describe a flow
+that is not reachable in strict mode.
 
 **1. Check the installed CLI version (no usage spent):**
 
@@ -704,16 +714,44 @@ Invoke-RestMethod http://127.0.0.1:4310/api/v1/adapters | ConvertTo-Json -Depth 
 ```
 
 Expect `hall.mock-agent`, `hall.claude-code`, and `hall.codex` in the `adapters` array. Confirm the
-response contains no `executablePath`, `diagnosticMessage` text beyond the fixed strings this
-document quotes, or `CODEX_HOME` anywhere. **Codex's `availability` will be `"unsupported"`
-regardless of your ChatGPT auth state** (see the Phase 10.1 note above) — this is expected, not a
-sign that something is misconfigured.
+response contains no `executablePath` or `CODEX_HOME` anywhere. **Codex's `availability` will be
+`"unsupported"` regardless of your ChatGPT auth state** (see the Phase 10.1 note above) — this is
+expected, not a sign that something is misconfigured.
+
+## Enabling trusted-local mode (Phase 10.2)
+
+Trusted-local mode makes Codex assignable by having it bypass its own internal sandbox and approval
+enforcement (`--dangerously-bypass-approvals-and-sandbox`) instead of working around the Windows
+sandbox restriction. **Read
+[`docs/architecture/0010-paperclip-compatible-codex-mode.md`](docs/architecture/0010-paperclip-compatible-codex-mode.md)
+in full before enabling this** — once running, Codex has your own OS-user filesystem permissions for
+the whole task, not merely inside the task's working directory; this is never described as
+"sandboxed" or "restricted" execution because it isn't.
+
+Restart Hall Core (step 8 above) with the additional flag:
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario success `
+  --web-origin "http://127.0.0.1:3000" `
+  --enable-codex-trusted-local
+```
+
+There is no browser-, task-, or REST-request-controlled way to enable this — it is read once, at
+process startup, from this flag only, and defaults to off. With it set and your ChatGPT
+authentication verified (steps 2–3 above), re-run step 9's `Invoke-RestMethod` call: Codex's
+`availability` should now be `"available"`, with a `limitationNotice` field reading "Trusted-local
+mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's
+filesystem permissions." — this same text also appears in Hall Web's "Assign agent" dialog beneath
+the agent dropdown once Codex is selected.
 
 ---
 
-**The remaining steps describe the not-currently-reachable assignment/execution flow, kept as
-forward-looking documentation for when file-edit capability is verified in a later phase.** Hall
-Web will not currently offer Codex in the "Assign agent" dialog's enabled options.
+**The remaining steps walk through assigning and starting a real Codex task — only reachable with
+trusted-local mode enabled above.** In strict mode (the default), Hall Web will not offer Codex as
+an enabled option in the "Assign agent" dialog.
 
 **10. Create an isolated fixture — never the Hall of Wisdom source tree, and it must be its own Git
 repository** (Codex requires one; this adapter never auto-initializes it for you):
@@ -756,14 +794,21 @@ and choose **Cancel task** (or use the task-level cancel control in the Task Con
 card reaches Cancelled and no `codex.exe`/native Codex process remains (see the process-check
 command in step 16 below, run once with no Codex task active).
 
-**15. Troubleshooting `unsupported`**: step 9 will always show Codex as `unsupported` right now (see
-the Phase 10.1 note above) — that alone is not a problem to fix. Check the exact
-`diagnosticMessage` to tell the two possible reasons apart: `"Codex file-edit execution is not
-verified in the current sandbox."` is the expected, current-phase message and needs no action;
-`"Installed Codex cannot guarantee the required isolated execution profile."` means your installed
-CLI version is either too old or is missing a required `codex exec --help` flag this adapter
-depends on — update Codex (`npm install -g @openai/codex@latest` or your install method's
-equivalent) and repeat steps 1 and 9.
+**15. Troubleshooting `unsupported`**: step 9 will always show Codex as `unsupported` in strict mode
+(see the Phase 10.1 note above) — that alone is not a problem to fix. `GET /api/v1/adapters`
+deliberately never exposes _why_ (its `diagnosticMessage` field is stripped for every non-available
+result, to avoid ever forwarding raw provider output to a browser); the exact reason is only visible
+by calling `CodexAdapter#detect()` directly (e.g. from a test or a short local script) and reading
+its `diagnosticMessage`. The fixed possible values in strict mode are:
+`"Codex file-edit execution is not verified in the current sandbox."` (expected, current-phase,
+needs no action) and `"Installed Codex cannot guarantee the required isolated execution profile."`
+(your installed CLI version is either too old or is missing a required `codex exec --help` flag —
+update Codex and repeat steps 1 and 9). With `--enable-codex-trusted-local` set (see above), an
+`unsupported` result can additionally mean the operator's environment has a billing-changing
+variable set, Hall Core somehow isn't loopback-bound, or the trusted-local flag set specifically
+isn't supported by your installed CLI — see
+[`docs/architecture/0010-paperclip-compatible-codex-mode.md`](docs/architecture/0010-paperclip-compatible-codex-mode.md),
+"Availability policy" for the exact messages.
 
 **16. Explaining subscription usage**: every task you start through the Codex adapter (step 12)
 spends real usage against your ChatGPT/Codex subscription, exactly as running `codex exec`

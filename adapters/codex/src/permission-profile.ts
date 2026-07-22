@@ -114,3 +114,56 @@ export function buildCodexArgv(workingDirectory: string): readonly string[] {
     "-",
   ];
 }
+
+/**
+ * Phase 10.2 — the Paperclip-compatible trusted-local argv. Only ever used
+ * when the operator has explicitly enabled trusted-local mode at Hall Core
+ * startup (`--enable-codex-trusted-local`) and every trusted-local
+ * precondition in `detection.ts` has passed; `buildCodexArgv` above remains
+ * the untouched, always-available strict-mode profile. See
+ * `docs/architecture/0010-paperclip-compatible-codex-mode.md`.
+ *
+ * `--dangerously-bypass-approvals-and-sandbox` (confirmed present, exact
+ * name, on the installed CLI's own `codex exec --help`) replaces Codex's
+ * internal sandbox and approval enforcement outright — it does not run
+ * alongside it. This profile therefore deliberately omits everything that
+ * only makes sense as part of that internal enforcement layer:
+ * `--sandbox workspace-write`, `-c approval_policy=...`,
+ * `-c sandbox_workspace_write.network_access=...`, and `-c web_search=...`.
+ * Including any of those alongside the bypass flag would describe a sandbox
+ * policy that the bypass flag has already made irrelevant — a misleading
+ * combination, not a stronger one.
+ *
+ * The full flag combination below (with a deliberately-invalid trailing `-c`
+ * probe key swapped in for `--cd`'s real value) was verified live against
+ * the installed CLI (`codex-cli 0.144.4`) via the same zero-usage
+ * `--strict-config` config-parse-failure technique Phase 10 used: the probe
+ * failed with `Error loading config.toml: unknown configuration field
+ * ... in -c/--config override`, proving every real flag here parses
+ * together and the run reaches config validation, not an argv-parse error —
+ * before any model call. No Codex usage was consumed confirming this.
+ *
+ * Isolation/configuration suppression (`--ephemeral`, `--ignore-user-config`,
+ * `--ignore-rules`, `--strict-config`, `--disable <feature>` ×5) is kept
+ * identical to the strict profile: the bypass flag removes Codex's sandbox
+ * and approval enforcement, not its user/project configuration surface, and
+ * Hall's own configuration-isolation guarantees (see
+ * "Configuration, hook, skill, and plugin isolation" in
+ * `docs/architecture/0009-codex-adapter.md`) are independent of, and must
+ * hold regardless of, the sandbox/approval question.
+ */
+export function buildCodexTrustedLocalArgv(workingDirectory: string): readonly string[] {
+  return [
+    "exec",
+    "--json",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--strict-config",
+    "--dangerously-bypass-approvals-and-sandbox",
+    ...DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
+    "--cd",
+    workingDirectory,
+    "-",
+  ];
+}

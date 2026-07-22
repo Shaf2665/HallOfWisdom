@@ -21,6 +21,12 @@ export interface ServerCompositionOptions {
   readonly mockStepDelayMs?: number | undefined;
   readonly limits: ServerLimits;
   readonly onExecutionError?: ((taskId: string, error: unknown) => void) | undefined;
+  /**
+   * Phase 10.2 — `--enable-codex-trusted-local` at Hall Core startup only.
+   * Never read from anything task-, browser-, or REST-request-controlled.
+   * Defaults to `false` (Phase 10.1's fail-closed behavior, unchanged).
+   */
+  readonly enableCodexTrustedLocal?: boolean | undefined;
 }
 
 export interface ServerComposition {

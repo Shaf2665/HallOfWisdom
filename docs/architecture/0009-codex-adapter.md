@@ -2,10 +2,17 @@
 
 Status: Draft (Phase 10; hardened in Phase 10.1 — see "Phase 10.1 — Event-channel isolation,
 capability accuracy, and sandbox diagnosis" near the end of this document for what changed and
-why). File-editing capability is a disclosed, unresolved gap — see "Phase 10.1" below. As of
-Phase 10.1, `detect()` never reports Codex as `"available"`: it always reports `"unsupported"`
-with a fixed, safe diagnostic, so Hall Web will not offer it for assignment until a real edit has
-genuinely succeeded in a later, explicitly approved phase.
+why). File-editing capability under the _default, strict_ sandbox profile is a disclosed,
+unresolved gap — see "Phase 10.1" below. By default, `detect()` never reports Codex as
+`"available"`: it always reports `"unsupported"` with a fixed, safe diagnostic, so Hall Web will
+not offer it for assignment by default.
+**Phase 10.2** (see
+[`0010-paperclip-compatible-codex-mode.md`](0010-paperclip-compatible-codex-mode.md)) adds a
+separate, explicitly opt-in "trusted-local" mode that makes Codex assignable by having it bypass
+its own internal sandbox/approval enforcement instead — never the default, never reachable from
+anything browser- or task-controlled. Everything in this document describes the _strict_, default
+profile unless a passage explicitly says otherwise; 0010 is the authoritative source for
+trusted-local mode.
 
 ## Context
 
@@ -626,16 +633,18 @@ created.
 ### Detection stability
 
 Reviewed the one transient cold-start "unavailable" result observed during Phase 10's Playwright
-verification. `detectCodex` has no cache and no retry loop — confirmed by code inspection and now
-also by a dedicated test (`detection.test.ts`, "performs exactly one bounded process spawn per
-detection stage"). Added four new tests proving `--version`/`exec --help`/`login status` timeouts
-each produce a distinct, correctly-classified result (`unavailable` for a `--version` timeout;
-`unsupported` with the isolation diagnostic for an `exec --help` timeout; `unsupported` with the
-unverified-auth diagnostic, explicitly not `logged_out`, for a `login status` timeout) — using
-`vi.useFakeTimers()` against a `HangingHandle` fake, no real elapsed time. No automatic retry was
-added, per the kickoff's explicit prohibition; `startTask` already re-checks `detect()` before every
-real run, which is the existing, sufficient mechanism for "a stale poll result can never become
-stale permission to execute."
+verification. At the time, `detectCodex` had no cache and no retry loop — confirmed by code
+inspection and by a dedicated test (`detection.test.ts`, "performs exactly one bounded process spawn
+per detection stage"). Added four new tests proving `--version`/`exec --help`/`login status`
+timeouts each produce a distinct, correctly-classified result (`unavailable` for a `--version`
+timeout; `unsupported` with the isolation diagnostic for an `exec --help` timeout; `unsupported`
+with the unverified-auth diagnostic, explicitly not `logged_out`, for a `login status` timeout) —
+using `vi.useFakeTimers()` against a `HangingHandle` fake, no real elapsed time. No automatic retry
+was added in this phase, per the kickoff's explicit prohibition; `startTask` already re-checks
+`detect()` before every real run, which is the existing, sufficient mechanism for "a stale poll
+result can never become stale permission to execute." **Phase 10.3 (below) later added exactly one
+bounded retry, scoped narrowly to the specific flake this section describes — see "Phase 10.3 —
+Bounded detection retry and in-flight coalescing."**
 
 ### Verification
 
@@ -647,6 +656,53 @@ and `pnpm pack --dry-run` clean for both `adapters/codex` and `apps/server` (con
 rebuilding `adapters/codex`'s `dist/` — the same stale-`dist` pitfall Phase 9.1 documented recurred
 once here and was caught by re-running the Hall Core integration test after a fresh build, not
 before). No `codex exec` model invocation occurred anywhere in this phase. No commit was created.
+
+## Phase 10.3 — Bounded detection retry and in-flight coalescing
+
+Real verification during Phase 10.2 (Task #74, Task #75) observed the same transient failure twice:
+`codex --version` failed to start on the very first spawn issued right after Hall Core's own process
+started, then succeeded immediately on an identical second call moments later — a cold-start flake,
+not a genuine installation problem. Phase 10.1's "no retry" decision (previous section) was correct
+for the general case but too broad for this specific, now-repeatedly-observed one, so Phase 10.3
+narrows it rather than reversing it wholesale.
+
+**What changed, in `detection.ts`:**
+
+- `detectCodex`'s `--version` probe now gets exactly one bounded retry, and only when the first
+  attempt fails structurally — `BoundedProcessResult.spawnError` set, or `timedOut` — after a fixed
+  `250ms` default delay (`DEFAULT_VERSION_RETRY_DELAY_MS`, overridable via
+  `DetectionOptions.versionRetryDelayMs` purely so tests can drive it with `vi.useFakeTimers()`; never
+  tuned in production). The second attempt's result is returned unconditionally, success or failure —
+  there is no third attempt.
+- Every other failure path is still never retried, on purpose: a structurally-completed `--version`
+  process (whatever its exit code or output), an unresolved executable, a failed/timed-out
+  `exec --help` or `login status` probe, a non-ChatGPT or ambiguous auth classification, and every
+  trusted-local precondition. These are either real, completed answers (retrying spends a process for
+  no possible different outcome) or, for `login status` specifically, a deliberate decision not to
+  speculatively retry an authentication-adjacent command that Phase 10.2's real verification never
+  observed flaking. See the classification doc comment directly above
+  `DEFAULT_VERSION_RETRY_DELAY_MS` in `detection.ts` for the full per-branch reasoning.
+- `CodexAdapter.detect()` now coalesces concurrent callers: while a detection is in flight, every
+  caller that invokes `detect()` before it settles shares the same promise instead of each starting an
+  independent `--version`/`exec --help`/`login status` spawn sequence — relevant when, e.g., overlapping
+  `GET /api/v1/adapters` requests arrive close together. The in-flight reference is cleared
+  unconditionally in a `finally` the moment that detection settles, success or failure, so it is never
+  a cache: the very next call after that always starts a genuinely fresh detection. This is orthogonal
+  to `startTask`'s own re-verification — `startTask` still always calls `detect()` immediately before
+  spawning a real task, so a stale poll result still can never become stale permission to execute.
+
+**Tests added:** `detection.test.ts`'s "Phase 10.3 bounded version-probe retry" block (structurally
+successful first attempts are never retried across every detection stage; both retryable failure
+kinds retry exactly once; the retry delay is genuinely bounded via fake timers; no extra spawn occurs
+anywhere in the retry path). `codex-adapter.test.ts`'s "Phase 10.3 detection stability" block
+(concurrent `detect()` calls coalesce to a single `--version` spawn; a later, non-concurrent call is
+genuinely fresh, not a replayed coalesced result; `startTask` still re-verifies trusted-local
+preconditions fresh immediately after a prior `detect()` completed; trusted-local disabled still
+starts no task process even though the version probe itself supports a retry).
+
+**Verification:** the full `@hall-of-wisdom/codex-adapter` suite (14 test files, 350 tests) was run
+five times in direct succession with no flakiness — every run passed 350/350. No model invocation
+occurred anywhere in this phase; no commit was created.
 
 ## Residual data review
 

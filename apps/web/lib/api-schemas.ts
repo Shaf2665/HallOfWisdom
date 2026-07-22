@@ -113,6 +113,11 @@ export const adapterSummarySchema = z
     supportedOperatingSystems: z.array(operatingSystemSchema),
     capabilities: agentCapabilitiesSchema,
     availability: availabilityStatusSchema,
+    // Phase 10.2 — present only when availability is "available"; a
+    // small, fixed, adapter-authored caveat about that otherwise-normal
+    // result (e.g. Codex's trusted-local bypass notice). Never present
+    // for any other availability value. See apps/server's adapters.ts.
+    limitationNotice: z.string().optional(),
   })
   .strict();
 export type AdapterSummary = z.infer<typeof adapterSummarySchema>;

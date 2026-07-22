@@ -71,4 +71,29 @@ describe("parseServerCliArguments", () => {
       ]),
     ).toThrow(ServerCliError);
   });
+
+  describe("--enable-codex-trusted-local (Phase 10.2)", () => {
+    it("defaults to false when omitted", () => {
+      const options = parseServerCliArguments(["--workspace-root", "D:\\HallOfWisdom"]);
+      expect(options.enableCodexTrustedLocal).toBe(false);
+    });
+
+    it("parses --enable-codex-trusted-local as true", () => {
+      const options = parseServerCliArguments([
+        "--workspace-root",
+        "D:\\HallOfWisdom",
+        "--enable-codex-trusted-local",
+      ]);
+      expect(options.enableCodexTrustedLocal).toBe(true);
+    });
+
+    it("accepts no value/flag-only form, matching node:util parseArgs boolean semantics", () => {
+      const options = parseServerCliArguments([
+        "--enable-codex-trusted-local",
+        "--workspace-root",
+        "D:\\HallOfWisdom",
+      ]);
+      expect(options.enableCodexTrustedLocal).toBe(true);
+    });
+  });
 });

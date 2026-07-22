@@ -62,6 +62,7 @@ interface AdapterSummaryJson {
   readonly availability: string;
   readonly executablePath?: string;
   readonly diagnosticMessage?: string;
+  readonly limitationNotice?: string;
 }
 
 describe("GET /api/v1/adapters", () => {
@@ -201,6 +202,51 @@ describe("GET /api/v1/adapters", () => {
     } finally {
       delete process.env.HALL_CORE_ADAPTERS_TEST_SECRET;
     }
+  });
+
+  it("exposes limitationNotice (generically, no adapterId branching) when an available adapter's detect() attaches a diagnosticMessage", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      buildFakeAdapter({
+        adapterId: "hall.caveat-agent",
+        detect: () =>
+          Promise.resolve({
+            installed: true,
+            availability: "available",
+            diagnosticMessage: "Running in a reduced-trust mode.",
+          } as { installed: boolean; availability: string }),
+      }),
+    );
+    const app = await buildApp(registry);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const body = response.json<{ adapters: AdapterSummaryJson[] }>();
+    const adapter = body.adapters.find((a) => a.adapterId === "hall.caveat-agent");
+    expect(adapter?.limitationNotice).toBe("Running in a reduced-trust mode.");
+    await app.close();
+  });
+
+  it("never exposes limitationNotice when availability is not 'available', even if diagnosticMessage is present", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      buildFakeAdapter({
+        adapterId: "hall.unsupported-agent",
+        detect: () =>
+          Promise.resolve({
+            installed: true,
+            availability: "unsupported",
+            diagnosticMessage: "This should never reach the client.",
+          } as { installed: boolean; availability: string }),
+      }),
+    );
+    const app = await buildApp(registry);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    expect(response.body).not.toContain("This should never reach the client.");
+    const body = response.json<{ adapters: AdapterSummaryJson[] }>();
+    const adapter = body.adapters.find((a) => a.adapterId === "hall.unsupported-agent");
+    expect(adapter?.limitationNotice).toBeUndefined();
+    await app.close();
   });
 
   it("returns an empty, valid list when no adapters are registered", async () => {

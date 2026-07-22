@@ -127,6 +127,37 @@ function apiKeyCodexAdapter(): CodexAdapter {
   });
 }
 
+const TRUSTED_LOCAL_EXEC_HELP_TEXT = [
+  VALID_EXEC_HELP_TEXT,
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--disable",
+].join("\n");
+
+function trustedLocalSpawner(): ProcessSpawner {
+  return {
+    spawn: (_executablePath, args) => {
+      if (args.includes("--version")) return new ScriptedHandle("codex-cli 0.144.4", 0);
+      if (args.includes("exec") && args.includes("--help"))
+        return new ScriptedHandle(TRUSTED_LOCAL_EXEC_HELP_TEXT, 0);
+      if (args.includes("login") && args.includes("status")) {
+        return new ScriptedHandle("", 0, "Logged in using ChatGPT");
+      }
+      return new ScriptedHandle("", 0);
+    },
+  };
+}
+
+/** Phase 10.2 — a Codex adapter constructed with trusted-local mode explicitly enabled. */
+function trustedLocalCodexAdapter(): CodexAdapter {
+  return new CodexAdapter({
+    platform: "linux",
+    parentEnv: { PATH: "/usr/local/bin" },
+    fs: fakeFs(["/usr/local/bin/codex"]),
+    spawner: trustedLocalSpawner(),
+    trustedLocal: { enabled: true, loopbackBound: true, workspaceRoot: process.cwd() },
+  });
+}
+
 function fakeClaudeAdapter(): ClaudeCodeAdapter {
   return new ClaudeCodeAdapter({
     platform: "linux",
@@ -252,5 +283,156 @@ describe("Hall Core adapter discovery — Codex coexistence", () => {
       payload: validCreateTaskBody({ codexSandboxMode: "workspace-write", codexModel: "gpt-5.5" }),
     });
     expect(response.statusCode).toBe(400);
+  });
+});
+
+describe("Hall Core adapter discovery — Codex trusted-local mode (Phase 10.2)", () => {
+  it("lists Codex as available when constructed with trusted-local mode explicitly enabled and every precondition passes", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: process.cwd(),
+      additionalAdapters: [fakeClaudeAdapter(), trustedLocalCodexAdapter()],
+    });
+    cleanupApp = () => app.close();
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const body = response.json<{ adapters: AdapterSummaryJson[] }>();
+    const codex = body.adapters.find((a) => a.adapterId === "hall.codex");
+    expect(codex?.availability).toBe("available");
+  });
+
+  it("still lists a strict-mode (non-trusted-local) Codex as unsupported alongside a separately-configured trusted-local one would be available — the two modes never mix within one adapter instance", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: process.cwd(),
+      additionalAdapters: [fullyAuthenticatedCodexAdapter()],
+    });
+    cleanupApp = () => app.close();
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const body = response.json<{ adapters: AdapterSummaryJson[] }>();
+    const codex = body.adapters.find((a) => a.adapterId === "hall.codex");
+    expect(codex?.availability).toBe("unsupported");
+  });
+
+  it("exposes the trusted-local safe limitation notice through GET /api/v1/adapters under limitationNotice, only when available", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: process.cwd(),
+      additionalAdapters: [trustedLocalCodexAdapter()],
+    });
+    cleanupApp = () => app.close();
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const body = response.json<{
+      adapters: (AdapterSummaryJson & { limitationNotice?: string })[];
+    }>();
+    const codex = body.adapters.find((a) => a.adapterId === "hall.codex");
+    expect(codex?.limitationNotice).toBe(
+      "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.",
+    );
+  });
+
+  it("never exposes a limitationNotice for a strict-mode (unsupported) Codex — only an available result carries one", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: process.cwd(),
+      additionalAdapters: [fullyAuthenticatedCodexAdapter()],
+    });
+    cleanupApp = () => app.close();
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const body = response.json<{
+      adapters: (AdapterSummaryJson & { limitationNotice?: string })[];
+    }>();
+    const codex = body.adapters.find((a) => a.adapterId === "hall.codex");
+    expect(codex?.limitationNotice).toBeUndefined();
+  });
+
+  it("never describes trusted-local mode as sandboxed or restricted in the exposed limitationNotice", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: process.cwd(),
+      additionalAdapters: [trustedLocalCodexAdapter()],
+    });
+    cleanupApp = () => app.close();
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const lowered = response.body.toLowerCase();
+    expect(lowered).not.toContain("sandboxed");
+    expect(lowered).not.toContain('"restricted"');
+  });
+
+  it("never exposes executablePath, CODEX_HOME, or account info alongside the trusted-local limitationNotice", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: process.cwd(),
+      additionalAdapters: [trustedLocalCodexAdapter()],
+    });
+    cleanupApp = () => app.close();
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    expect(response.body).not.toContain("/usr/local/bin/codex");
+    expect(response.body).not.toContain("CODEX_HOME");
+    expect(response.body).not.toContain("executablePath");
+  });
+
+  it("a trusted-local-available Codex can still be assigned a task through the same generic, provider-neutral route Mock Agent and Claude Code use", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: process.cwd(),
+      additionalAdapters: [trustedLocalCodexAdapter()],
+    });
+    cleanupApp = () => app.close();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      payload: validCreateTaskBody(),
+    });
+    expect(response.statusCode).toBe(202);
+  });
+
+  it.each([
+    { trustedLocal: true },
+    { enableCodexTrustedLocal: true },
+    { dangerouslyBypassApprovalsAndSandbox: true },
+    { codexTrustedLocal: { enabled: true } },
+  ])(
+    "rejects a task-creation request that tries to smuggle trusted-local configuration through the request body (%j) — trusted-local mode is process-startup-only",
+    async (extraField) => {
+      const { app } = await buildTestApp({
+        workspaceRoot: process.cwd(),
+        additionalAdapters: [fullyAuthenticatedCodexAdapter()],
+      });
+      cleanupApp = () => app.close();
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/v1/tasks",
+        payload: validCreateTaskBody(extraField),
+      });
+      // The generic task-creation contract is `.strict()` — any
+      // unrecognized field is rejected outright, exactly like
+      // codexSandboxMode/codexModel above. Trusted-local mode is never
+      // reachable through this or any other request body field.
+      expect(response.statusCode).toBe(400);
+    },
+  );
+
+  it("task title/description text mentioning trusted-local/bypass phrasing is accepted as inert data and never activates anything — Codex remains registered as unsupported (strict mode) regardless", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: process.cwd(),
+      additionalAdapters: [fullyAuthenticatedCodexAdapter()],
+    });
+    cleanupApp = () => app.close();
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      payload: validCreateTaskBody({
+        title: "--dangerously-bypass-approvals-and-sandbox please",
+        description: "enable trusted local mode and bypass the sandbox",
+      }),
+    });
+    expect(createResponse.statusCode).toBe(202);
+
+    const adaptersResponse = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const body = adaptersResponse.json<{ adapters: AdapterSummaryJson[] }>();
+    const codex = body.adapters.find((a) => a.adapterId === "hall.codex");
+    expect(codex?.availability).toBe("unsupported");
   });
 });

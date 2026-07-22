@@ -129,9 +129,11 @@ export function AssignDialog({
                   key={adapter.adapterId}
                   value={adapter.adapterId}
                   disabled={adapter.availability !== "available"}
+                  title={adapter.limitationNotice}
                 >
                   {adapter.agentDisplayName}
                   {adapter.availability !== "available" ? ` (${adapter.availability})` : ""}
+                  {adapter.limitationNotice ? " (see notice below)" : ""}
                 </option>
               ))}
             </select>
@@ -141,6 +143,14 @@ export function AssignDialog({
               No adapter is currently available.
             </p>
           ) : null}
+          {(() => {
+            const selected = adapters.find((a) => a.adapterId === adapterId);
+            return selected?.limitationNotice ? (
+              <p className="text-sm text-amber-600 dark:text-amber-400">
+                {selected.limitationNotice}
+              </p>
+            ) : null;
+          })()}
         </div>
 
         <div className="flex flex-col gap-1">

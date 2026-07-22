@@ -14,9 +14,22 @@ export interface AdapterRoutesDeps {
 /**
  * The browser-safe view of one registered adapter. Deliberately excludes
  * everything `AgentDetectionResult`/`AgentAdapter` can carry that isn't
- * safe to send to a client: `executablePath`, `diagnosticMessage` (may
- * embed unredacted captured process output), any raw error, environment
+ * safe to send to a client: `executablePath`, any raw error, environment
  * data, or the adapter instance itself.
+ *
+ * `limitationNotice` is the one deliberate, narrow exception to "never
+ * send `diagnosticMessage` to a client": it is populated only when
+ * `availability === "available"`. Every adapter in this codebase treats
+ * "available" as the outcome that needs no explanation — a
+ * `diagnosticMessage` attached to an `available` result is therefore, by
+ * construction, never raw captured process output describing a problem;
+ * it is the adapter's own small, fixed, hand-authored caveat about an
+ * otherwise-successful result (e.g. Codex's Phase 10.2 trusted-local
+ * bypass notice, or Claude Code's own "installed and authenticated with a
+ * Claude subscription" message). Every other `availability` value
+ * continues to omit this field entirely, exactly as before — the
+ * blanket exclusion for problem diagnostics (which really can embed
+ * unredacted output) is unchanged.
  */
 interface SafeAdapterSummary {
   readonly adapterId: string;
@@ -29,6 +42,12 @@ interface SafeAdapterSummary {
   readonly supportedOperatingSystems: readonly OperatingSystem[];
   readonly capabilities: AgentCapabilities;
   readonly availability: AvailabilityStatus;
+  readonly limitationNotice?: string;
+}
+
+interface SafeDetectionSummary {
+  readonly availability: AvailabilityStatus;
+  readonly limitationNotice?: string;
 }
 
 /**
@@ -40,15 +59,17 @@ interface SafeAdapterSummary {
 async function detectSafely(
   registry: AgentRegistry,
   adapterId: string,
-): Promise<AvailabilityStatus> {
+): Promise<SafeDetectionSummary> {
   try {
     const adapter = registry.resolve(adapterId);
     const result = await adapter.detect();
-    return result.availability;
+    return result.availability === "available" && result.diagnosticMessage !== undefined
+      ? { availability: result.availability, limitationNotice: result.diagnosticMessage }
+      : { availability: result.availability };
   } catch (error) {
     const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     console.error(`adapter "${adapterId}" detection failed: ${detail}`);
-    return "unavailable";
+    return { availability: "unavailable" };
   }
 }
 
@@ -68,7 +89,7 @@ export function registerAdapterRoutes(app: FastifyInstance, deps: AdapterRoutesD
 
     const adapters: SafeAdapterSummary[] = await Promise.all(
       descriptors.map(async (descriptor) => {
-        const availability = await detectSafely(deps.registry, descriptor.adapterId);
+        const detection = await detectSafely(deps.registry, descriptor.adapterId);
         const summary: SafeAdapterSummary = {
           adapterId: descriptor.adapterId,
           displayName: descriptor.displayName,
@@ -78,7 +99,10 @@ export function registerAdapterRoutes(app: FastifyInstance, deps: AdapterRoutesD
           integrationLevel: descriptor.integrationLevel,
           supportedOperatingSystems: descriptor.supportedOperatingSystems,
           capabilities: descriptor.capabilities,
-          availability,
+          availability: detection.availability,
+          ...(detection.limitationNotice !== undefined
+            ? { limitationNotice: detection.limitationNotice }
+            : {}),
         };
         return descriptor.supportedAgent.provider === undefined
           ? summary

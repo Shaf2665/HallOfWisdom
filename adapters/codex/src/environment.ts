@@ -115,3 +115,21 @@ export function buildChildEnvironment(
 export function containsBlockedEnvironmentKey(env: Readonly<Record<string, string>>): boolean {
   return Object.keys(env).some(isBlockedKey);
 }
+
+/**
+ * Phase 10.2 — the trusted-local billing-safety precondition:
+ * `detectCodex` must refuse to report trusted-local mode as available if
+ * the *operator's own* environment (before this module's allowlist
+ * sanitization ever runs) carries a billing/provider-changing variable
+ * (e.g. `OPENAI_API_KEY`). `buildChildEnvironment` above already makes it
+ * structurally impossible for such a variable to reach a spawned Codex
+ * process either way — this is a separate, earlier check: an operator
+ * whose shell has `OPENAI_API_KEY` set is a signal Codex's own billing
+ * resolution (see `codex doctor`) may not be using the verified ChatGPT
+ * subscription this adapter's auth check just confirmed, so trusted-local
+ * mode fails closed rather than silently assuming the sanitized child
+ * environment is the only thing that matters.
+ */
+export function hasBlockedBillingEnvironmentKey(parentEnv: Readonly<NodeJS.ProcessEnv>): boolean {
+  return Object.keys(parentEnv).some(isBlockedKey);
+}

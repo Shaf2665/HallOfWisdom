@@ -22,6 +22,10 @@ const serverCliOptionsSchema = z
     mockScenario: boundedNonBlankString(50).optional(),
     mockStepDelayMs: z.number().int().min(0).max(5000).optional(),
     webOrigin: boundedNonBlankString(2048).default(DEFAULT_WEB_ORIGIN),
+    // Phase 10.2 — process-startup-only. There is deliberately no way to
+    // set this from Hall Web, a task, or any REST request body; see
+    // docs/architecture/0010-paperclip-compatible-codex-mode.md.
+    enableCodexTrustedLocal: z.boolean().default(false),
   })
   .strict();
 
@@ -66,6 +70,7 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
         "mock-scenario": { type: "string" },
         "mock-step-delay-ms": { type: "string" },
         "web-origin": { type: "string" },
+        "enable-codex-trusted-local": { type: "boolean" },
       },
       strict: true,
       allowPositionals: false,
@@ -85,6 +90,9 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
     mockScenario: values["mock-scenario"],
     mockStepDelayMs: parseOptionalInteger(values["mock-step-delay-ms"], "mock-step-delay-ms"),
     ...(webOrigin === undefined ? {} : { webOrigin }),
+    ...(values["enable-codex-trusted-local"] === undefined
+      ? {}
+      : { enableCodexTrustedLocal: values["enable-codex-trusted-local"] }),
   };
 
   const result = serverCliOptionsSchema.safeParse(candidate);

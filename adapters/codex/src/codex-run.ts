@@ -13,6 +13,7 @@ import {
 } from "./process-tree.js";
 import {
   buildFailure,
+  CODEX_OUTPUT_INACTIVITY_TIMEOUT,
   CODEX_PROCESS_EXITED,
   CODEX_PROCESS_START_FAILED,
   CODEX_RESULT_MISSING,
@@ -24,6 +25,22 @@ import {
 const DEFAULT_GRACE_PERIOD_MS = 5000;
 const DEFAULT_STARTUP_TIMEOUT_MS = 30000;
 const DEFAULT_MAX_RUN_DURATION_MS = 600_000;
+/**
+ * Phase 10.2 — bounded no-output inactivity timeout, reviewed alongside
+ * Paperclip's own inactivity-monitor concept (`execute.ts`,
+ * `createCodexOutputInactivityMonitor`) but independently reimplemented
+ * against this class's own timer/termination plumbing — see
+ * `docs/architecture/0010-paperclip-compatible-codex-mode.md`. Distinct
+ * from `#startupTimer` (which only ever guards the silence *before the
+ * first byte* and is cleared permanently after it) and from
+ * `#maxDurationTimer` (an absolute cap on the whole run regardless of
+ * activity): this timer re-arms on every stdout *or* stderr chunk and
+ * fires if none arrives for this long at any point during the run,
+ * including well after the first byte. Longer than the startup timeout
+ * since legitimate mid-run silence (e.g. a long-running shell command)
+ * is more normal than a completely silent startup.
+ */
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 120_000;
 const MAX_TOLERATED_MALFORMED_LINES = 5;
 /**
  * Once the process has exited but stdout has not yet naturally emitted
@@ -48,6 +65,7 @@ export interface CodexRunOptions {
   readonly gracefulTerminationTimeoutMs?: number;
   readonly startupTimeoutMs?: number;
   readonly maxRunDurationMs?: number;
+  readonly inactivityTimeoutMs?: number;
   readonly postExitStdoutDrainGraceMs?: number;
   /** Test-only injection point — see `process-tree.ts`'s `PosixGroupKiller` doc comment. */
   readonly posixGroupKiller?: PosixGroupKiller;
@@ -94,6 +112,7 @@ export class CodexRun implements AgentRunHandle {
   #startupTimer: ReturnType<typeof setTimeout> | undefined;
   #gracePeriodTimer: ReturnType<typeof setTimeout> | undefined;
   #maxDurationTimer: ReturnType<typeof setTimeout> | undefined;
+  #inactivityTimer: ReturnType<typeof setTimeout> | undefined;
   #postExitStdoutDrainTimer: ReturnType<typeof setTimeout> | undefined;
   #externalSignalCleanup: (() => void) | undefined;
 
@@ -215,6 +234,8 @@ export class CodexRun implements AgentRunHandle {
     // stream later reports.
     this.#queue.push(this.#guard.guardEvent(this.#factory.runStarted()));
 
+    this.#armInactivityTimer();
+
     this.#startupTimer = setTimeout(() => {
       this.#failAndTerminateProcess(
         buildFailure(
@@ -235,6 +256,7 @@ export class CodexRun implements AgentRunHandle {
 
     this.#stdoutHandler = (chunk: Buffer) => {
       this.#clearStartupTimer();
+      this.#armInactivityTimer();
       this.#handleStdoutChunk(chunk.toString("utf8"));
     };
     handle.stdout.on("data", this.#stdoutHandler);
@@ -266,8 +288,13 @@ export class CodexRun implements AgentRunHandle {
     // parsed, stored, classified, or forwarded anywhere, including into
     // a `StructuredFailure` or any Hall event. See
     // `docs/architecture/0009-codex-adapter.md`, "Event-channel
-    // isolation".
-    this.#stderrHandler = () => undefined;
+    // isolation". Phase 10.2: the one exception is the inactivity timer
+    // reset below — it only observes that a chunk arrived (a liveness
+    // fact), never its content, so this remains consistent with that
+    // isolation guarantee.
+    this.#stderrHandler = () => {
+      this.#armInactivityTimer();
+    };
     handle.stderr.on("data", this.#stderrHandler);
 
     handle.onExit((exitCode, signal) => {
@@ -339,6 +366,30 @@ export class CodexRun implements AgentRunHandle {
     }
   }
 
+  /** Re-arms the bounded inactivity timer; a no-op after the run has already terminated. */
+  #armInactivityTimer(): void {
+    if (this.#guard.isTerminated) return;
+    if (this.#inactivityTimer !== undefined) {
+      clearTimeout(this.#inactivityTimer);
+    }
+    this.#inactivityTimer = setTimeout(() => {
+      if (this.#guard.isTerminated) return;
+      this.#failAndTerminateProcess(
+        buildFailure(
+          CODEX_OUTPUT_INACTIVITY_TIMEOUT,
+          "Codex produced no output for longer than the allotted inactivity timeout.",
+        ),
+      );
+    }, this.#options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS);
+  }
+
+  #clearInactivityTimer(): void {
+    if (this.#inactivityTimer !== undefined) {
+      clearTimeout(this.#inactivityTimer);
+      this.#inactivityTimer = undefined;
+    }
+  }
+
   #handleStdoutChunk(text: string): void {
     if (this.#guard.isTerminated) return;
     for (const outcome of this.#parser.push(text)) {
@@ -354,6 +405,7 @@ export class CodexRun implements AgentRunHandle {
         event.type === "run.failed" ||
         event.type === "run.cancelled"
       ) {
+        this.#clearInactivityTimer();
         this.#resolveCompletion(event);
         this.#queue.close();
       }
@@ -494,6 +546,7 @@ export class CodexRun implements AgentRunHandle {
 
   #cleanup(): void {
     this.#clearStartupTimer();
+    this.#clearInactivityTimer();
     if (this.#gracePeriodTimer !== undefined) {
       clearTimeout(this.#gracePeriodTimer);
       this.#gracePeriodTimer = undefined;

@@ -40,6 +40,30 @@ const REQUIRED_HELP_MARKERS = [
   "-c, --config",
 ] as const;
 
+/**
+ * Phase 10.2 — literal substrings `buildCodexTrustedLocalArgv`
+ * (`permission-profile.ts`) depends on. `--sandbox` is deliberately
+ * excluded here: the trusted-local profile never passes it (see that
+ * file's doc comment for why), so this list does not require the CLI to
+ * still support a flag the trusted-local argv itself never uses.
+ * `--dangerously-bypass-approvals-and-sandbox` was confirmed present,
+ * exact name, on the installed CLI's own `codex exec --help` during Phase
+ * 10.2 reconnaissance (`codex-cli 0.144.4`), and the full trusted-local
+ * flag combination was separately confirmed to parse together via a
+ * zero-usage `--strict-config` config-parse-failure probe — see
+ * `permission-profile.ts`.
+ */
+const TRUSTED_LOCAL_REQUIRED_HELP_MARKERS = [
+  "--json",
+  "--ephemeral",
+  "--ignore-user-config",
+  "--ignore-rules",
+  "--strict-config",
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--disable",
+  "--cd",
+] as const;
+
 const DEFAULT_HELP_TIMEOUT_MS = 5000;
 
 /**
@@ -71,27 +95,33 @@ export interface IsolationFlagSupportOptions {
 }
 
 /**
- * Verifies the installed CLI can support this adapter's required isolated
- * execution profile, without ever running a real model request. Two
- * layers: a cheap version-floor check (fails closed immediately on an
- * unparseable or too-old version, with no further process spawned), then
- * — only once that passes — a bounded `codex exec --help` inspection that
- * confirms every required flag name is still literally present. The full
- * help text is read into bounded process memory only for this check and
- * is never returned, logged, or exposed anywhere outside this function —
- * only the resulting boolean crosses this boundary. See
- * `docs/architecture/0009-codex-adapter.md`, "Required CLI compatibility
- * flags" and "Fail-closed behaviour for old versions".
+ * Fetches `codex exec --help`'s stdout, without ever running a real model
+ * request. Two layers: a cheap version-floor check (fails closed
+ * immediately on an unparseable or too-old version, with no further
+ * process spawned), then — only once that passes — one bounded spawn.
+ * Returns `undefined` for any failure (unsupported version, spawn error,
+ * timeout, nonzero exit) so callers fail closed uniformly. The full help
+ * text is read into bounded process memory only for this call and is
+ * never returned beyond this module's own marker-matching, logged, or
+ * exposed anywhere else. See `docs/architecture/0009-codex-adapter.md`,
+ * "Required CLI compatibility flags" and "Fail-closed behaviour for old
+ * versions".
+ *
+ * Phase 10.2: exported (not just module-private) so `detectCodex` can
+ * fetch this exactly once per detection call and match both the strict
+ * and trusted-local marker sets against the same result — Phase 10.1's
+ * "no repeated spawns per request" detection-stability guarantee applies
+ * to trusted-local mode too, not just to the strict-only flag profile.
  */
-export async function verifyIsolationFlagSupport(
+export async function fetchCodexExecHelpText(
   options: IsolationFlagSupportOptions,
-): Promise<boolean> {
+): Promise<string | undefined> {
   const parsedVersion =
     options.detectedVersionString !== undefined
       ? parseSemverPrefix(options.detectedVersionString)
       : undefined;
   if (parsedVersion === undefined || !isAtLeast(parsedVersion, MIN_SUPPORTED_CODEX_VERSION)) {
-    return false;
+    return undefined;
   }
 
   const helpResult = await runBoundedProcess({
@@ -104,9 +134,38 @@ export async function verifyIsolationFlagSupport(
   });
 
   if (helpResult.spawnError !== undefined || helpResult.timedOut || helpResult.exitCode !== 0) {
-    return false;
+    return undefined;
   }
 
-  const helpText = helpResult.stdout;
+  return helpResult.stdout;
+}
+
+/** Pure marker match against already-fetched help text — never spawns. */
+export function matchesIsolationFlags(helpText: string): boolean {
   return REQUIRED_HELP_MARKERS.every((marker) => helpText.includes(marker));
+}
+
+/** Pure marker match against already-fetched help text — never spawns. */
+export function matchesTrustedLocalFlags(helpText: string): boolean {
+  return TRUSTED_LOCAL_REQUIRED_HELP_MARKERS.every((marker) => helpText.includes(marker));
+}
+
+export async function verifyIsolationFlagSupport(
+  options: IsolationFlagSupportOptions,
+): Promise<boolean> {
+  const helpText = await fetchCodexExecHelpText(options);
+  return helpText !== undefined && matchesIsolationFlags(helpText);
+}
+
+/**
+ * Phase 10.2 — the trusted-local counterpart of `verifyIsolationFlagSupport`.
+ * Called only when trusted-local mode is explicitly enabled and every
+ * earlier strict-profile check has already passed; never runs a model
+ * request, same bounded `codex exec --help` inspection technique.
+ */
+export async function verifyTrustedLocalFlagSupport(
+  options: IsolationFlagSupportOptions,
+): Promise<boolean> {
+  const helpText = await fetchCodexExecHelpText(options);
+  return helpText !== undefined && matchesTrustedLocalFlags(helpText);
 }

@@ -59,6 +59,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
       mockScenario: cliOptions.mockScenario,
       mockStepDelayMs: cliOptions.mockStepDelayMs,
       limits: DEFAULT_LIMITS,
+      enableCodexTrustedLocal: cliOptions.enableCodexTrustedLocal,
       onExecutionError: (taskId, error) => {
         console.error(`Task ${taskId} execution failed: ${formatError(error)}`);
       },
@@ -96,6 +97,11 @@ export async function runServer(argv: readonly string[]): Promise<number> {
   app.log.info(
     `Hall Core is listening on http://${LOCAL_ONLY_HOST}:${String(port)} — bound to localhost only, not reachable from the network. Approved web origin: ${cliOptions.webOrigin}.`,
   );
+  if (cliOptions.enableCodexTrustedLocal) {
+    app.log.warn(
+      "Codex trusted-local mode is enabled: if every other precondition passes, Codex will run with this operator's own filesystem permissions and Codex's internal sandbox/approval protections will be bypassed for its tasks.",
+    );
+  }
 
   let resolveExitCode!: (code: number) => void;
   const exitCodePromise = new Promise<number>((resolve) => {

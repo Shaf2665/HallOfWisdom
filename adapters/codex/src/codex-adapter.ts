@@ -16,17 +16,26 @@ import {
   detectCodex,
   UNSUPPORTED_ISOLATION_PROFILE_MESSAGE,
   UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE,
+  TRUSTED_LOCAL_NOT_LOOPBACK_MESSAGE,
+  TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE,
+  TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE,
+  TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE,
+  type TrustedLocalDetectionOptions,
 } from "./detection.js";
 import { resolveCodexExecutable, type FileSystemProbe } from "./executable-resolver.js";
 import { realFileSystemProbe } from "./real-file-system-probe.js";
 import { buildChildEnvironment } from "./environment.js";
 import { buildCodexTaskPrompt } from "./prompt-builder.js";
-import { buildCodexArgv } from "./permission-profile.js";
+import { buildCodexArgv, buildCodexTrustedLocalArgv } from "./permission-profile.js";
 import {
   isInsideGitRepository,
   realGitRepositoryProbe,
   type GitRepositoryProbe,
 } from "./git-repository-check.js";
+import {
+  realWorkspaceWritabilityProbe,
+  type WorkspaceWritabilityProbe,
+} from "./workspace-writability-probe.js";
 import { nodeProcessSpawner, type ProcessSpawner } from "./process-spawner.js";
 import { CodexRun } from "./codex-run.js";
 import {
@@ -36,8 +45,26 @@ import {
   CODEX_NOT_AUTHENTICATED,
   CODEX_CHATGPT_AUTH_UNVERIFIED,
   CODEX_ISOLATION_UNSUPPORTED,
+  CODEX_WORKSPACE_NOT_WRITABLE,
 } from "./failure-codes.js";
 import { getEnvValueCaseInsensitive } from "./env-lookup.js";
+
+/**
+ * Phase 10.2 — an explicitly-enabled, Paperclip-compatible trusted-local
+ * execution mode. Every field is constructor-time-only configuration:
+ * never accepted from `AgentTaskInput`, `AgentExecutionOptions`, or
+ * anything else that flows from a browser/REST request. `enabled` is the
+ * single source of truth this adapter uses for both `detect()`'s
+ * `available` branch and `startTask()`'s argv selection — see
+ * `docs/architecture/0010-paperclip-compatible-codex-mode.md`.
+ */
+export type CodexTrustedLocalConfig = TrustedLocalDetectionOptions;
+
+const TRUSTED_LOCAL_DISABLED: CodexTrustedLocalConfig = {
+  enabled: false,
+  loopbackBound: false,
+  workspaceRoot: "",
+};
 
 export interface CodexAdapterConfig {
   readonly platform?: NodeJS.Platform;
@@ -45,7 +72,9 @@ export interface CodexAdapterConfig {
   readonly spawner?: ProcessSpawner;
   readonly fs?: FileSystemProbe;
   readonly gitProbe?: GitRepositoryProbe;
+  readonly writabilityProbe?: WorkspaceWritabilityProbe;
   readonly binaryName?: string;
+  readonly trustedLocal?: CodexTrustedLocalConfig;
 }
 
 /**
@@ -111,7 +140,34 @@ export class CodexAdapter implements AgentAdapter {
   readonly #spawner: ProcessSpawner;
   readonly #fs: FileSystemProbe;
   readonly #gitProbe: GitRepositoryProbe;
+  readonly #writabilityProbe: WorkspaceWritabilityProbe;
   readonly #binaryName: string | undefined;
+  /**
+   * Single source of truth for trusted-local mode: the exact same object
+   * is threaded into `detectCodex` (the only thing that can make `detect()`
+   * return `available`) and read directly in `startTask()` to choose
+   * between `buildCodexArgv` and `buildCodexTrustedLocalArgv`. There is no
+   * second flag anywhere in this class — see the deterministic test
+   * "strict mode can never select the trusted-local argv" in
+   * `codex-adapter.test.ts` for why this matters.
+   */
+  readonly #trustedLocal: CodexTrustedLocalConfig;
+  /**
+   * Phase 10.3 — in-flight detection coalescing. When several callers
+   * (e.g. overlapping `GET /api/v1/adapters` requests) invoke `detect()`
+   * while one detection is already running, they share the same
+   * in-progress promise instead of each starting an independent
+   * `--version`/`login status`/`exec --help` spawn sequence. Cleared
+   * unconditionally the moment that detection settles (success or
+   * failure) in `#runDetection`'s `finally` — never kept as a
+   * long-lived cache, and the very next call after that always starts a
+   * genuinely fresh detection. This does not change `startTask()`'s own
+   * "re-verify immediately before spawning" guarantee: it is only ever
+   * about *concurrent* callers sharing work, never about serving a
+   * stale result to a caller that arrives after the in-flight one
+   * finished.
+   */
+  #inFlightDetection: Promise<AgentDetectionResult> | undefined;
 
   constructor(config: CodexAdapterConfig = {}) {
     this.#platform = config.platform ?? process.platform;
@@ -119,18 +175,32 @@ export class CodexAdapter implements AgentAdapter {
     this.#spawner = config.spawner ?? nodeProcessSpawner;
     this.#fs = config.fs ?? realFileSystemProbe;
     this.#gitProbe = config.gitProbe ?? realGitRepositoryProbe;
+    this.#writabilityProbe = config.writabilityProbe ?? realWorkspaceWritabilityProbe;
     this.#binaryName = config.binaryName;
+    this.#trustedLocal = config.trustedLocal ?? TRUSTED_LOCAL_DISABLED;
   }
 
   async detect(): Promise<AgentDetectionResult> {
-    const result = await detectCodex({
-      platform: this.#platform,
-      parentEnv: this.#parentEnv,
-      fs: this.#fs,
-      spawner: this.#spawner,
-      ...(this.#binaryName !== undefined ? { binaryName: this.#binaryName } : {}),
-    });
-    return parseAgentDetectionResult(result);
+    if (this.#inFlightDetection !== undefined) return this.#inFlightDetection;
+    const promise = this.#runDetection();
+    this.#inFlightDetection = promise;
+    return promise;
+  }
+
+  async #runDetection(): Promise<AgentDetectionResult> {
+    try {
+      const result = await detectCodex({
+        platform: this.#platform,
+        parentEnv: this.#parentEnv,
+        fs: this.#fs,
+        spawner: this.#spawner,
+        trustedLocal: this.#trustedLocal,
+        ...(this.#binaryName !== undefined ? { binaryName: this.#binaryName } : {}),
+      });
+      return parseAgentDetectionResult(result);
+    } finally {
+      this.#inFlightDetection = undefined;
+    }
   }
 
   async startTask(input: AgentTaskInput, options?: AgentExecutionOptions): Promise<AgentRunHandle> {
@@ -176,9 +246,10 @@ export class CodexAdapter implements AgentAdapter {
     }
 
     // Codex normally requires a Git repository; this adapter never passes
-    // --skip-git-repo-check for a normal task. Checked here, before ever
-    // spawning Codex, so a non-repository working directory fails closed
-    // with a stable Hall-specific diagnostic.
+    // --skip-git-repo-check for a normal task, trusted-local included.
+    // Checked here, before ever spawning Codex, so a non-repository
+    // working directory fails closed with a stable Hall-specific
+    // diagnostic.
     if (!isInsideGitRepository(parsedInput.workingDirectory, this.#gitProbe)) {
       return new PreflightFailedRun(
         parsedInput.runId,
@@ -191,6 +262,29 @@ export class CodexAdapter implements AgentAdapter {
       );
     }
 
+    // Phase 10.2 — trusted-local mode's own writability preflight. Never
+    // runs in strict mode (Codex's own sandbox already enforces
+    // writability there). `parsedInput.workingDirectory` is the
+    // orchestrator's already-canonicalized, workspace-root-contained,
+    // symlink-escape-checked path (see TaskOrchestrator#resolveWorkingDirectory
+    // / validateWorkspace in @hall-of-wisdom/hall-runner) — this adapter
+    // never re-derives or re-resolves it, only probes whether it is
+    // writable.
+    if (
+      this.#trustedLocal.enabled &&
+      !this.#writabilityProbe.isWritable(parsedInput.workingDirectory)
+    ) {
+      return new PreflightFailedRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
+        buildFailure(
+          CODEX_WORKSPACE_NOT_WRITABLE,
+          "Codex trusted-local execution requires the task's working directory to be writable.",
+        ),
+      );
+    }
+
     const prompt = buildCodexTaskPrompt({
       title: parsedInput.hallTask.title,
       description: parsedInput.hallTask.description,
@@ -198,9 +292,17 @@ export class CodexAdapter implements AgentAdapter {
       projectId: parsedInput.hallTask.projectId,
     });
 
+    // The same #trustedLocal.enabled field that gated detect()'s
+    // "available" result above is the only thing that selects the
+    // Paperclip-compatible bypass argv. Strict mode (the default) always
+    // reaches buildCodexArgv, byte-for-byte the Phase 10.1 profile.
+    const args = this.#trustedLocal.enabled
+      ? buildCodexTrustedLocalArgv(parsedInput.workingDirectory)
+      : buildCodexArgv(parsedInput.workingDirectory);
+
     const run = new CodexRun({
       executablePath: resolution.executable.path,
-      args: buildCodexArgv(parsedInput.workingDirectory),
+      args,
       prompt,
       workingDirectory: parsedInput.workingDirectory,
       env: buildChildEnvironment(this.#parentEnv),
@@ -234,7 +336,15 @@ function failureCodeForUnavailableDetection(detection: AgentDetectionResult): st
     case "unsupported":
       if (
         detection.diagnosticMessage === UNSUPPORTED_ISOLATION_PROFILE_MESSAGE ||
-        detection.diagnosticMessage === UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE
+        detection.diagnosticMessage === UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE ||
+        // Phase 10.2 — every trusted-local precondition failure is a
+        // capability/environment mismatch, not an auth problem; bucketed
+        // with the existing isolation-unsupported code rather than
+        // defaulting to the ChatGPT-auth code below.
+        detection.diagnosticMessage === TRUSTED_LOCAL_NOT_LOOPBACK_MESSAGE ||
+        detection.diagnosticMessage === TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE ||
+        detection.diagnosticMessage === TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE ||
+        detection.diagnosticMessage === TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE
       ) {
         return CODEX_ISOLATION_UNSUPPORTED;
       }

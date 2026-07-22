@@ -1,12 +1,32 @@
 import { tmpdir } from "node:os";
 import type { AgentDetectionResult } from "@hall-of-wisdom/agent-adapter-sdk";
 import { resolveCodexExecutable, type FileSystemProbe } from "./executable-resolver.js";
-import { buildChildEnvironment } from "./environment.js";
+import { buildChildEnvironment, hasBlockedBillingEnvironmentKey } from "./environment.js";
 import { runBoundedProcess } from "./bounded-process.js";
 import type { ProcessSpawner } from "./process-spawner.js";
 import { getEnvValueCaseInsensitive } from "./env-lookup.js";
 import { parseLoginStatusOutput } from "./auth-classification.js";
-import { verifyIsolationFlagSupport } from "./cli-compatibility.js";
+import {
+  fetchCodexExecHelpText,
+  matchesIsolationFlags,
+  matchesTrustedLocalFlags,
+} from "./cli-compatibility.js";
+
+/**
+ * Phase 10.2 — the trusted-local preconditions `detectCodex` must verify
+ * before it may ever return `availability: "available"`. Every field here
+ * is supplied by the composition root from constructor-time server
+ * configuration only — never from anything browser-, task-, or
+ * REST-request-controlled. See `docs/architecture/0010-paperclip-compatible-codex-mode.md`.
+ */
+export interface TrustedLocalDetectionOptions {
+  /** `--enable-codex-trusted-local` at Hall Core startup. Default false. */
+  readonly enabled: boolean;
+  /** True only when Hall Core is bound to loopback only (see `LOCAL_ONLY_HOST` in apps/server). */
+  readonly loopbackBound: boolean;
+  /** The operator-configured, already-validated Hall Core workspace root. */
+  readonly workspaceRoot: string;
+}
 
 export interface DetectionOptions {
   readonly platform: NodeJS.Platform;
@@ -17,11 +37,68 @@ export interface DetectionOptions {
   readonly versionTimeoutMs?: number;
   readonly authTimeoutMs?: number;
   readonly helpTimeoutMs?: number;
+  /** Phase 10.3 — see `DEFAULT_VERSION_RETRY_DELAY_MS`'s doc comment. */
+  readonly versionRetryDelayMs?: number;
+  readonly trustedLocal?: TrustedLocalDetectionOptions;
 }
 
 const DEFAULT_VERSION_TIMEOUT_MS = 5000;
 const DEFAULT_AUTH_TIMEOUT_MS = 5000;
 const MAX_DETECTED_VERSION_LENGTH = 64;
+/**
+ * Phase 10.3 — bounded delay before the single allowed retry of the
+ * version/start probe. Short enough that a genuinely-broken installation
+ * still fails fast; long enough to ride out the one-off cold-start spawn
+ * flake observed live during Phase 10.2's real verification passes
+ * (Task #74, Task #75) — both times, `--version` failed to start on the
+ * very first call after Hall Core's own process started, then succeeded
+ * immediately on an identical second call. Configurable via
+ * `DetectionOptions.versionRetryDelayMs` purely so tests can override it
+ * to a small value and drive it with `vi.useFakeTimers()`, the same
+ * pattern already used for `versionTimeoutMs`/`authTimeoutMs`/
+ * `helpTimeoutMs` elsewhere in this module and for every timer in
+ * `codex-run.ts` — never so production behavior itself needs tuning.
+ */
+const DEFAULT_VERSION_RETRY_DELAY_MS = 250;
+
+/**
+ * Phase 10.3 — internal-only failure classification, documented here for
+ * clarity and used to decide the one retry below; never exposed through
+ * `AgentDetectionResult` (the public contract's `availability`/
+ * `diagnosticMessage` pair is unchanged) and never derived by matching
+ * against a diagnostic *message* string — every branch below reads a
+ * structured field (`spawnError`, `timedOut`, `exitCode`,
+ * `authenticationKind`, `chatgptVerified`, a boolean flag) directly off
+ * the bounded-process result or classifier output that produced it.
+ *
+ * - `executable_not_found` — `resolveCodexExecutable` found nothing on
+ *   PATH. Never retried: retrying an unresolved path cannot resolve it.
+ * - `process_start_failed` — the `--version` spawn itself failed
+ *   (`BoundedProcessResult.spawnError` set). **Retried once.**
+ * - `process_timeout` — the `--version` process did not exit within
+ *   `versionTimeoutMs` (`BoundedProcessResult.timedOut`). **Retried once.**
+ * - `malformed_version` — `--version` exited non-zero, or exited zero
+ *   with output `extractVersion` could not parse into a usable string.
+ *   Never retried: a real, completed process already answered.
+ * - `unsupported_version`/`unsupported_flags` — the version floor or the
+ *   `codex exec --help` marker scan failed (`cli-compatibility.ts`).
+ *   Never retried: this is an installation-compatibility fact, not a
+ *   transient spawn failure, and retrying spends an extra process for no
+ *   possible different outcome.
+ * - `login_status_failed` — the `login status` spawn itself failed or
+ *   timed out. Never retried in this phase: unlike the version probe,
+ *   Phase 10.2 real verification never observed this flake on
+ *   `login status`, and retrying an authentication-adjacent command is
+ *   exactly the kind of "retry after a security-relevant step" the
+ *   kickoff's restriction list forbids speculatively adding.
+ * - `logged_out`/`api_key_auth`/`access_token_auth`/`ambiguous_auth` —
+ *   `parseLoginStatusOutput`'s classification. Never retried: these are
+ *   real, safely-classified answers, not failures to get an answer.
+ * - `trusted_local_not_enabled` — `options.trustedLocal?.enabled` is not
+ *   `true`, or one of its own preconditions failed. Never retried: a
+ *   constructor-time configuration fact cannot change mid-detection.
+ * - `available` — every check passed.
+ */
 
 // Exported (not just module-private) so codex-adapter.ts's
 // failureCodeForUnavailableDetection can map each fixed, known-safe
@@ -54,6 +131,31 @@ export const UNSUPPORTED_ISOLATION_PROFILE_MESSAGE =
 export const UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE =
   "Codex file-edit execution is not verified in the current sandbox.";
 
+/**
+ * Phase 10.2 — trusted-local diagnostics. Each is a small, fixed, hand-
+ * authored constant (never raw process output, never an executable path,
+ * account detail, or CODEX_HOME value), matching the safety discipline
+ * every other diagnostic constant in this file already follows.
+ */
+export const TRUSTED_LOCAL_NOT_LOOPBACK_MESSAGE =
+  "Codex trusted-local execution requires Hall Core to be bound to loopback only.";
+export const TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE =
+  "Codex trusted-local execution requires a configured workspace root.";
+export const TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE =
+  "Codex trusted-local execution was refused because a billing-changing environment variable is present.";
+export const TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE =
+  "Installed Codex cannot guarantee the required trusted-local execution profile.";
+/**
+ * The only diagnostic message this adapter ever attaches to an
+ * `availability: "available"` result. Deliberately does not use the words
+ * "sandboxed" or "restricted" — trusted-local mode bypasses Codex's
+ * internal sandbox and approval enforcement outright; describing it as
+ * sandboxed would be false. Never names the Windows sandbox account,
+ * executable path, or CODEX_HOME.
+ */
+export const TRUSTED_LOCAL_AVAILABLE_MESSAGE =
+  "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.";
+
 function unavailable(diagnosticMessage: string): AgentDetectionResult {
   return { installed: false, availability: "unavailable", diagnosticMessage };
 }
@@ -65,6 +167,56 @@ function unsupported(diagnosticMessage: string, detectedVersion?: string): Agent
     diagnosticMessage,
   };
   return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
+}
+
+function available(diagnosticMessage: string, detectedVersion?: string): AgentDetectionResult {
+  const result: AgentDetectionResult = {
+    installed: true,
+    availability: "available",
+    diagnosticMessage,
+  };
+  return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
+}
+
+/** True only for the two structurally-retryable outcomes — never a string match. */
+function isRetryableProbeFailure(result: {
+  readonly spawnError?: string | undefined;
+  readonly timedOut: boolean;
+}): boolean {
+  return result.spawnError !== undefined || result.timedOut;
+}
+
+/**
+ * Phase 10.3 — runs the `--version` probe, and if (and only if) that first
+ * attempt has `process_start_failed` or `process_timeout`, waits
+ * `retryDelayMs` and runs it exactly once more. A structurally-successful
+ * first attempt (process actually started and exited, whatever its exit
+ * code or output) is never retried — see the classification doc comment
+ * above `DEFAULT_VERSION_RETRY_DELAY_MS`. The second attempt's result is
+ * returned unconditionally, whether it succeeds or fails; there is no
+ * third attempt.
+ */
+async function runVersionProbeWithBoundedRetry(
+  spawner: ProcessSpawner,
+  executablePath: string,
+  cwd: string,
+  env: Readonly<Record<string, string>>,
+  timeoutMs: number,
+  retryDelayMs: number,
+) {
+  const first = await runBoundedProcess({
+    spawner,
+    executablePath,
+    args: ["--version"],
+    cwd,
+    env,
+    timeoutMs,
+  });
+  if (!isRetryableProbeFailure(first)) return first;
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, retryDelayMs);
+  });
+  return runBoundedProcess({ spawner, executablePath, args: ["--version"], cwd, env, timeoutMs });
 }
 
 function extractVersion(stdout: string): string | undefined {
@@ -108,16 +260,16 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
   const env = buildChildEnvironment(options.parentEnv);
   const cwd = tmpdir();
 
-  const versionResult = await runBoundedProcess({
-    spawner: options.spawner,
+  const versionResult = await runVersionProbeWithBoundedRetry(
+    options.spawner,
     executablePath,
-    args: ["--version"],
     cwd,
     env,
-    timeoutMs: options.versionTimeoutMs ?? DEFAULT_VERSION_TIMEOUT_MS,
-  });
+    options.versionTimeoutMs ?? DEFAULT_VERSION_TIMEOUT_MS,
+    options.versionRetryDelayMs ?? DEFAULT_VERSION_RETRY_DELAY_MS,
+  );
 
-  if (versionResult.spawnError !== undefined || versionResult.timedOut) {
+  if (isRetryableProbeFailure(versionResult)) {
     return unavailable("Codex CLI could not be started.");
   }
   if (versionResult.exitCode !== 0) {
@@ -128,7 +280,11 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
   // Fail closed before ever checking auth if this installation cannot be
   // confirmed to support the required isolated-execution flag profile —
   // see cli-compatibility.ts. No real model request is made either way.
-  const isolationFlagsSupported = await verifyIsolationFlagSupport({
+  // Fetched exactly once per detectCodex call — Phase 10.1's "no repeated
+  // spawns per request" detection-stability guarantee — and reused below
+  // for the trusted-local marker check rather than spawning `exec --help`
+  // a second time.
+  const execHelpText = await fetchCodexExecHelpText({
     spawner: options.spawner,
     executablePath,
     cwd,
@@ -136,7 +292,7 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     detectedVersionString: detectedVersion,
     ...(options.helpTimeoutMs !== undefined ? { helpTimeoutMs: options.helpTimeoutMs } : {}),
   });
-  if (!isolationFlagsSupported) {
+  if (execHelpText === undefined || !matchesIsolationFlags(execHelpText)) {
     return unsupported(UNSUPPORTED_ISOLATION_PROFILE_MESSAGE, detectedVersion);
   }
 
@@ -190,8 +346,36 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
   }
 
   // Installation, isolation-flag support, and ChatGPT authentication are
-  // all confirmed at this point — but see the module-level comment on
-  // UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE: this adapter still never
-  // reports "available" until a real file edit has genuinely succeeded.
-  return unsupported(UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE, detectedVersion);
+  // all confirmed at this point. Phase 10.1's fail-closed default still
+  // applies unconditionally: unless trusted-local mode was explicitly
+  // enabled by the operator at Hall Core startup, this adapter never
+  // reports "available" — see UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE.
+  if (options.trustedLocal?.enabled !== true) {
+    return unsupported(UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE, detectedVersion);
+  }
+
+  // Phase 10.2 — trusted-local mode is explicitly enabled. Every check
+  // below is still zero-model-usage and still fails closed to
+  // "unsupported": a real file edit has never been claimed as verified in
+  // strict mode, but trusted-local mode's own bypass flag (see
+  // permission-profile.ts) removes the sandbox restriction that caused
+  // every Phase 10 write attempt to fail, so this mode is allowed to
+  // report "available" once every precondition below is confirmed —
+  // never merely assumed from the flag being set.
+  if (!options.trustedLocal.loopbackBound) {
+    return unsupported(TRUSTED_LOCAL_NOT_LOOPBACK_MESSAGE, detectedVersion);
+  }
+  if (options.trustedLocal.workspaceRoot.trim().length === 0) {
+    return unsupported(TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE, detectedVersion);
+  }
+  if (hasBlockedBillingEnvironmentKey(options.parentEnv)) {
+    return unsupported(TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE, detectedVersion);
+  }
+
+  // Reuses execHelpText fetched above — no second `exec --help` spawn.
+  if (!matchesTrustedLocalFlags(execHelpText)) {
+    return unsupported(TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE, detectedVersion);
+  }
+
+  return available(TRUSTED_LOCAL_AVAILABLE_MESSAGE, detectedVersion);
 }

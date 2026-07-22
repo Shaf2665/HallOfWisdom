@@ -1,6 +1,11 @@
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { detectCodex } from "./detection.js";
+import {
+  detectCodex,
+  UNSUPPORTED_ISOLATION_PROFILE_MESSAGE,
+  UNVERIFIED_CHATGPT_MESSAGE,
+  NOT_CHATGPT_MESSAGE,
+} from "./detection.js";
 import type { ProcessSpawner, SpawnedProcessHandle } from "./process-spawner.js";
 import type { FileSystemProbe } from "./executable-resolver.js";
 
@@ -64,6 +69,33 @@ class HangingHandle implements SpawnedProcessHandle {
   }
 }
 
+/**
+ * Simulates a real spawn failure (e.g. the underlying OS call itself
+ * failing) — `onError` fires instead of `onExit`, matching
+ * `runBoundedProcess`'s `spawnError` path. Distinct from `HangingHandle`
+ * (which never settles at all, exercising the timeout path instead).
+ */
+class ErrorHandle implements SpawnedProcessHandle {
+  readonly pid = 9999;
+  readonly stdout = { on: () => undefined } as unknown as NodeJS.ReadableStream;
+  readonly stderr = { on: () => undefined } as unknown as NodeJS.ReadableStream;
+  readonly stdin = { end: () => undefined, write: () => true } as unknown as NodeJS.WritableStream;
+  #errorCallback: ((error: Error) => void) | undefined;
+
+  onExit(): void {
+    // never called on this path
+  }
+  onError(callback: (error: Error) => void): void {
+    this.#errorCallback = callback;
+    queueMicrotask(() => {
+      this.#errorCallback?.(new Error("spawn ENOENT"));
+    });
+  }
+  kill(): boolean {
+    return true;
+  }
+}
+
 const VALID_EXEC_HELP_TEXT = [
   "--json",
   "--ephemeral",
@@ -108,6 +140,40 @@ function scriptedSpawner(
 function fakeFs(existingPaths: readonly string[]): FileSystemProbe {
   const set = new Set(existingPaths.map((p) => p.toLowerCase()));
   return { isFile: (p) => set.has(p.toLowerCase()) };
+}
+
+/**
+ * Phase 10.3 — returns a queued handle for each successive `--version`
+ * spawn (the Nth call gets `versionHandles[N-1]`, clamped to the last
+ * entry once exhausted), while `exec --help`/`login status` always
+ * succeed with the given fixed text. Lets a test construct exact
+ * sequences like "first call hangs, second call succeeds" and directly
+ * count how many times `--version` was actually spawned.
+ */
+function versionQueueSpawner(
+  versionHandles: readonly SpawnedProcessHandle[],
+  helpText: string = VALID_EXEC_HELP_TEXT,
+  loginStatusText = "Logged in using ChatGPT",
+): { spawner: ProcessSpawner; versionCallCount: () => number } {
+  let versionIndex = 0;
+  let versionCallCount = 0;
+  const spawner: ProcessSpawner = {
+    spawn: (_executablePath, args) => {
+      if (args.includes("--version")) {
+        versionCallCount += 1;
+        const handle = versionHandles[versionIndex] ?? versionHandles[versionHandles.length - 1];
+        versionIndex += 1;
+        if (handle === undefined) throw new Error("versionQueueSpawner: no handle configured");
+        return handle;
+      }
+      if (args.includes("exec") && args.includes("--help")) return new ScriptedHandle(helpText, 0);
+      if (args.includes("login") && args.includes("status")) {
+        return new ScriptedHandle("", 0, loginStatusText);
+      }
+      return new ScriptedHandle("", 0);
+    },
+  };
+  return { spawner, versionCallCount: () => versionCallCount };
 }
 
 const FOUND_ENV = { PATH: "/usr/local/bin" };
@@ -348,24 +414,32 @@ describe("detectCodex — bounded timeouts (Phase 10.1)", () => {
     vi.useRealTimers();
   });
 
-  it("a --version timeout reports unavailable, distinct from a spawn error or a bad exit code", async () => {
-    vi.useFakeTimers();
-    const spawner: ProcessSpawner = {
-      spawn: (_exe, args) =>
-        args.includes("--version") ? new HangingHandle() : new ScriptedHandle("", 0),
-    };
-    const resultPromise = detectCodex({
-      platform: "linux",
-      parentEnv: FOUND_ENV,
-      fs: FS_WITH_CODEX,
-      spawner,
-      versionTimeoutMs: 1000,
-    });
-    await vi.advanceTimersByTimeAsync(1100);
-    const result = await resultPromise;
-    expect(result.availability).toBe("unavailable");
-    expect(result.diagnosticMessage).toBe("Codex CLI could not be started.");
-  });
+  it(
+    "a --version timeout on both the initial attempt and its one bounded retry reports " +
+      "unavailable, distinct from a spawn error or a bad exit code (Phase 10.3: every --version " +
+      "spawn in this test hangs identically, so this also proves the retry is truly bounded — " +
+      "the promise settles rather than hanging forever)",
+    async () => {
+      vi.useFakeTimers();
+      const spawner: ProcessSpawner = {
+        spawn: (_exe, args) =>
+          args.includes("--version") ? new HangingHandle() : new ScriptedHandle("", 0),
+      };
+      const resultPromise = detectCodex({
+        platform: "linux",
+        parentEnv: FOUND_ENV,
+        fs: FS_WITH_CODEX,
+        spawner,
+        versionTimeoutMs: 1000,
+        versionRetryDelayMs: 250,
+      });
+      // First timeout (1000ms) + retry delay (250ms) + second timeout (1000ms).
+      await vi.advanceTimersByTimeAsync(2300);
+      const result = await resultPromise;
+      expect(result.availability).toBe("unavailable");
+      expect(result.diagnosticMessage).toBe("Codex CLI could not be started.");
+    },
+  );
 
   it("an exec --help timeout reports unsupported with the isolation diagnostic, distinct from a --version timeout", async () => {
     vi.useFakeTimers();
@@ -431,5 +505,501 @@ describe("detectCodex — bounded timeouts (Phase 10.1)", () => {
     };
     await detectCodex({ platform: "linux", parentEnv: FOUND_ENV, fs: FS_WITH_CODEX, spawner });
     expect(versionSpawnCount).toBe(1);
+  });
+});
+
+const TRUSTED_LOCAL_EXEC_HELP_TEXT = [
+  ...VALID_EXEC_HELP_TEXT.split("\n"),
+  "--dangerously-bypass-approvals-and-sandbox",
+  "--disable",
+].join("\n");
+
+const VALID_TRUSTED_LOCAL: import("./detection.js").TrustedLocalDetectionOptions = {
+  enabled: true,
+  loopbackBound: true,
+  workspaceRoot: "/workspace",
+};
+
+function trustedLocalSpawner(): ProcessSpawner {
+  return scriptedSpawner(
+    "codex-cli 0.144.4",
+    "Logged in using ChatGPT",
+    0,
+    TRUSTED_LOCAL_EXEC_HELP_TEXT,
+  );
+}
+
+describe("detectCodex — trusted-local mode disabled (default, Phase 10.1 unchanged)", () => {
+  it("with trustedLocal omitted entirely, behaves byte-for-byte like Phase 10.1", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(
+      "Codex file-edit execution is not verified in the current sandbox.",
+    );
+  });
+
+  it("with trustedLocal.enabled false, still never returns available even if every other precondition would pass", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: { enabled: false, loopbackBound: true, workspaceRoot: "/workspace" },
+    });
+    expect(result.availability).toBe("unsupported");
+  });
+});
+
+describe("detectCodex — trusted-local mode enabled (Phase 10.2)", () => {
+  it("reports available with the fixed trusted-local diagnostic once every precondition passes", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    expect(result.availability).toBe("available");
+    expect(result.diagnosticMessage).toBe(
+      "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.",
+    );
+  });
+
+  it("never describes trusted-local mode as sandboxed or restricted", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    const message = (result.diagnosticMessage ?? "").toLowerCase();
+    expect(message).not.toContain("sandboxed");
+    expect(message).not.toContain("restricted");
+  });
+
+  it("fails closed to unsupported when not loopback-bound", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: { ...VALID_TRUSTED_LOCAL, loopbackBound: false },
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(
+      "Codex trusted-local execution requires Hall Core to be bound to loopback only.",
+    );
+  });
+
+  it("fails closed to unsupported when no workspace root is configured", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: { ...VALID_TRUSTED_LOCAL, workspaceRoot: "   " },
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(
+      "Codex trusted-local execution requires a configured workspace root.",
+    );
+  });
+
+  it.each(["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"])(
+    "fails closed to unsupported when %s is present in the operator's environment",
+    async (blockedKey) => {
+      const result = await detectCodex({
+        platform: "linux",
+        parentEnv: { ...FOUND_ENV, [blockedKey]: "sk-something" },
+        fs: FS_WITH_CODEX,
+        spawner: trustedLocalSpawner(),
+        trustedLocal: VALID_TRUSTED_LOCAL,
+      });
+      expect(result.availability).toBe("unsupported");
+      expect(result.diagnosticMessage).toBe(
+        "Codex trusted-local execution was refused because a billing-changing environment variable is present.",
+      );
+    },
+  );
+
+  it("never leaks the blocked environment variable's value in the diagnostic", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: { ...FOUND_ENV, OPENAI_API_KEY: "sk-super-secret-value" },
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    expect(JSON.stringify(result)).not.toContain("sk-super-secret-value");
+  });
+
+  it("fails closed to unsupported when --help is missing the bypass flag, even with valid ChatGPT auth and loopback binding", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: scriptedSpawner(
+        "codex-cli 0.144.4",
+        "Logged in using ChatGPT",
+        0,
+        VALID_EXEC_HELP_TEXT,
+      ),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(
+      "Installed Codex cannot guarantee the required trusted-local execution profile.",
+    );
+  });
+
+  it("still fails closed to unsupported (not available) when ChatGPT auth cannot be verified, even with trusted-local enabled", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: scriptedSpawner(
+        "codex-cli 0.144.4",
+        "Logged in using an API key",
+        0,
+        TRUSTED_LOCAL_EXEC_HELP_TEXT,
+      ),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.availability).not.toBe("available");
+  });
+
+  it("still fails closed (logged_out) when not signed in, even with trusted-local enabled", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: scriptedSpawner(
+        "codex-cli 0.144.4",
+        "Not logged in",
+        0,
+        TRUSTED_LOCAL_EXEC_HELP_TEXT,
+      ),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    expect(result.availability).toBe("logged_out");
+  });
+
+  it("never exposes executablePath, CODEX_HOME, account info, or raw help/login output even when available", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: { ...FOUND_ENV, CODEX_HOME: "/home/operator/.codex" },
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    const serialized = JSON.stringify(result);
+    expect(result.executablePath).toBeUndefined();
+    expect(serialized).not.toContain("/home/operator/.codex");
+    expect(serialized).not.toContain("/usr/local/bin/codex");
+  });
+
+  it("fetches 'codex exec --help' exactly once even though both the strict and trusted-local marker sets are checked", async () => {
+    let helpSpawnCount = 0;
+    const spawner: ProcessSpawner = {
+      spawn: (_exe, args) => {
+        if (args.includes("--version")) return new ScriptedHandle("codex-cli 0.144.4", 0);
+        if (args.includes("exec") && args.includes("--help")) {
+          helpSpawnCount += 1;
+          return new ScriptedHandle(TRUSTED_LOCAL_EXEC_HELP_TEXT, 0);
+        }
+        return new ScriptedHandle("", 0, "Logged in using ChatGPT");
+      },
+    };
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    expect(result.availability).toBe("available");
+    expect(helpSpawnCount).toBe(1);
+  });
+});
+
+describe("detectCodex — Phase 10.3 bounded version-probe retry", () => {
+  it("a successful first --version probe starts exactly one version process — never retried", async () => {
+    vi.useFakeTimers();
+    const { spawner, versionCallCount } = versionQueueSpawner([
+      new ScriptedHandle("codex-cli 0.144.4", 0),
+    ]);
+    const resultPromise = detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      versionRetryDelayMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    const result = await resultPromise;
+    expect(result.availability).toBe("unsupported"); // reaches the fixed Phase 10.1 cap, strict mode
+    expect(versionCallCount()).toBe(1);
+    vi.useRealTimers();
+  });
+
+  it("process_start_failed on the first attempt, success on the second — detection succeeds, exactly two version processes started", async () => {
+    vi.useFakeTimers();
+    const { spawner, versionCallCount } = versionQueueSpawner([
+      new ErrorHandle(),
+      new ScriptedHandle("codex-cli 0.144.4", 0),
+    ]);
+    const resultPromise = detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      versionRetryDelayMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(20);
+    const result = await resultPromise;
+    expect(result.availability).not.toBe("unavailable");
+    expect(result.detectedVersion).toBe("codex-cli 0.144.4");
+    expect(versionCallCount()).toBe(2);
+    vi.useRealTimers();
+  });
+
+  it("process_timeout on the first attempt, success on the second — detection succeeds", async () => {
+    vi.useFakeTimers();
+    const { spawner, versionCallCount } = versionQueueSpawner([
+      new HangingHandle(),
+      new ScriptedHandle("codex-cli 0.144.4", 0),
+    ]);
+    const resultPromise = detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      versionTimeoutMs: 500,
+      versionRetryDelayMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(600);
+    const result = await resultPromise;
+    expect(result.availability).not.toBe("unavailable");
+    expect(versionCallCount()).toBe(2);
+    vi.useRealTimers();
+  });
+
+  it("both attempts fail — detection returns unavailable, exactly two attempts occurred, no third attempt", async () => {
+    vi.useFakeTimers();
+    const { spawner, versionCallCount } = versionQueueSpawner([
+      new ErrorHandle(),
+      new ErrorHandle(),
+    ]);
+    const resultPromise = detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      versionRetryDelayMs: 10,
+    });
+    await vi.advanceTimersByTimeAsync(50);
+    const result = await resultPromise;
+    expect(result.availability).toBe("unavailable");
+    expect(result.diagnosticMessage).toBe("Codex CLI could not be started.");
+    expect(versionCallCount()).toBe(2);
+    vi.useRealTimers();
+  });
+
+  it("executable missing: no --version spawn happens at all, so no meaningless retry occurs", async () => {
+    const { spawner, versionCallCount } = versionQueueSpawner([
+      new ScriptedHandle("codex-cli 0.144.4", 0),
+    ]);
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: { PATH: "/usr/bin" },
+      fs: fakeFs([]),
+      spawner,
+    });
+    expect(result.availability).toBe("unavailable");
+    expect(versionCallCount()).toBe(0);
+  });
+
+  it("unsupported version (below the floor): the version process itself succeeded, so no retry occurs", async () => {
+    const { spawner, versionCallCount } = versionQueueSpawner([
+      new ScriptedHandle("codex-cli 0.1.0", 0),
+    ]);
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(versionCallCount()).toBe(1);
+  });
+
+  it("missing required exec --help flag: the version probe itself succeeded, so no retry occurs there", async () => {
+    const incompleteHelp = VALID_EXEC_HELP_TEXT.replace("--strict-config\n", "");
+    const { spawner, versionCallCount } = versionQueueSpawner(
+      [new ScriptedHandle("codex-cli 0.144.4", 0)],
+      incompleteHelp,
+    );
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(UNSUPPORTED_ISOLATION_PROFILE_MESSAGE);
+    expect(versionCallCount()).toBe(1);
+  });
+
+  it("logged-out authentication: the version probe succeeded, so no retry occurs", async () => {
+    const { spawner, versionCallCount } = versionQueueSpawner(
+      [new ScriptedHandle("codex-cli 0.144.4", 0)],
+      VALID_EXEC_HELP_TEXT,
+      "Not logged in",
+    );
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+    });
+    expect(result.availability).toBe("logged_out");
+    expect(versionCallCount()).toBe(1);
+  });
+
+  it("API-key authentication: the version probe succeeded, so no retry occurs", async () => {
+    const { spawner, versionCallCount } = versionQueueSpawner(
+      [new ScriptedHandle("codex-cli 0.144.4", 0)],
+      VALID_EXEC_HELP_TEXT,
+      "Logged in using an API key",
+    );
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(NOT_CHATGPT_MESSAGE);
+    expect(versionCallCount()).toBe(1);
+  });
+
+  it("access-token authentication: the version probe succeeded, so no retry occurs", async () => {
+    const { spawner, versionCallCount } = versionQueueSpawner(
+      [new ScriptedHandle("codex-cli 0.144.4", 0)],
+      VALID_EXEC_HELP_TEXT,
+      "Logged in using an access token",
+    );
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(NOT_CHATGPT_MESSAGE);
+    expect(versionCallCount()).toBe(1);
+  });
+
+  it("ambiguous authentication: the version probe succeeded, so no retry occurs", async () => {
+    const { spawner, versionCallCount } = versionQueueSpawner(
+      [new ScriptedHandle("codex-cli 0.144.4", 0)],
+      VALID_EXEC_HELP_TEXT,
+      "some unrecognized status line",
+    );
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(UNVERIFIED_CHATGPT_MESSAGE);
+    expect(versionCallCount()).toBe(1);
+  });
+
+  it("the retry delay is genuinely bounded — advancing less than the delay never triggers the second attempt", async () => {
+    vi.useFakeTimers();
+    const { spawner, versionCallCount } = versionQueueSpawner([
+      new ErrorHandle(),
+      new ScriptedHandle("codex-cli 0.144.4", 0),
+    ]);
+    const resultPromise = detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      versionRetryDelayMs: 250,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(versionCallCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(versionCallCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(versionCallCount()).toBe(2);
+    await resultPromise;
+    vi.useRealTimers();
+  });
+
+  it("no model invocation occurs anywhere in the retry path — only --version, exec --help, and login status are ever spawned", async () => {
+    const calls: string[][] = [];
+    const { spawner: base } = versionQueueSpawner([
+      new ErrorHandle(),
+      new ScriptedHandle("codex-cli 0.144.4", 0),
+    ]);
+    const spawner: ProcessSpawner = {
+      spawn: (exe, args, opts) => {
+        calls.push([...args]);
+        return base.spawn(exe, args, opts);
+      },
+    };
+    await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      versionRetryDelayMs: 0,
+    });
+    for (const args of calls) {
+      // "exec" only ever appears paired with "--help" (a bounded compatibility
+      // scan), never as a real task invocation (which would be "exec" with
+      // "--json" and a working-directory/prompt profile — never produced here).
+      expect(args.includes("exec") && !args.includes("--help")).toBe(false);
+      expect(args).not.toContain("--json");
+      const isKnownFreeCommand =
+        args.includes("--version") ||
+        (args.includes("exec") && args.includes("--help")) ||
+        (args.includes("login") && args.includes("status"));
+      expect(isKnownFreeCommand).toBe(true);
+    }
+  });
+
+  it("raw process output from a retried --version probe never reaches the public detection result", async () => {
+    class LeakyErrorHandle extends ErrorHandle {
+      override onError(callback: (error: Error) => void): void {
+        queueMicrotask(() => {
+          callback(new Error("secret internal detail: TOKEN=abc123"));
+        });
+      }
+    }
+    const { spawner } = versionQueueSpawner([
+      new LeakyErrorHandle(),
+      new ScriptedHandle("codex-cli 0.144.4", 0),
+    ]);
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      versionRetryDelayMs: 0,
+    });
+    expect(JSON.stringify(result)).not.toContain("TOKEN=abc123");
+    expect(JSON.stringify(result)).not.toContain("secret internal detail");
   });
 });

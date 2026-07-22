@@ -49,6 +49,9 @@ class FakeHandle implements SpawnedProcessHandle {
   emitStdoutEnd(): void {
     this.stdoutEmitter.emit("end");
   }
+  emitStderr(text: string): void {
+    this.stderrEmitter.emit("data", Buffer.from(text, "utf8"));
+  }
   emitExit(
     code: number | null,
     signal: NodeJS.Signals | null = null,
@@ -125,6 +128,7 @@ function makeRun(options: {
   gracefulTerminationTimeoutMs: number;
   startupTimeoutMs: number;
   maxRunDurationMs: number;
+  inactivityTimeoutMs?: number;
   postExitStdoutDrainGraceMs?: number;
   spawner: ProcessSpawner;
   signal?: AbortSignal;
@@ -751,6 +755,132 @@ describe("CodexRun — cleanup", () => {
     handle.emitExit(null, "SIGTERM");
     await eventsPromise;
     expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+  });
+});
+
+describe("CodexRun — bounded no-output inactivity timeout (Phase 10.2)", () => {
+  it("terminates the process and reports CODEX_OUTPUT_INACTIVITY_TIMEOUT after silence exceeds the bound", async () => {
+    vi.useFakeTimers();
+    const handle = new FakeHandle();
+    const { spawner } = fakeSpawner(handle);
+    const run = makeRun({
+      ...baseOptions(),
+      spawner,
+      inactivityTimeoutMs: 1000,
+      maxRunDurationMs: 60000,
+    });
+    const eventsPromise = collectEvents(run);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(handle.killCount).toBeGreaterThan(0);
+    handle.emitExit(null, "SIGTERM");
+    const events = await eventsPromise;
+    const failure = events.find((e) => e.type === "run.failed");
+    expect(failure?.type === "run.failed" && failure.payload.failure.code).toBe(
+      "CODEX_OUTPUT_INACTIVITY_TIMEOUT",
+    );
+    vi.useRealTimers();
+  });
+
+  it("resets on every stdout chunk — steady trickled output never trips the timeout", async () => {
+    vi.useFakeTimers();
+    const handle = new FakeHandle();
+    const { spawner } = fakeSpawner(handle);
+    const run = makeRun({
+      ...baseOptions(),
+      spawner,
+      inactivityTimeoutMs: 1000,
+      maxRunDurationMs: 60000,
+    });
+    const eventsPromise = collectEvents(run);
+    await vi.advanceTimersByTimeAsync(0);
+    // Three chunks, each well inside the 1000ms bound, none of them the
+    // final message — the timer must re-arm on each one rather than
+    // accumulating toward the original deadline.
+    await vi.advanceTimersByTimeAsync(700);
+    handle.emitStdout(AGENT_MESSAGE("partial one"));
+    await vi.advanceTimersByTimeAsync(700);
+    handle.emitStdout(AGENT_MESSAGE("partial two"));
+    await vi.advanceTimersByTimeAsync(700);
+    expect(handle.killCount).toBe(0);
+    handle.emitStdout(TURN_COMPLETED);
+    handle.emitExit(0);
+    const events = await eventsPromise;
+    expect(events.some((e) => e.type === "run.failed")).toBe(false);
+    expect(events.at(-1)?.type).toBe("run.completed");
+    vi.useRealTimers();
+  });
+
+  it("resets on stderr chunks too, without ever forwarding their content anywhere", async () => {
+    vi.useFakeTimers();
+    const handle = new FakeHandle();
+    const { spawner } = fakeSpawner(handle);
+    const run = makeRun({
+      ...baseOptions(),
+      spawner,
+      inactivityTimeoutMs: 1000,
+      maxRunDurationMs: 60000,
+    });
+    const eventsPromise = collectEvents(run);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(700);
+    handle.emitStderr("some diagnostic noise, never parsed\n");
+    await vi.advanceTimersByTimeAsync(700);
+    expect(handle.killCount).toBe(0);
+    handle.emitStdout(TURN_COMPLETED);
+    handle.emitExit(0);
+    const events = await eventsPromise;
+    expect(events.some((e) => e.type === "run.failed")).toBe(false);
+    const serialized = JSON.stringify(events);
+    expect(serialized).not.toContain("diagnostic noise");
+    vi.useRealTimers();
+  });
+
+  it("stops ticking once the run has already completed — no redundant kill after a clean finish", async () => {
+    vi.useFakeTimers();
+    const handle = new FakeHandle();
+    const { spawner } = fakeSpawner(handle);
+    const run = makeRun({
+      ...baseOptions(),
+      spawner,
+      inactivityTimeoutMs: 1000,
+      maxRunDurationMs: 60000,
+    });
+    const eventsPromise = collectEvents(run);
+    await vi.advanceTimersByTimeAsync(0);
+    handle.emitStdout(TURN_COMPLETED);
+    handle.emitExit(0);
+    await eventsPromise;
+    const killCountAtCompletion = handle.killCount;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(handle.killCount).toBe(killCountAtCompletion);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
+  });
+
+  it("defaults to a bounded, non-zero timeout when inactivityTimeoutMs is not supplied", async () => {
+    vi.useFakeTimers();
+    const handle = new FakeHandle();
+    const { spawner } = fakeSpawner(handle);
+    // A large startupTimeoutMs so only the default *inactivity* timeout
+    // (not the separate, shorter startup timeout) is under test here; one
+    // early chunk establishes activity, then silence resumes.
+    const run = makeRun({
+      ...baseOptions(),
+      spawner,
+      startupTimeoutMs: 300_000,
+      maxRunDurationMs: 300_000,
+    });
+    const eventsPromise = collectEvents(run);
+    await vi.advanceTimersByTimeAsync(0);
+    handle.emitStdout(AGENT_MESSAGE("partial"));
+    await vi.advanceTimersByTimeAsync(119_000);
+    expect(handle.killCount).toBe(0);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(handle.killCount).toBeGreaterThan(0);
+    handle.emitExit(null, "SIGTERM");
+    await eventsPromise;
     vi.useRealTimers();
   });
 });
