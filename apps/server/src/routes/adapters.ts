@@ -5,7 +5,12 @@ import type {
   IntegrationLevel,
   OperatingSystem,
 } from "@hall-of-wisdom/agent-adapter-sdk";
-import type { AgentCapabilities } from "@hall-of-wisdom/protocol";
+import type {
+  AgentCapabilities,
+  CapabilityId,
+  CapabilityObservation,
+  ExecutionTrust,
+} from "@hall-of-wisdom/protocol";
 
 export interface AdapterRoutesDeps {
   readonly registry: AgentRegistry;
@@ -30,6 +35,15 @@ export interface AdapterRoutesDeps {
  * continues to omit this field entirely, exactly as before — the
  * blanket exclusion for problem diagnostics (which really can embed
  * unredacted output) is unchanged.
+ *
+ * Phase 11 additions follow the exact same safety discipline:
+ * `capabilityObservations`/`executionTrust`/`limitations` are read
+ * straight from `AgentDetectionResult` (already bounded, already
+ * hand-authored, never raw process output — see that schema's own doc
+ * comment in `agent-adapter-sdk`), never from anything a request carries.
+ * `declaredCapabilities` is static descriptor metadata, not a live
+ * observation. `assignable` and `detectedAt` are computed here, in this
+ * route, not accepted from anywhere.
  */
 interface SafeAdapterSummary {
   readonly adapterId: string;
@@ -41,12 +55,21 @@ interface SafeAdapterSummary {
   readonly integrationLevel: IntegrationLevel;
   readonly supportedOperatingSystems: readonly OperatingSystem[];
   readonly capabilities: AgentCapabilities;
+  readonly declaredCapabilities: readonly CapabilityId[];
   readonly availability: AvailabilityStatus;
+  readonly assignable: boolean;
+  readonly executionTrust: ExecutionTrust;
+  readonly capabilityObservations: readonly CapabilityObservation[];
+  readonly limitations: readonly string[];
+  readonly detectedAt: string;
   readonly limitationNotice?: string;
 }
 
 interface SafeDetectionSummary {
   readonly availability: AvailabilityStatus;
+  readonly executionTrust: ExecutionTrust;
+  readonly capabilityObservations: readonly CapabilityObservation[];
+  readonly limitations: readonly string[];
   readonly limitationNotice?: string;
 }
 
@@ -55,6 +78,10 @@ interface SafeDetectionSummary {
  * escape: a misbehaving adapter must not take down the whole list, and
  * whatever it threw must not reach the client. The failure is logged
  * server-side, bounded, without any raw error object or stack trace.
+ * `executionTrust` defaults to `"unavailable"` and the two arrays default
+ * to `[]` when an adapter's `detect()` omits them (pre-Phase-11 fakes) or
+ * throws — never left `undefined`, so every route/UI consumer can treat
+ * these fields as always-present.
  */
 async function detectSafely(
   registry: AgentRegistry,
@@ -63,13 +90,24 @@ async function detectSafely(
   try {
     const adapter = registry.resolve(adapterId);
     const result = await adapter.detect();
-    return result.availability === "available" && result.diagnosticMessage !== undefined
-      ? { availability: result.availability, limitationNotice: result.diagnosticMessage }
-      : { availability: result.availability };
+    return {
+      availability: result.availability,
+      executionTrust: result.executionTrust ?? "unavailable",
+      capabilityObservations: result.capabilityObservations ?? [],
+      limitations: result.limitations ?? [],
+      ...(result.availability === "available" && result.diagnosticMessage !== undefined
+        ? { limitationNotice: result.diagnosticMessage }
+        : {}),
+    };
   } catch (error) {
     const detail = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     console.error(`adapter "${adapterId}" detection failed: ${detail}`);
-    return { availability: "unavailable" };
+    return {
+      availability: "unavailable",
+      executionTrust: "unavailable",
+      capabilityObservations: [],
+      limitations: [],
+    };
   }
 }
 
@@ -99,7 +137,16 @@ export function registerAdapterRoutes(app: FastifyInstance, deps: AdapterRoutesD
           integrationLevel: descriptor.integrationLevel,
           supportedOperatingSystems: descriptor.supportedOperatingSystems,
           capabilities: descriptor.capabilities,
+          declaredCapabilities: descriptor.declaredCapabilities,
           availability: detection.availability,
+          // Phase 11 — task-independent: whether *some* task could be
+          // assigned to this adapter right now. Task-specific
+          // capability/trust matching is `routing-policy.ts`'s job.
+          assignable: detection.availability === "available",
+          executionTrust: detection.executionTrust,
+          capabilityObservations: detection.capabilityObservations,
+          limitations: detection.limitations,
+          detectedAt: new Date().toISOString(),
           ...(detection.limitationNotice !== undefined
             ? { limitationNotice: detection.limitationNotice }
             : {}),

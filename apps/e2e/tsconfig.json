@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    // `dom` is needed only for `page.evaluate(() => ...)` callback
+    // bodies, which execute in the browser, not for `src/` (the fixture
+    // server/adapters, real Node code) — safe to include workspace-wide
+    // here since this package's own `src/` never actually references a
+    // DOM global.
+    "lib": ["ES2022", "dom"]
+  },
+  "include": ["src", "tests", "playwright.config.ts"],
+  "exclude": ["dist", "node_modules", "test-results", "playwright-report"]
+}

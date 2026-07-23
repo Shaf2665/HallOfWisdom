@@ -9,6 +9,8 @@ function buildFakeAdapter(overrides: {
   adapterId: string;
   displayName?: string;
   provider?: string;
+  declaredCapabilities?: readonly string[];
+  integrationLevel?: string;
   detect: () => Promise<{ installed: boolean; availability: string }>;
 }): AgentAdapter {
   return {
@@ -34,9 +36,10 @@ function buildFakeAdapter(overrides: {
         mcp: false,
         acp: false,
       },
-      integrationLevel: "native",
+      declaredCapabilities: overrides.declaredCapabilities ?? [],
+      integrationLevel: overrides.integrationLevel ?? "native",
       supportedOperatingSystems: ["windows", "macos", "linux"],
-    },
+    } as AgentAdapter["descriptor"],
     detect: overrides.detect as AgentAdapter["detect"],
     startTask: () => Promise.reject(new Error("not used in this test")),
   };

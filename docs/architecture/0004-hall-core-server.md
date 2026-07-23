@@ -382,6 +382,15 @@ snapshot kept as secondary defense in depth. See `docs/architecture/0006-kanban-
 concurrency policy (Phase 7.1)" and "Closing the ABA gap: internal task revision (Phase 7.2)", for the
 full design and the races each phase closes.
 
+## Capability/trust routing endpoints (Phase 11)
+
+Two further endpoints exist for provider-neutral capability/trust routing — see
+`docs/architecture/0011-agent-capabilities-trust-and-routing.md` for the full design:
+`POST /tasks/:taskId/routing-analysis` (strictly read-only; never touches `TaskStore`'s mutating
+methods or emits an event) and `POST /tasks/:taskId/route-and-assign` (the one explicit, mutating
+action — assigns only, using the same `assignIfEligible()`/revision-based concurrency mechanism
+`/assign` above already uses; never starts a run).
+
 ## Communication Boards endpoints (Phase 8)
 
 A REST + WebSocket surface for local, human-authored discussion — a General board plus one

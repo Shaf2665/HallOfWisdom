@@ -262,11 +262,12 @@ describe("availableActionsFor", () => {
     ]);
   });
 
-  it("ready: Move to Backlog, Assign agent, Move to Blocked, Cancel task, Open discussion", () => {
+  it("ready: Move to Backlog, Assign agent, Find suitable agent, Move to Blocked, Cancel task, Open discussion", () => {
     const actions = availableActionsFor(makeRecord({ status: "ready" }));
     expect(actions.map((a) => a.label)).toEqual([
       "Move to Backlog",
       "Assign agent",
+      "Find suitable agent",
       "Move to Blocked",
       "Cancel task",
       "Open discussion",

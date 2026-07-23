@@ -106,7 +106,9 @@ hall-of-wisdom/
   docs/architecture/0001-initial-architecture.md, 0002-agent-adapter-boundary.md,
                      0003-hall-runner-boundary.md, 0004-hall-core-server.md,
                      0005-minimal-web-interface.md, 0006-kanban-board.md,
-                     0007-communication-boards.md, 0008-claude-code-adapter.md
+                     0007-communication-boards.md, 0008-claude-code-adapter.md,
+                     0009-codex-adapter.md, 0010-paperclip-compatible-codex-mode.md,
+                     0011-agent-capabilities-trust-and-routing.md
   AGENTS.md
   CLAUDE.md
   README.md

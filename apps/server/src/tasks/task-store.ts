@@ -1,4 +1,9 @@
-import type { StructuredFailure, TaskStatus } from "@hall-of-wisdom/protocol";
+import type {
+  ExecutionTrust,
+  StructuredFailure,
+  TaskRequirements,
+  TaskStatus,
+} from "@hall-of-wisdom/protocol";
 import type { TerminalEventType } from "@hall-of-wisdom/hall-runner";
 import {
   DuplicateTaskError,
@@ -182,6 +187,18 @@ export class TaskStore {
    * a new dedicated code — see the ADR) — never last-write-wins. On
    * success, the revision is bumped exactly once, same as every other
    * mutating method.
+   *
+   * `assignment.requirements`/`assignment.executionTrust` (Phase 11) are
+   * optional and, when supplied, are set on the commit exactly like
+   * `adapterId`/`agentId` — used by `TaskOrchestrator.routeAndAssign()` to
+   * persist whatever requirements it actually routed against (including
+   * an ad hoc override that was never previously on the task) and a
+   * snapshot of the winning adapter's execution trust, in the same atomic
+   * commit as the assignment itself. Manual `POST .../assign` never passes
+   * either, so its behavior is unchanged: `requirements` stays whatever it
+   * already was, and `assignedExecutionTrust` is still set from the
+   * caller-supplied snapshot so Task Details can show it regardless of
+   * which endpoint performed the assignment.
    */
   assignIfEligible(
     taskId: string,
@@ -192,7 +209,12 @@ export class TaskStore {
       readonly adapterId: string | undefined;
       readonly agentId: string | undefined;
     },
-    assignment: { readonly adapterId: string; readonly agentId: string },
+    assignment: {
+      readonly adapterId: string;
+      readonly agentId: string;
+      readonly executionTrust: ExecutionTrust;
+      readonly requirements?: TaskRequirements;
+    },
   ): TaskRecord {
     const record = this.#mustGetLive(taskId);
     const currentRevision = this.#revisions.get(taskId) ?? 0;
@@ -213,9 +235,23 @@ export class TaskStore {
     const now = new Date().toISOString();
     record.adapterId = assignment.adapterId;
     record.agentId = assignment.agentId;
+    record.assignedExecutionTrust = assignment.executionTrust;
     record.task = isFirstAssignment
-      ? { ...record.task, status: "assigned", updatedAt: now }
-      : { ...record.task, updatedAt: now };
+      ? {
+          ...record.task,
+          status: "assigned",
+          updatedAt: now,
+          ...(assignment.requirements !== undefined
+            ? { requirements: assignment.requirements }
+            : {}),
+        }
+      : {
+          ...record.task,
+          updatedAt: now,
+          ...(assignment.requirements !== undefined
+            ? { requirements: assignment.requirements }
+            : {}),
+        };
     this.#bumpRevision(taskId);
 
     return structuredClone(record);
@@ -226,6 +262,7 @@ export class TaskStore {
     const record = this.#mustGetLive(taskId);
     record.adapterId = undefined;
     record.agentId = undefined;
+    record.assignedExecutionTrust = undefined;
     this.#bumpRevision(taskId);
   }
 

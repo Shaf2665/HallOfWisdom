@@ -1,11 +1,21 @@
 import type { AgentRegistry } from "@hall-of-wisdom/hall-runner";
-import { CodexAdapter } from "@hall-of-wisdom/codex-adapter";
+import { CodexAdapter, type ProcessSpawner } from "@hall-of-wisdom/codex-adapter";
 
 export interface RegisterCodexAdapterOptions {
   /** Canonical, already-validated Hall Core workspace root. */
   readonly workspaceRoot: string;
   /** `--enable-codex-trusted-local` at Hall Core startup only. Defaults to false. */
   readonly enableCodexTrustedLocal?: boolean | undefined;
+  /**
+   * Test-only injection point — never set by `server.ts` or any real
+   * composition path, which always leaves this `undefined` so
+   * `CodexAdapter` falls back to its own real, `cross-spawn`-backed
+   * default. Exists so `codex-composition-root.test.ts` can prove this
+   * composition root wires `CodexAdapter`'s configuration correctly
+   * (trusted-local defaulting, flag pass-through) without spawning a
+   * real `codex` process — see that file's own doc comment.
+   */
+  readonly spawner?: ProcessSpawner | undefined;
 }
 
 /**
@@ -51,6 +61,7 @@ export function registerCodexAdapter(
         loopbackBound: true,
         workspaceRoot: options.workspaceRoot,
       },
+      ...(options.spawner === undefined ? {} : { spawner: options.spawner }),
     }),
   );
 }

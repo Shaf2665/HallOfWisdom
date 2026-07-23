@@ -220,6 +220,7 @@ export function resolveDragOutcome(from: TaskStatus, to: TaskStatus): DragOutcom
 export type CardAction =
   | { readonly kind: "move"; readonly targetStatus: TaskStatus; readonly label: string }
   | { readonly kind: "assign"; readonly label: string }
+  | { readonly kind: "find-agent"; readonly label: string }
   | { readonly kind: "start"; readonly label: string }
   | { readonly kind: "cancel"; readonly label: string }
   | { readonly kind: "discuss"; readonly label: string };
@@ -263,6 +264,7 @@ export function availableActionsFor(record: TaskRecord): readonly CardAction[] {
       return [
         { kind: "move", targetStatus: "backlog", label: "Move to Backlog" },
         { kind: "assign", label: "Assign agent" },
+        { kind: "find-agent", label: "Find suitable agent" },
         { kind: "move", targetStatus: "blocked", label: "Move to Blocked" },
         { kind: "cancel", label: "Cancel task" },
         DISCUSS_ACTION,

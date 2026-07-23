@@ -22,6 +22,7 @@ const validDescriptor = {
     mcp: false,
     acp: false,
   },
+  declaredCapabilities: ["structured.events", "cancellation"] as const,
   integrationLevel: "native" as const,
   supportedOperatingSystems: ["windows", "macos", "linux"] as const,
 };
@@ -61,5 +62,29 @@ describe("agentAdapterDescriptorSchema", () => {
       unexpectedField: "nope",
     });
     expect(result.success).toBe(false);
+  });
+
+  it("rejects an unknown declared capability", () => {
+    const result = agentAdapterDescriptorSchema.safeParse({
+      ...validDescriptor,
+      declaredCapabilities: ["codex.magic"],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects a duplicated declared capability", () => {
+    const result = agentAdapterDescriptorSchema.safeParse({
+      ...validDescriptor,
+      declaredCapabilities: ["cancellation", "cancellation"],
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts an empty declaredCapabilities array", () => {
+    const result = agentAdapterDescriptorSchema.safeParse({
+      ...validDescriptor,
+      declaredCapabilities: [],
+    });
+    expect(result.success).toBe(true);
   });
 });

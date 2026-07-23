@@ -13,7 +13,27 @@ rules coding agents working in this repository must follow.
 
 ## Status
 
-**Phase 10.3 — Codex Detection Retry Hardening.** Eight packages now exist:
+**Phase 11.1 — Requirement-Safe Manual Assignment, CLI Argument Forwarding and Browser
+Verification**, hardening Phase 11 (**Agent Capability Catalog, Trust Comparison and Safe
+Routing**). Hall Core reports a provider-neutral capability vocabulary (`project.read`,
+`project.edit`, `command.execute`, `git.inspect`, `structured.events`, `cancellation`,
+`session.resume`, `network.access`) and an execution-trust classification (`simulated` / `isolated`
+/ `trusted_local` / `unavailable`) for every registered adapter, distinguishing what an adapter was
+designed to support (`declaredCapabilities`) from what Hall has actually, currently verified on this
+machine (`capabilityObservations`). A deterministic (non-AI) routing policy can recommend a suitable
+adapter for a task's stated capability and trust requirements — read-only analysis plus one explicit
+"route and assign" action. **Manual assignment (`POST .../assign`) now enforces the same
+requirements**: an adapter that does not satisfy a task's current capability/trust requirements is
+rejected (`409 ADAPTER_REQUIREMENTS_MISMATCH`), whether it's a first assignment or a
+reassignment-before-start; a task with no requirements is completely unaffected. Starting a run
+remains a separate, always-manual step, unchanged from every prior phase. See the new `/agents`
+page, the Kanban board's "Find suitable agent" and "Assign agent" dialogs, and
+[`docs/architecture/0011-agent-capabilities-trust-and-routing.md`](docs/architecture/0011-agent-capabilities-trust-and-routing.md)
+for the full design — including the pnpm `--` CLI-argument-forwarding fix (the documented
+`pnpm ... run dev -- --flag` startup commands below are now verified working) and the new
+Playwright-based E2E verification suite (`apps/e2e`, no Chrome-extension dependency).
+
+Eight packages now exist:
 `@hall-of-wisdom/protocol` (the wire contract), `@hall-of-wisdom/agent-adapter-sdk`
 (the adapter contract), `@hall-of-wisdom/mock-agent` (the first, deterministic adapter),
 `@hall-of-wisdom/claude-code-adapter` (Phase 9 — a real `AgentAdapter` that spawns the operator's own
@@ -109,6 +129,7 @@ pnpm --filter @hall-of-wisdom/hall-core run verify:package-entry
 | [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events.                                                                                                     |
 | [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, hosts a General board and per-task discussion boards for local human communication, and binds to `127.0.0.1` only.                       |
 | [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: the Task Console (`/`) for immediate execution, the Kanban Board (`/board`) for planning tasks, and Communication Boards (`/boards`) for local discussion — talks to Hall Core directly (no proxy, no custom server); binds to `127.0.0.1` only.                              |
+| [`@hall-of-wisdom/e2e`](apps/e2e)                                 | Phase 11.1 — Playwright end-to-end verification against a deterministic, fixture-adapter Hall Core (`src/fixture-server.ts`, built from Hall Core's own public package entry) and the real Hall Web dev server; never a real Claude Code/Codex process, never any subscription usage.                    |
 
 ## Running Hall Runner
 
@@ -460,6 +481,104 @@ scenarios requires restarting Hall Core" above), then repeat the assign/start st
 See [`docs/architecture/0006-kanban-board.md`](docs/architecture/0006-kanban-board.md) for the full
 design: the column/status mapping, why drag can never start execution on its own, the accessible
 non-drag controls, the dnd-kit boundary, and the polling strategy.
+
+## Running the Agents Catalog and Safe Routing
+
+The Agents catalog (`/agents`) and the Kanban board's "Find suitable agent" dialog share the same
+Hall Core process and the same two-terminal setup as Hall Web above — no extra flags, no extra
+terminal, and no real Claude Code/Codex process is required (this walkthrough uses only Mock Agent,
+which never spends any usage).
+
+**Terminal 1 — Hall Core:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario success `
+  --web-origin "http://127.0.0.1:3000"
+```
+
+**Terminal 2 — Hall Web:**
+
+```powershell
+pnpm --filter @hall-of-wisdom/web run dev
+```
+
+**Walkthrough** (browser):
+
+1. Open `http://127.0.0.1:3000/agents` — confirm every registered adapter is listed (at minimum
+   Mock Agent, plus Claude Code/Codex if installed) with its `executionTrust` value shown exactly
+   (never softened — Codex's trusted-local mode, if enabled, must read `trusted_local`, never
+   `isolated`), and confirm the page never renders an executable path, account identifier,
+   environment variable, cost, or token figure.
+2. Go to `http://127.0.0.1:3000/board`, create a backlog task, and move it to Ready.
+3. On the Ready card, open Actions → **"Find suitable agent"** — confirm the dialog runs a read-only
+   analysis automatically (no confirmation needed to view it) and shows a candidate table with each
+   adapter's execution trust, rank, and a plain-language reason.
+4. Leave the default "Real editing, isolated execution" profile selected — confirm Mock Agent (which
+   is always `simulated`) is **excluded** with a reason referencing execution trust, and Claude Code
+   is recommended if installed and available.
+5. Switch the profile to **"Simulation / dry run"** — confirm the analysis re-runs automatically and
+   Mock Agent is now recommended.
+6. Click **"Route and assign"** — confirm the card moves to Assigned, and confirm via the task's
+   detail view that it shows `0` events and no run ID (assigning never starts a run).
+7. Open the assigned task's detail view — confirm it shows the required capabilities and allowed
+   execution trust that were actually used, plus the assigned execution trust snapshot.
+8. Close the "Find suitable agent" dialog on a different task (Close button, then Escape) without
+   ever clicking "Route and assign" — confirm no assignment happens either way.
+9. **Keyboard-only verification**: `Tab` to a Ready card's Actions button, open it with `Enter`,
+   `Tab` to "Find suitable agent" and open it with `Enter`, `Tab` through the profile picker and the
+   candidate table to "Route and assign", and confirm the same flow works with no mouse involved and
+   focus returns to a sensible control after closing.
+10. **Requirement-safe manual assignment (Phase 11.1)**: on the now-Assigned task from step 6, open
+    Actions → **"Return to Ready"** (an `assigned` task's own Actions menu never offers "Assign
+    agent" directly — this is the real path back to it), then Actions → **"Assign agent"** — confirm
+    the dialog shows the task's required capabilities and allowed execution trust, and that any
+    adapter which doesn't satisfy them (e.g. Mock Agent, if `simulated` isn't in the allow list) is
+    disabled with a visible, safe reason. Pick a compatible adapter and submit — confirm it succeeds
+    with no run created. If you want to see the rejection path, use your browser's devtools to
+    resubmit with an incompatible `adapterId` (or simply trust the automated test suite here) —
+    confirm the dialog stays open, shows "The selected adapter does not satisfy this task's
+    requirements.", and does not move the task.
+
+See [`docs/architecture/0011-agent-capabilities-trust-and-routing.md`](docs/architecture/0011-agent-capabilities-trust-and-routing.md)
+for the full design: the capability/trust vocabulary, the deterministic routing policy and its
+tie-break order, the eight dichotomies this phase tracks, why routing never starts execution, and
+requirement-safe manual assignment (Phase 11.1).
+
+## Running the Playwright E2E Suite (Phase 11.1)
+
+Genuine, headless-browser end-to-end verification of everything in the walkthrough above — no Chrome
+extension required. `apps/e2e` is a separate package with its own `@playwright/test` devDependency;
+it drives a real Chromium browser against the real Hall Web dev server and a separate, deterministic
+fixture Hall Core (`apps/e2e/src/fixture-server.ts` — built entirely from `@hall-of-wisdom/hall-core`'s
+own public package entry, never `server.ts` or any real composition path). Every fixture adapter's
+`startTask()` rejects unconditionally — no real Claude Code/Codex process is ever started, and no
+subscription usage is ever spent.
+
+**One-time setup** (downloads a headless Chromium browser, ~200 MB):
+
+```powershell
+pnpm install
+pnpm --filter @hall-of-wisdom/e2e run build
+pnpm --filter @hall-of-wisdom/e2e run e2e:install
+```
+
+**Run the suite** (starts both servers itself, on the normal default ports 3000/4310, and tears them
+down when finished):
+
+```powershell
+pnpm --filter @hall-of-wisdom/e2e run e2e
+```
+
+Covers: the Agents catalog (execution trust values, trusted-local warning, no sensitive data, a
+390×844 mobile viewport with no horizontal overflow), the full routing workflow (recommend/exclude,
+close-without-assigning, explicit route-and-assign, no run created), requirement-safe manual
+assignment (incompatible adapters disabled with a safe reason, compatible reassignment), the
+trusted-local-allowed ranking (isolated ranked ahead of trusted-local), keyboard-only operation, and
+console cleanliness. After a run, confirm ports 3000/4310 are free again — Playwright's own teardown
+does this automatically; if a run is interrupted, stop any lingering `node` process manually.
 
 ## Running Communication Boards
 
@@ -835,9 +954,12 @@ pnpm test
 pnpm build
 ```
 
-`typecheck`/`test`/`build` run recursively across all eight packages (including `apps/web`'s own
+`typecheck`/`test`/`build` run recursively across all nine packages (including `apps/web`'s own
 `next build` for production output and `vitest run` for its component/hook/library test suite);
-`lint`/`format` run once across the whole repository.
+`lint`/`format` run once across the whole repository. `apps/e2e` has no `test` script (deliberately —
+its Playwright suite spawns a real browser and two real servers, so it's never swept up by an
+ordinary `pnpm test` run); run it separately as its own step, described in "Running the Playwright
+E2E Suite" above.
 
 ## Repository Layout (current)
 
@@ -857,6 +979,7 @@ hall-of-wisdom/
   apps/
     server/                 @hall-of-wisdom/hall-core - HTTP + WebSocket server
     web/                    @hall-of-wisdom/web - Next.js browser dashboard
+    e2e/                    @hall-of-wisdom/e2e - Playwright E2E verification (Phase 11.1)
   docs/architecture/      architecture decision records
   AGENTS.md               rules for coding agents working in this repo
   CLAUDE.md                rules for Claude Code specifically

@@ -2,13 +2,18 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as apiClient from "../../lib/api-client";
-import type { AdapterSummary, TaskRecord } from "../../lib/api-schemas";
+import type { AdapterSummary, RoutingCandidate, TaskRecord } from "../../lib/api-schemas";
 import { AssignDialog } from "./assign-dialog";
 
 vi.mock("../../lib/api-client", async () => {
   const actual =
     await vi.importActual<typeof import("../../lib/api-client")>("../../lib/api-client");
-  return { ...actual, listAdapters: vi.fn(), assignTask: vi.fn() };
+  return {
+    ...actual,
+    listAdapters: vi.fn(),
+    assignTask: vi.fn(),
+    getRoutingAnalysis: vi.fn(),
+  };
 });
 
 const BASE_URL = "http://127.0.0.1:4310";
@@ -34,11 +39,17 @@ function makeAdapter(overrides: Partial<AdapterSummary> = {}): AdapterSummary {
       acp: false,
     },
     availability: "available",
+    declaredCapabilities: ["structured.events", "cancellation"],
+    assignable: true,
+    executionTrust: "simulated",
+    capabilityObservations: [],
+    limitations: [],
+    detectedAt: "2026-07-15T12:00:00.000Z",
     ...overrides,
   };
 }
 
-function makeRecord(): TaskRecord {
+function makeRecord(overrides: Partial<TaskRecord["task"]> = {}): TaskRecord {
   const now = new Date().toISOString();
   return {
     task: {
@@ -51,6 +62,7 @@ function makeRecord(): TaskRecord {
       dependencyTaskIds: [],
       createdAt: now,
       updatedAt: now,
+      ...overrides,
     },
     eventCount: 0,
     cancellationRequested: false,
@@ -58,10 +70,27 @@ function makeRecord(): TaskRecord {
   };
 }
 
+function makeCandidate(overrides: Partial<RoutingCandidate> = {}): RoutingCandidate {
+  return {
+    adapterId: "hall.mock-agent",
+    displayName: "Mock Agent",
+    availability: "available",
+    assignable: true,
+    executionTrust: "simulated",
+    verifiedCapabilities: [],
+    missingCapabilities: [],
+    restrictedCapabilities: [],
+    trustAllowed: true,
+    safeReason: "Meets every required capability and its execution trust is allowed.",
+    ...overrides,
+  };
+}
+
 describe("AssignDialog", () => {
   beforeEach(() => {
     vi.mocked(apiClient.listAdapters).mockReset();
     vi.mocked(apiClient.assignTask).mockReset();
+    vi.mocked(apiClient.getRoutingAnalysis).mockReset();
   });
 
   afterEach(() => {
@@ -317,5 +346,255 @@ describe("AssignDialog", () => {
     await user.click(screen.getByRole("button", { name: "Assign" }));
     expect(await screen.findByText("Adapter is busy.")).toBeInTheDocument();
     expect(screen.getByLabelText(/Working directory/)).toHaveValue("src");
+  });
+
+  describe("Requirement-aware assignment (Phase 11.1)", () => {
+    it("does not fetch routing-analysis for a task with no requirements", async () => {
+      vi.mocked(apiClient.listAdapters).mockResolvedValue({ adapters: [makeAdapter()] });
+      render(
+        <AssignDialog
+          baseUrl={BASE_URL}
+          record={makeRecord()}
+          onAssigned={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      await waitFor(() => screen.getByRole("option", { name: "Mock Agent" }));
+      expect(apiClient.getRoutingAnalysis).not.toHaveBeenCalled();
+    });
+
+    it("shows the task's required capabilities and allowed execution trust", async () => {
+      vi.mocked(apiClient.listAdapters).mockResolvedValue({
+        adapters: [
+          makeAdapter({
+            adapterId: "hall.claude",
+            agentDisplayName: "Claude Code",
+            executionTrust: "isolated",
+          }),
+        ],
+      });
+      vi.mocked(apiClient.getRoutingAnalysis).mockResolvedValue({
+        taskId: "task-1",
+        requiredCapabilities: ["project.read", "project.edit"],
+        allowedExecutionTrust: ["isolated"],
+        candidates: [
+          makeCandidate({
+            adapterId: "hall.claude",
+            displayName: "Claude Code",
+            executionTrust: "isolated",
+            verifiedCapabilities: ["project.read", "project.edit"],
+          }),
+        ],
+        recommendedAdapterId: "hall.claude",
+        explanation: "Recommended.",
+        generatedAt: new Date().toISOString(),
+      });
+      render(
+        <AssignDialog
+          baseUrl={BASE_URL}
+          record={makeRecord({
+            requirements: {
+              requiredCapabilities: ["project.read", "project.edit"],
+              allowedExecutionTrust: ["isolated"],
+            },
+          })}
+          onAssigned={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(await screen.findByText(/project\.read, project\.edit/)).toBeInTheDocument();
+      expect(screen.getByText(/^isolated$/)).toBeInTheDocument();
+    });
+
+    it("disables an adapter that does not satisfy the task's requirements, with a safe reason", async () => {
+      vi.mocked(apiClient.listAdapters).mockResolvedValue({
+        adapters: [
+          makeAdapter({
+            adapterId: "hall.mock-agent",
+            agentDisplayName: "Mock Agent",
+            executionTrust: "simulated",
+          }),
+        ],
+      });
+      vi.mocked(apiClient.getRoutingAnalysis).mockResolvedValue({
+        taskId: "task-1",
+        requiredCapabilities: ["project.read", "project.edit"],
+        allowedExecutionTrust: ["isolated"],
+        candidates: [
+          makeCandidate({
+            adapterId: "hall.mock-agent",
+            displayName: "Mock Agent",
+            executionTrust: "simulated",
+            missingCapabilities: ["project.read", "project.edit"],
+            trustAllowed: false,
+            safeReason:
+              "Mock Agent is missing required, verified capabilities: project.read, project.edit.",
+          }),
+        ],
+        recommendedAdapterId: undefined,
+        explanation: "No adapter currently qualifies.",
+        generatedAt: new Date().toISOString(),
+      });
+      render(
+        <AssignDialog
+          baseUrl={BASE_URL}
+          record={makeRecord({
+            requirements: {
+              requiredCapabilities: ["project.read", "project.edit"],
+              allowedExecutionTrust: ["isolated"],
+            },
+          })}
+          onAssigned={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByRole("option", { name: /Mock Agent/ })).toBeDisabled();
+      });
+      expect(
+        await screen.findByText(/No adapter currently satisfies this task's requirements\./),
+      ).toBeInTheDocument();
+    });
+
+    it("auto-selects the first eligible adapter, skipping an incompatible one", async () => {
+      vi.mocked(apiClient.listAdapters).mockResolvedValue({
+        adapters: [
+          makeAdapter({
+            adapterId: "hall.codex",
+            agentDisplayName: "Codex",
+            executionTrust: "trusted_local",
+          }),
+          makeAdapter({
+            adapterId: "hall.claude",
+            agentDisplayName: "Claude Code",
+            executionTrust: "isolated",
+          }),
+        ],
+      });
+      vi.mocked(apiClient.getRoutingAnalysis).mockResolvedValue({
+        taskId: "task-1",
+        requiredCapabilities: ["project.read", "project.edit"],
+        allowedExecutionTrust: ["isolated"],
+        candidates: [
+          makeCandidate({
+            adapterId: "hall.codex",
+            displayName: "Codex",
+            executionTrust: "trusted_local",
+            verifiedCapabilities: ["project.read", "project.edit"],
+            trustAllowed: false,
+            safeReason: "Codex's execution trust is not in this task's allowed list.",
+          }),
+          makeCandidate({
+            adapterId: "hall.claude",
+            displayName: "Claude Code",
+            executionTrust: "isolated",
+            verifiedCapabilities: ["project.read", "project.edit"],
+          }),
+        ],
+        recommendedAdapterId: "hall.claude",
+        explanation: "Recommended.",
+        generatedAt: new Date().toISOString(),
+      });
+      render(
+        <AssignDialog
+          baseUrl={BASE_URL}
+          record={makeRecord({
+            requirements: {
+              requiredCapabilities: ["project.read", "project.edit"],
+              allowedExecutionTrust: ["isolated"],
+            },
+          })}
+          onAssigned={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      await waitFor(() => {
+        expect(screen.getByLabelText("Agent")).toHaveValue("hall.claude");
+      });
+    });
+
+    it("keeps the trusted-local warning visible for a compatible trusted-local adapter", async () => {
+      vi.mocked(apiClient.listAdapters).mockResolvedValue({
+        adapters: [
+          makeAdapter({
+            adapterId: "hall.codex",
+            agentDisplayName: "Codex",
+            executionTrust: "trusted_local",
+            limitationNotice:
+              "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.",
+          }),
+        ],
+      });
+      vi.mocked(apiClient.getRoutingAnalysis).mockResolvedValue({
+        taskId: "task-1",
+        requiredCapabilities: ["project.read", "project.edit"],
+        allowedExecutionTrust: ["isolated", "trusted_local"],
+        candidates: [
+          makeCandidate({
+            adapterId: "hall.codex",
+            displayName: "Codex",
+            executionTrust: "trusted_local",
+            verifiedCapabilities: ["project.read", "project.edit"],
+          }),
+        ],
+        recommendedAdapterId: "hall.codex",
+        explanation: "Recommended.",
+        generatedAt: new Date().toISOString(),
+      });
+      render(
+        <AssignDialog
+          baseUrl={BASE_URL}
+          record={makeRecord({
+            requirements: {
+              requiredCapabilities: ["project.read", "project.edit"],
+              allowedExecutionTrust: ["isolated", "trusted_local"],
+            },
+          })}
+          onAssigned={vi.fn()}
+          onClose={vi.fn()}
+        />,
+      );
+      expect(await screen.findByText(/Trusted-local mode: Codex sandbox/)).toBeInTheDocument();
+    });
+
+    it("on a server-side ADAPTER_REQUIREMENTS_MISMATCH, keeps the dialog open, shows the safe error, and never moves the task", async () => {
+      const user = userEvent.setup();
+      const onAssigned = vi.fn();
+      vi.mocked(apiClient.listAdapters).mockResolvedValue({
+        adapters: [makeAdapter({ agentDisplayName: "Mock Agent" })],
+      });
+      vi.mocked(apiClient.getRoutingAnalysis).mockResolvedValue({
+        taskId: "task-1",
+        requiredCapabilities: [],
+        allowedExecutionTrust: ["simulated"],
+        candidates: [makeCandidate()],
+        recommendedAdapterId: "hall.mock-agent",
+        explanation: "Recommended.",
+        generatedAt: new Date().toISOString(),
+      });
+      vi.mocked(apiClient.assignTask).mockRejectedValue(
+        new apiClient.ApiClientError(
+          "ADAPTER_REQUIREMENTS_MISMATCH",
+          "The selected adapter does not satisfy this task's requirements.",
+        ),
+      );
+      render(
+        <AssignDialog
+          baseUrl={BASE_URL}
+          record={makeRecord({
+            requirements: { requiredCapabilities: [], allowedExecutionTrust: ["simulated"] },
+          })}
+          onAssigned={onAssigned}
+          onClose={vi.fn()}
+        />,
+      );
+      await waitFor(() => screen.getByRole("option", { name: "Mock Agent" }));
+      await user.click(screen.getByRole("button", { name: "Assign" }));
+      expect(
+        await screen.findByText("The selected adapter does not satisfy this task's requirements."),
+      ).toBeInTheDocument();
+      expect(onAssigned).not.toHaveBeenCalled();
+      expect(screen.getByRole("dialog")).toBeInTheDocument();
+    });
   });
 });

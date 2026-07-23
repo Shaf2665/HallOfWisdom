@@ -505,6 +505,7 @@ function buildTaskRecord(taskId: string, runId: string, agentId: string): TaskRe
     createdAt: now,
     startedAt: undefined,
     completedAt: undefined,
+    assignedExecutionTrust: undefined,
   };
 }
 

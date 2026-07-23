@@ -58,6 +58,7 @@ export function createFakeDescriptor(adapterId = "hall.fake-agent"): AgentAdapte
       mcp: false,
       acp: false,
     },
+    declaredCapabilities: ["structured.events"],
     integrationLevel: "native",
     supportedOperatingSystems: ["windows", "macos", "linux"],
   };

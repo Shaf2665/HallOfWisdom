@@ -187,11 +187,10 @@ describe("detectCodex — executable resolution", () => {
       fs: fakeFs([]),
       spawner: scriptedSpawner("", ""),
     });
-    expect(result).toEqual({
-      installed: false,
-      availability: "unavailable",
-      diagnosticMessage: "Codex CLI was not found on PATH.",
-    });
+    expect(result.installed).toBe(false);
+    expect(result.availability).toBe("unavailable");
+    expect(result.diagnosticMessage).toBe("Codex CLI was not found on PATH.");
+    expect(result.executionTrust).toBe("unavailable");
   });
 
   it("never returns an executablePath", async () => {
@@ -541,6 +540,12 @@ describe("detectCodex — trusted-local mode disabled (default, Phase 10.1 uncha
     expect(result.diagnosticMessage).toBe(
       "Codex file-edit execution is not verified in the current sandbox.",
     );
+    // Phase 11 — strict mode reports project.edit as restricted (a
+    // diagnosed, environment-probed reason), never verified or declared.
+    expect(result.executionTrust).toBe("unavailable");
+    const projectEdit = result.capabilityObservations?.find((o) => o.capability === "project.edit");
+    expect(projectEdit?.status).toBe("restricted");
+    expect(projectEdit?.evidence).toBe("environment_probe");
   });
 
   it("with trustedLocal.enabled false, still never returns available even if every other precondition would pass", async () => {
@@ -568,6 +573,25 @@ describe("detectCodex — trusted-local mode enabled (Phase 10.2)", () => {
     expect(result.diagnosticMessage).toBe(
       "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.",
     );
+    // Phase 11
+    expect(result.executionTrust).toBe("trusted_local");
+    const projectEdit = result.capabilityObservations?.find((o) => o.capability === "project.edit");
+    expect(projectEdit?.status).toBe("verified");
+    expect(projectEdit?.evidence).toBe("browser_smoke_test");
+    expect(result.limitations).toEqual([
+      "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.",
+    ]);
+  });
+
+  it("never reports isolated execution trust for trusted-local mode — Phase 11", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    expect(result.executionTrust).not.toBe("isolated");
   });
 
   it("never describes trusted-local mode as sandboxed or restricted", async () => {

@@ -1,10 +1,30 @@
 import { z } from "zod";
 import {
   agentCapabilitiesSchema,
+  capabilityIdSchema,
+  capabilityObservationSchema,
   communicationBoardSchema,
   communicationMessageSchema,
+  executionTrustSchema,
   hallTaskSchema,
   structuredFailureSchema,
+} from "@hall-of-wisdom/protocol";
+
+export {
+  capabilityIdSchema,
+  capabilityStatusSchema,
+  capabilityEvidenceCategorySchema,
+  capabilityObservationSchema,
+  executionTrustSchema,
+  taskRequirementsSchema,
+} from "@hall-of-wisdom/protocol";
+export type {
+  CapabilityId,
+  CapabilityStatus,
+  CapabilityEvidenceCategory,
+  CapabilityObservation,
+  ExecutionTrust,
+  TaskRequirements,
 } from "@hall-of-wisdom/protocol";
 
 export { communicationBoardSchema, communicationMessageSchema };
@@ -51,6 +71,10 @@ export const taskRecordSchema = z
     createdAt: z.string(),
     startedAt: z.string().optional(),
     completedAt: z.string().optional(),
+    // Phase 11 — a snapshot of the assigned adapter's execution trust taken
+    // at assignment time; absent until a task is assigned. `task.requirements`
+    // (also Phase 11) already flows through `hallTaskSchema` above.
+    assignedExecutionTrust: executionTrustSchema.optional(),
   })
   .strict();
 export type TaskRecord = z.infer<typeof taskRecordSchema>;
@@ -118,6 +142,15 @@ export const adapterSummarySchema = z
     // result (e.g. Codex's trusted-local bypass notice). Never present
     // for any other availability value. See apps/server's adapters.ts.
     limitationNotice: z.string().optional(),
+    // Phase 11 — declaredCapabilities is static descriptor metadata;
+    // everything else here is a fresh runtime observation from this
+    // adapter's own detect() call. See apps/server's routes/adapters.ts.
+    declaredCapabilities: z.array(capabilityIdSchema),
+    assignable: z.boolean(),
+    executionTrust: executionTrustSchema,
+    capabilityObservations: z.array(capabilityObservationSchema),
+    limitations: z.array(z.string()),
+    detectedAt: z.string(),
   })
   .strict();
 export type AdapterSummary = z.infer<typeof adapterSummarySchema>;
@@ -125,6 +158,50 @@ export type AdapterSummary = z.infer<typeof adapterSummarySchema>;
 export const listAdaptersResponseSchema = z
   .object({ adapters: z.array(adapterSummarySchema) })
   .strict();
+
+/**
+ * Phase 11 — routing routes' response shapes. Mirrors
+ * `apps/server/src/routing/routing-policy.ts`'s `RoutingCandidate`/
+ * `RoutingResult` and `TaskOrchestrator.routeAndAssign()`'s response.
+ */
+export const routingCandidateSchema = z
+  .object({
+    adapterId: z.string(),
+    displayName: z.string(),
+    availability: availabilityStatusSchema,
+    assignable: z.boolean(),
+    executionTrust: executionTrustSchema,
+    verifiedCapabilities: z.array(capabilityIdSchema),
+    missingCapabilities: z.array(capabilityIdSchema),
+    restrictedCapabilities: z.array(capabilityIdSchema),
+    trustAllowed: z.boolean(),
+    safeReason: z.string(),
+    rank: z.number().optional(),
+  })
+  .strict();
+export type RoutingCandidate = z.infer<typeof routingCandidateSchema>;
+
+export const routingAnalysisResponseSchema = z
+  .object({
+    taskId: z.string(),
+    requiredCapabilities: z.array(capabilityIdSchema),
+    allowedExecutionTrust: z.array(executionTrustSchema),
+    candidates: z.array(routingCandidateSchema),
+    recommendedAdapterId: z.string().optional(),
+    explanation: z.string(),
+    generatedAt: z.string(),
+  })
+  .strict();
+export type RoutingAnalysisResponse = z.infer<typeof routingAnalysisResponseSchema>;
+
+export const routeAndAssignResponseSchema = z
+  .object({
+    record: taskRecordSchema,
+    routingExplanation: z.string(),
+    generatedAt: z.string(),
+  })
+  .strict();
+export type RouteAndAssignResponse = z.infer<typeof routeAndAssignResponseSchema>;
 
 const requestValidationIssueSchema = z.object({ path: z.string(), message: z.string() }).strict();
 

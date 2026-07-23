@@ -38,6 +38,7 @@ function makeRecord(
     createdAt: "2026-07-15T12:00:00.000Z",
     startedAt: undefined,
     completedAt: undefined,
+    assignedExecutionTrust: undefined,
     ...restOverrides,
   };
 }

@@ -55,6 +55,37 @@ function parseOptionalWebOrigin(raw: unknown): string | undefined {
 }
 
 /**
+ * Strips exactly one leading standalone `--` from `argv`, if present.
+ * `pnpm run <script> -- <args>` is documented to forward `<args>` after
+ * the script's own command — but this pnpm version (10.33.0, pinned)
+ * forwards the literal `--` separator token itself as the first
+ * argument too. Node's own `parseArgs` treats a bare `--` as "end of
+ * options: everything after this is positional" (matching the POSIX
+ * convention), so an unstripped leading `--` turns every real flag that
+ * follows into a rejected positional — this is what caused the
+ * documented `pnpm --filter ... run dev -- --workspace-root ...` startup
+ * command to fail with "Unexpected argument '--workspace-root'".
+ *
+ * Only a `--` in the very first position is stripped, and only once:
+ * - A later, second `--` (e.g. a genuinely malformed `-- --
+ *   --workspace-root ...`) is left for `parseArgs` to reject exactly as
+ *   before — garbage input still fails loudly, it is never silently
+ *   absorbed.
+ * - A `--` occurring after real flags/values (not at index 0) is left
+ *   untouched — this function only ever looks at `argv[0]`.
+ * - A flag *value* that happens to contain two hyphens (e.g. a
+ *   workspace-root path like `D:\Foo--Bar`) is never affected — this
+ *   compares the whole first token for exact equality with `--`, never
+ *   a substring.
+ * - Direct `node dist/server.js --workspace-root ...` invocation (no
+ *   leading `--`) is a no-op — `argv[0]` is already a real flag.
+ */
+export function stripLeadingScriptSeparator(argv: readonly string[]): string[] {
+  const args = Array.from(argv);
+  return args[0] === "--" ? args.slice(1) : args;
+}
+
+/**
  * Parses and bounds-validates raw `argv` using `node:util`'s built-in
  * `parseArgs` — the same small, dependency-free approach used by Hall
  * Runner's CLI (`runners/hall-runner/src/cli-args.ts`).
@@ -63,7 +94,7 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
   let raw: ReturnType<typeof parseArgs>;
   try {
     raw = parseArgs({
-      args: Array.from(argv),
+      args: stripLeadingScriptSeparator(argv),
       options: {
         "workspace-root": { type: "string" },
         port: { type: "string" },

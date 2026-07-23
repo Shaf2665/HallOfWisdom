@@ -254,7 +254,10 @@ accessibility-review finding fixed in Phase 7.1). Items are plain, ordinary Tab-
 `aria-expanded`/`aria-controls` on the trigger, Escape-to-close, and a click-outside handler —
 listing exactly the same permitted destinations
 `availableActionsFor` computes for that card's current state (backlog: Move to Ready/Move to
-Blocked/Cancel task; ready: + Assign agent; assigned: Start task/Return to Ready/Move to
+Blocked/Cancel task; ready: + Assign agent, + Find suitable agent (Phase 11 — opens the
+capability/trust routing dialog described in
+`docs/architecture/0011-agent-capabilities-trust-and-routing.md`; never assigns by itself, only its
+own explicit "Route and assign" control does); assigned: Start task/Return to Ready/Move to
 Blocked/Cancel task; running: Cancel active task only; terminal: nothing). These controls are
 present unconditionally, not only as a fallback when JavaScript-based dragging is unavailable —
 mouse, touch, and keyboard users all reach the same actions through the same menu.

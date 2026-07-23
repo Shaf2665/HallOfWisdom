@@ -40,6 +40,18 @@ export const codexDescriptor: AgentAdapterDescriptor = parseAgentAdapterDescript
     mcp: false,
     acp: false,
   },
+  // Phase 11 — static declaration; no `session.resume` (this adapter
+  // never uses `codex exec resume`) and no `network.access` (never
+  // offered to a task through this adapter). What's actually verified on
+  // this machine right now is `detect()`'s `capabilityObservations` job.
+  declaredCapabilities: [
+    "project.read",
+    "project.edit",
+    "command.execute",
+    "git.inspect",
+    "structured.events",
+    "cancellation",
+  ],
   integrationLevel: "structured_cli",
   supportedOperatingSystems: ["windows", "macos", "linux"],
 });

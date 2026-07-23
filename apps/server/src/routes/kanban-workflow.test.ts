@@ -426,6 +426,7 @@ describe("Kanban planning workflow (Phase 7)", () => {
             mcp: false,
             acp: false,
           },
+          declaredCapabilities: [],
         },
         detect: () => Promise.resolve({ installed: true, availability: "busy" }),
         startTask: () => Promise.reject(new Error("must not be called")),
@@ -918,6 +919,7 @@ describe("Kanban planning workflow (Phase 7)", () => {
             mcp: false,
             acp: false,
           },
+          declaredCapabilities: [],
         },
         detect: () =>
           Promise.resolve({ installed: true, availability: available ? "available" : "busy" }),

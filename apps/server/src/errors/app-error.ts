@@ -143,6 +143,58 @@ export class AdapterUnavailableError extends HallCoreError {
   }
 }
 
+/**
+ * Phase 11 — thrown by `POST .../routing-analysis` and `POST
+ * .../route-and-assign` when the task has no persisted `requirements` and
+ * the request supplied no override either — there is nothing to route
+ * against.
+ */
+export class TaskRequirementsNotSetError extends HallCoreError {
+  readonly code = "TASK_REQUIREMENTS_NOT_SET";
+  readonly statusCode = 400;
+
+  constructor(taskId: string) {
+    super(
+      `Task "${taskId}" has no capability requirements set. Select a requirement profile before routing.`,
+    );
+  }
+}
+
+/**
+ * Phase 11 — thrown by `POST .../route-and-assign` when the deterministic
+ * routing policy found no eligible adapter. Never lowers or retries with
+ * relaxed requirements — the caller must change the task's requirements
+ * (or the machine's adapter state) and try again.
+ */
+export class NoRoutingCandidateError extends HallCoreError {
+  readonly code = "NO_ROUTING_CANDIDATE";
+  readonly statusCode = 409;
+
+  constructor(taskId: string, explanation: string) {
+    super(`No adapter qualifies to be routed to task "${taskId}": ${explanation}`);
+  }
+}
+
+/**
+ * Phase 11.1 — thrown by manual `POST .../assign` when the task carries
+ * `requirements` and the selected adapter does not currently satisfy them
+ * (a missing/unverified/restricted required capability, or an execution
+ * trust not in the task's allowed list). Reuses the exact same
+ * `evaluateCandidateEligibility` check `routing-analysis`/`route-and-assign`
+ * already use — never a second, divergent compatibility algorithm. The
+ * message is a fixed, safe sentence; the underlying capability/trust
+ * evaluation that produced this rejection is never included in the
+ * response body.
+ */
+export class AdapterRequirementsMismatchError extends HallCoreError {
+  readonly code = "ADAPTER_REQUIREMENTS_MISMATCH";
+  readonly statusCode = 409;
+
+  constructor() {
+    super("The selected adapter does not satisfy this task's requirements.");
+  }
+}
+
 export class InternalServerError extends HallCoreError {
   readonly code = "INTERNAL_ERROR";
   readonly statusCode = 500;

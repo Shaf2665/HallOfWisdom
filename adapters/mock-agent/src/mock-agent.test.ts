@@ -10,6 +10,24 @@ describe("MockAgentAdapter.detect", () => {
     expect(result.installed).toBe(true);
     expect(result.availability).toBe("available");
   });
+
+  it("reports executionTrust: simulated — Phase 11", async () => {
+    const adapter = new MockAgentAdapter();
+    const result = await adapter.detect();
+    expect(result.executionTrust).toBe("simulated");
+  });
+
+  it("never reports project.edit as verified — Mock Agent is not a real editing agent", async () => {
+    const adapter = new MockAgentAdapter();
+    const result = await adapter.detect();
+    const projectEdit = result.capabilityObservations?.find((o) => o.capability === "project.edit");
+    expect(projectEdit).toBeUndefined();
+  });
+
+  it("declares only structured.events and cancellation, never project.edit", () => {
+    const adapter = new MockAgentAdapter();
+    expect(adapter.descriptor.declaredCapabilities).toEqual(["structured.events", "cancellation"]);
+  });
 });
 
 describe("MockAgentAdapter success scenario", () => {

@@ -36,6 +36,7 @@ import { AssignDialog } from "./assign-dialog";
 import { BacklogTaskForm } from "./backlog-task-form";
 import { KanbanColumn } from "./kanban-column";
 import { KanbanFiltersBar } from "./kanban-filters";
+import { RoutingDialog } from "./routing-dialog";
 
 function safeMessage(error: unknown): string {
   return error instanceof ApiClientError ? error.message : "The action could not be completed.";
@@ -74,6 +75,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
   const [filters, setFilters] = useState<KanbanFilters>(DEFAULT_KANBAN_FILTERS);
   const [pendingTaskIds, setPendingTaskIds] = useState<ReadonlySet<string>>(new Set());
   const [assigningRecord, setAssigningRecord] = useState<TaskRecord | null>(null);
+  const [findingAgentRecord, setFindingAgentRecord] = useState<TaskRecord | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   // The task a card should reclaim focus for once it (re)mounts — see
@@ -219,6 +221,15 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
     setLastActedOnTaskId(updated.task.taskId);
   }
 
+  async function handleRouted(updated: TaskRecord): Promise<void> {
+    setFindingAgentRecord(null);
+    setAnnouncement(`${updated.task.title} routed and assigned.`);
+    // See handleMove's comment above for why refresh() is awaited before
+    // the focus flag is set.
+    await refresh();
+    setLastActedOnTaskId(updated.task.taskId);
+  }
+
   // Memoized so its identity stays stable across the board's frequent
   // poll-driven re-renders (every 3s while a task is active). Dialog's own
   // focus-trap effect depends on this exact reference — an unmemoized
@@ -227,6 +238,10 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
   // is mid-interaction with it.
   const handleCloseAssign = useCallback(() => {
     setAssigningRecord(null);
+  }, []);
+
+  const handleCloseFindAgent = useCallback(() => {
+    setFindingAgentRecord(null);
   }, []);
 
   function handleCreated(created: CreateTaskResponse): void {
@@ -350,6 +365,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
                 onFocusHandled={handleFocusHandled}
                 onMove={handleMove}
                 onOpenAssign={setAssigningRecord}
+                onOpenFindAgent={setFindingAgentRecord}
                 onStart={handleStart}
                 onCancel={handleCancel}
                 onOpenDiscussion={handleOpenDiscussion}
@@ -374,6 +390,17 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
             void handleAssigned(updated);
           }}
           onClose={handleCloseAssign}
+        />
+      ) : null}
+
+      {findingAgentRecord ? (
+        <RoutingDialog
+          baseUrl={baseUrl}
+          record={findingAgentRecord}
+          onAssigned={(updated) => {
+            void handleRouted(updated);
+          }}
+          onClose={handleCloseFindAgent}
         />
       ) : null}
     </div>

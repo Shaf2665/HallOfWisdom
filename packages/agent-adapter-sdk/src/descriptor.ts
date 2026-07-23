@@ -3,6 +3,7 @@ import {
   agentCapabilitiesSchema,
   agentIdentitySchema,
   boundedNonBlankString,
+  dedupedCapabilityArray,
   nonEmptyIdSchema,
   parseWithSchema,
 } from "@hall-of-wisdom/protocol";
@@ -40,6 +41,19 @@ export const agentAdapterDescriptorSchema = z
     adapterVersion: boundedNonBlankString(64),
     supportedAgent: agentIdentitySchema,
     capabilities: agentCapabilitiesSchema,
+    /**
+     * Phase 11 — static, provider-neutral declaration of which task-facing
+     * capabilities (see `packages/protocol`'s `capability.ts`) this
+     * adapter was designed to support at all, independent of whether any
+     * of them are currently verified on this machine — that's
+     * `AgentDetectionResult.capabilityObservations`'s job, not this
+     * field's. An adapter must never declare a capability its own
+     * `detect()` can never report as anything but `unsupported` (e.g. Mock
+     * Agent never declares `project.edit`).
+     */
+    declaredCapabilities: dedupedCapabilityArray(
+      "must not list the same capability more than once",
+    ),
     integrationLevel: integrationLevelSchema,
     supportedOperatingSystems: z
       .array(operatingSystemSchema)

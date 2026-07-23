@@ -92,11 +92,10 @@ describe("detectClaudeCode — executable resolution", () => {
       fs: fakeFs([]),
       spawner: scriptedSpawner("", ""),
     });
-    expect(result).toEqual({
-      installed: false,
-      availability: "unavailable",
-      diagnosticMessage: "Claude Code CLI was not found on PATH.",
-    });
+    expect(result.installed).toBe(false);
+    expect(result.availability).toBe("unavailable");
+    expect(result.diagnosticMessage).toBe("Claude Code CLI was not found on PATH.");
+    expect(result.executionTrust).toBe("unavailable");
   });
 
   it("reports unsupported when only a Windows shim is found", async () => {
@@ -154,6 +153,15 @@ describe("detectClaudeCode — subscription verification", () => {
     expect(JSON.stringify(result)).not.toContain("example.com");
     expect(JSON.stringify(result)).not.toContain("org-should-never-appear");
     expect(JSON.stringify(result)).not.toContain("Should Never Appear Org");
+    // Phase 11
+    expect(result.executionTrust).toBe("isolated");
+    const projectEdit = result.capabilityObservations?.find((o) => o.capability === "project.edit");
+    expect(projectEdit?.status).toBe("verified");
+    expect(projectEdit?.evidence).toBe("isolated_smoke_test");
+    const sessionResume = result.capabilityObservations?.find(
+      (o) => o.capability === "session.resume",
+    );
+    expect(sessionResume?.status).toBe("unsupported");
   });
 
   it("reports available for max/team/enterprise subscription types (case-insensitive)", async () => {
@@ -184,6 +192,7 @@ describe("detectClaudeCode — subscription verification", () => {
       spawner: scriptedSpawner("2.1.212", JSON.stringify({ loggedIn: false })),
     });
     expect(result.availability).toBe("logged_out");
+    expect(result.executionTrust).toBe("unavailable");
   });
 
   it("fails closed (unsupported) for API-key authentication", async () => {

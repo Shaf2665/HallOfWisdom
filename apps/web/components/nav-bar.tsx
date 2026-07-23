@@ -7,6 +7,7 @@ const LINKS = [
   { href: "/", label: "Task Console" },
   { href: "/board", label: "Kanban Board" },
   { href: "/boards", label: "Communication Boards" },
+  { href: "/agents", label: "Agents" },
 ] as const;
 
 /**

@@ -63,4 +63,61 @@ describe("hallTaskSchema", () => {
       expect(validationError.issues.length).toBeGreaterThan(0);
     }
   });
+
+  it("accepts a task with no requirements field at all — existing tasks remain valid", () => {
+    expect(parseHallTask(validTask).requirements).toBeUndefined();
+  });
+
+  it("accepts a task with valid provider-neutral requirements", () => {
+    const withRequirements = {
+      ...validTask,
+      requirements: {
+        requiredCapabilities: ["project.read", "project.edit"],
+        allowedExecutionTrust: ["isolated"],
+      },
+    };
+    expect(parseHallTask(withRequirements).requirements).toEqual(withRequirements.requirements);
+  });
+
+  it("rejects requirements naming an unknown capability", () => {
+    const result = hallTaskSchema.safeParse({
+      ...validTask,
+      requirements: {
+        requiredCapabilities: ["provider.magic"],
+        allowedExecutionTrust: ["isolated"],
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects requirements with an empty allowedExecutionTrust list", () => {
+    const result = hallTaskSchema.safeParse({
+      ...validTask,
+      requirements: { requiredCapabilities: [], allowedExecutionTrust: [] },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects requirements with duplicate execution trust entries", () => {
+    const result = hallTaskSchema.safeParse({
+      ...validTask,
+      requirements: {
+        requiredCapabilities: [],
+        allowedExecutionTrust: ["isolated", "isolated"],
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects unexpected fields inside requirements at this strict boundary", () => {
+    const result = hallTaskSchema.safeParse({
+      ...validTask,
+      requirements: {
+        requiredCapabilities: [],
+        allowedExecutionTrust: ["isolated"],
+        extraField: "nope",
+      },
+    });
+    expect(result.success).toBe(false);
+  });
 });

@@ -3,6 +3,7 @@ import {
   boundedNonBlankString,
   nonEmptyIdSchema,
   taskPrioritySchema,
+  taskRequirementsSchema,
 } from "@hall-of-wisdom/protocol";
 
 /**
@@ -55,13 +56,17 @@ const immediateCreateTaskRequestSchema = z
  * selection has no place in either branch of this schema: it is, and
  * remains, server-startup-only configuration (see
  * `docs/architecture/0004-hall-core-server.md`, "Mock scenario
- * documentation").
+ * documentation"). `requirements` (Phase 11) is optional, deferred-only
+ * (a running/immediate task has no routing decision left to make), and
+ * flows straight through to `HallTask.requirements` — see
+ * `docs/architecture/0011-agent-capabilities-trust-and-routing.md`.
  */
 const deferredCreateTaskRequestSchema = z
   .object({
     ...sharedTaskFields,
     executionMode: z.literal("deferred"),
     workingDirectory: workingDirectorySchema.optional(),
+    requirements: taskRequirementsSchema.optional(),
   })
   .strict();
 

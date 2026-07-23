@@ -13,6 +13,8 @@ import {
   listBoardMessagesResponseSchema,
   listBoardsResponseSchema,
   listTasksResponseSchema,
+  routeAndAssignResponseSchema,
+  routingAnalysisResponseSchema,
   taskRecordSchema,
   type CancelTaskResponse,
   type CommunicationBoard,
@@ -22,7 +24,10 @@ import {
   type HealthResponse,
   type ListBoardMessagesResponse,
   type ListBoardsResponse,
+  type RouteAndAssignResponse,
+  type RoutingAnalysisResponse,
   type TaskRecord,
+  type TaskRequirements,
 } from "./api-schemas";
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
@@ -320,6 +325,46 @@ export function startTask(
     `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/start`,
     { method: "POST" },
     createTaskResponseSchema,
+    options,
+  );
+}
+
+/**
+ * Phase 11 — read-only capability/trust routing analysis: never mutates
+ * anything server-side. `requirements`, if supplied, overrides (but never
+ * persists) the task's own `requirements` for this one call — lets the
+ * "Find suitable agent" dialog preview against a freshly chosen profile
+ * even for a task that has none saved yet.
+ */
+export function getRoutingAnalysis(
+  baseUrl: string,
+  taskId: string,
+  requirements?: TaskRequirements,
+  options: RequestOptions = {},
+): Promise<RoutingAnalysisResponse> {
+  return request(
+    `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/routing-analysis`,
+    { method: "POST", ...(requirements === undefined ? {} : { body: { requirements } }) },
+    routingAnalysisResponseSchema,
+    options,
+  );
+}
+
+/**
+ * Phase 11 — the one explicit, mutating routing action: assigns the
+ * recommended adapter, exactly like `assignTask()`. Never starts
+ * execution — `startTask()` remains a separate, always-manual call.
+ */
+export function routeAndAssign(
+  baseUrl: string,
+  taskId: string,
+  requirements?: TaskRequirements,
+  options: RequestOptions = {},
+): Promise<RouteAndAssignResponse> {
+  return request(
+    `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/route-and-assign`,
+    { method: "POST", ...(requirements === undefined ? {} : { body: { requirements } }) },
+    routeAndAssignResponseSchema,
     options,
   );
 }

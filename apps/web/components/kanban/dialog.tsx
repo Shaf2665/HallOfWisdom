@@ -20,10 +20,13 @@ export function Dialog({
   titleId,
   onClose,
   children,
+  maxWidthClassName = "max-w-md",
 }: {
   readonly titleId: string;
   readonly onClose: () => void;
   readonly children: ReactNode;
+  /** Overrides the default `max-w-md` — e.g. a wider dialog for a candidates table. */
+  readonly maxWidthClassName?: string;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const previouslyFocusedRef = useRef<HTMLElement | null>(null);
@@ -73,7 +76,7 @@ export function Dialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="w-full max-w-md rounded-lg border border-stone-200 bg-white p-4 shadow-xl dark:border-stone-800 dark:bg-stone-900"
+        className={`w-full ${maxWidthClassName} rounded-lg border border-stone-200 bg-white p-4 shadow-xl dark:border-stone-800 dark:bg-stone-900`}
       >
         {children}
       </div>

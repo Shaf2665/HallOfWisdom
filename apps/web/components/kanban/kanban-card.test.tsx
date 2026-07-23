@@ -41,6 +41,7 @@ function renderCard(
     shouldFocusOnMount: boolean;
     onMove: (taskId: string, target: TaskStatus) => Promise<void>;
     onOpenAssign: (record: TaskRecord) => void;
+    onOpenFindAgent: (record: TaskRecord) => void;
     onStart: (taskId: string) => Promise<void>;
     onCancel: (record: TaskRecord) => Promise<void>;
     onOpenDiscussion: (taskId: string) => Promise<void>;
@@ -50,6 +51,7 @@ function renderCard(
     overrides.onMove ??
     vi.fn<(taskId: string, target: TaskStatus) => Promise<void>>().mockResolvedValue(undefined);
   const onOpenAssign = overrides.onOpenAssign ?? vi.fn<(record: TaskRecord) => void>();
+  const onOpenFindAgent = overrides.onOpenFindAgent ?? vi.fn<(record: TaskRecord) => void>();
   const onStart =
     overrides.onStart ?? vi.fn<(taskId: string) => Promise<void>>().mockResolvedValue(undefined);
   const onCancel =
@@ -70,6 +72,7 @@ function renderCard(
           onFocusHandled={onFocusHandled}
           onMove={onMove}
           onOpenAssign={onOpenAssign}
+          onOpenFindAgent={onOpenFindAgent}
           onStart={onStart}
           onCancel={onCancel}
           onOpenDiscussion={onOpenDiscussion}
@@ -78,7 +81,16 @@ function renderCard(
     </DndContext>,
   );
 
-  return { container, onMove, onOpenAssign, onStart, onCancel, onOpenDiscussion, onFocusHandled };
+  return {
+    container,
+    onMove,
+    onOpenAssign,
+    onOpenFindAgent,
+    onStart,
+    onCancel,
+    onOpenDiscussion,
+    onFocusHandled,
+  };
 }
 
 describe("KanbanCard", () => {
@@ -111,6 +123,7 @@ describe("KanbanCard", () => {
             onFocusHandled={vi.fn()}
             onMove={vi.fn()}
             onOpenAssign={vi.fn()}
+            onOpenFindAgent={vi.fn()}
             onStart={vi.fn()}
             onCancel={vi.fn()}
             onOpenDiscussion={vi.fn()}
@@ -133,6 +146,7 @@ describe("KanbanCard", () => {
             onFocusHandled={vi.fn()}
             onMove={vi.fn()}
             onOpenAssign={vi.fn()}
+            onOpenFindAgent={vi.fn()}
             onStart={vi.fn()}
             onCancel={vi.fn()}
             onOpenDiscussion={vi.fn()}

@@ -7,6 +7,7 @@ import { registerHealthRoute } from "./routes/health.js";
 import { registerTaskRoutes } from "./routes/tasks.js";
 import { registerTaskEventsRoute } from "./routes/task-events.js";
 import { registerAdapterRoutes } from "./routes/adapters.js";
+import { registerRoutingRoutes } from "./routes/routing.js";
 import { registerBoardRoutes } from "./routes/boards.js";
 import { registerBoardMessagesRoute } from "./routes/board-messages.js";
 import type { TaskOrchestrator } from "./tasks/task-orchestrator.js";
@@ -80,6 +81,7 @@ export async function createHallCoreApp(
   registerHealthRoute(app, { startedAt: options.startedAt ?? Date.now() });
   registerTaskRoutes(app, { orchestrator: options.orchestrator, taskStore: options.taskStore });
   registerAdapterRoutes(app, { registry: options.registry });
+  registerRoutingRoutes(app, { orchestrator: options.orchestrator });
   registerTaskEventsRoute(app, {
     taskStore: options.taskStore,
     eventStore: options.eventStore,

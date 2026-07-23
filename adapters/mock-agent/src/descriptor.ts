@@ -37,6 +37,10 @@ export const mockAgentDescriptor: AgentAdapterDescriptor = parseAgentAdapterDesc
     mcp: false,
     acp: false,
   },
+  // Phase 11 — deliberately never `project.edit`/`project.read`/
+  // `command.execute`/`git.inspect`: Mock Agent must never be presented as
+  // equivalent to a real filesystem-editing coding agent.
+  declaredCapabilities: ["structured.events", "cancellation"],
   integrationLevel: "native",
   supportedOperatingSystems: ["windows", "macos", "linux"],
 });

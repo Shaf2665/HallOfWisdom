@@ -35,6 +35,25 @@ export class MockAgentAdapter implements AgentAdapter {
         installed: true,
         availability: "available",
         detectedVersion: MOCK_AGENT_VERSION,
+        // Phase 11 — Mock Agent is always simulated: it never spawns a
+        // real process or edits a real file, so `executionTrust` is fixed
+        // and unconditional, unlike every other adapter's branchy result.
+        executionTrust: "simulated",
+        capabilityObservations: [
+          {
+            capability: "structured.events",
+            status: "verified",
+            safeSummary: "Verified by this adapter's deterministic event-stream tests.",
+            evidence: "deterministic_test",
+          },
+          {
+            capability: "cancellation",
+            status: "verified",
+            safeSummary: "Verified by this adapter's deterministic cancellation tests.",
+            evidence: "deterministic_test",
+          },
+        ],
+        limitations: ["Simulated execution only — no real filesystem or process changes."],
       }),
     );
   }

@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import type { AgentDetectionResult } from "@hall-of-wisdom/agent-adapter-sdk";
+import type { CapabilityObservation } from "@hall-of-wisdom/protocol";
 import { resolveCodexExecutable, type FileSystemProbe } from "./executable-resolver.js";
 import { buildChildEnvironment, hasBlockedBillingEnvironmentKey } from "./environment.js";
 import { runBoundedProcess } from "./bounded-process.js";
@@ -156,8 +157,53 @@ export const TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE =
 export const TRUSTED_LOCAL_AVAILABLE_MESSAGE =
   "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.";
 
+/**
+ * Phase 11 — true regardless of this machine's current CLI/auth/sandbox
+ * state: JSONL stream mapping and process-tree cancellation are proven by
+ * this adapter's own deterministic test suite, not by anything `detect()`
+ * observes live. Reused on every non-`available` branch below.
+ */
+const BASELINE_OBSERVATIONS: CapabilityObservation[] = [
+  {
+    capability: "structured.events",
+    status: "verified",
+    safeSummary: "Verified by this adapter's deterministic stream-parsing tests.",
+    evidence: "deterministic_test",
+  },
+  {
+    capability: "cancellation",
+    status: "verified",
+    safeSummary: "Verified by this adapter's deterministic process-tree cancellation tests.",
+    evidence: "deterministic_test",
+  },
+];
+
+/**
+ * Phase 11 — used only for the branches where Hall has actually diagnosed
+ * *why* file-editing execution cannot be trusted right now (the Windows
+ * sandbox account's write restriction in strict mode, or one specific
+ * trusted-local precondition failing) — `restricted`, not merely
+ * `unverified`, because there is a known, environment-probed reason, not
+ * just an absence of evidence.
+ */
+const RESTRICTED_FILE_EDIT_OBSERVATIONS: CapabilityObservation[] = (
+  ["project.read", "project.edit", "command.execute", "git.inspect"] as const
+).map((capability) => ({
+  capability,
+  status: "restricted",
+  safeSummary:
+    "Codex is designed to support this, but it is not currently trusted on this machine.",
+  evidence: "environment_probe",
+}));
+
 function unavailable(diagnosticMessage: string): AgentDetectionResult {
-  return { installed: false, availability: "unavailable", diagnosticMessage };
+  return {
+    installed: false,
+    availability: "unavailable",
+    diagnosticMessage,
+    executionTrust: "unavailable",
+    capabilityObservations: BASELINE_OBSERVATIONS,
+  };
 }
 
 function unsupported(diagnosticMessage: string, detectedVersion?: string): AgentDetectionResult {
@@ -165,6 +211,27 @@ function unsupported(diagnosticMessage: string, detectedVersion?: string): Agent
     installed: true,
     availability: "unsupported",
     diagnosticMessage,
+    executionTrust: "unavailable",
+    capabilityObservations: BASELINE_OBSERVATIONS,
+  };
+  return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
+}
+
+/**
+ * Same as `unsupported()`, but for the branches where Hall has a specific,
+ * diagnosed reason file-editing cannot be trusted right now — see
+ * `RESTRICTED_FILE_EDIT_OBSERVATIONS`'s doc comment.
+ */
+function unsupportedRestricted(
+  diagnosticMessage: string,
+  detectedVersion?: string,
+): AgentDetectionResult {
+  const result: AgentDetectionResult = {
+    installed: true,
+    availability: "unsupported",
+    diagnosticMessage,
+    executionTrust: "unavailable",
+    capabilityObservations: [...BASELINE_OBSERVATIONS, ...RESTRICTED_FILE_EDIT_OBSERVATIONS],
   };
   return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
 }
@@ -174,6 +241,50 @@ function available(diagnosticMessage: string, detectedVersion?: string): AgentDe
     installed: true,
     availability: "available",
     diagnosticMessage,
+    executionTrust: "trusted_local",
+    capabilityObservations: [
+      {
+        capability: "project.read",
+        status: "verified",
+        safeSummary:
+          "Verified through a real browser-driven Codex file-edit task in trusted-local mode.",
+        evidence: "browser_smoke_test",
+      },
+      {
+        capability: "project.edit",
+        status: "verified",
+        safeSummary:
+          "Verified through a real browser-driven Codex file-edit task in trusted-local mode.",
+        evidence: "browser_smoke_test",
+      },
+      ...BASELINE_OBSERVATIONS,
+      {
+        capability: "command.execute",
+        status: "declared",
+        safeSummary:
+          "Trusted-local mode allows shell command execution; not independently verified live.",
+        evidence: "declared_only",
+      },
+      {
+        capability: "git.inspect",
+        status: "declared",
+        safeSummary: "The CLI can inspect a Git repository; not independently verified live.",
+        evidence: "declared_only",
+      },
+      {
+        capability: "session.resume",
+        status: "unsupported",
+        safeSummary: "This adapter never uses `codex exec resume`.",
+        evidence: "declared_only",
+      },
+      {
+        capability: "network.access",
+        status: "unsupported",
+        safeSummary: "Network access is never offered to a task through this adapter.",
+        evidence: "declared_only",
+      },
+    ],
+    limitations: [TRUSTED_LOCAL_AVAILABLE_MESSAGE],
   };
   return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
 }
@@ -328,6 +439,8 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
       installed: true,
       availability: "logged_out",
       diagnosticMessage: "Codex is installed but not signed in.",
+      executionTrust: "unavailable",
+      capabilityObservations: BASELINE_OBSERVATIONS,
     };
     return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
   }
@@ -351,7 +464,7 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
   // enabled by the operator at Hall Core startup, this adapter never
   // reports "available" — see UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE.
   if (options.trustedLocal?.enabled !== true) {
-    return unsupported(UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE, detectedVersion);
+    return unsupportedRestricted(UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE, detectedVersion);
   }
 
   // Phase 10.2 — trusted-local mode is explicitly enabled. Every check
@@ -363,18 +476,18 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
   // report "available" once every precondition below is confirmed —
   // never merely assumed from the flag being set.
   if (!options.trustedLocal.loopbackBound) {
-    return unsupported(TRUSTED_LOCAL_NOT_LOOPBACK_MESSAGE, detectedVersion);
+    return unsupportedRestricted(TRUSTED_LOCAL_NOT_LOOPBACK_MESSAGE, detectedVersion);
   }
   if (options.trustedLocal.workspaceRoot.trim().length === 0) {
-    return unsupported(TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE, detectedVersion);
+    return unsupportedRestricted(TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE, detectedVersion);
   }
   if (hasBlockedBillingEnvironmentKey(options.parentEnv)) {
-    return unsupported(TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE, detectedVersion);
+    return unsupportedRestricted(TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE, detectedVersion);
   }
 
   // Reuses execHelpText fetched above — no second `exec --help` spawn.
   if (!matchesTrustedLocalFlags(execHelpText)) {
-    return unsupported(TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE, detectedVersion);
+    return unsupportedRestricted(TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE, detectedVersion);
   }
 
   return available(TRUSTED_LOCAL_AVAILABLE_MESSAGE, detectedVersion);

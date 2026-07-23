@@ -39,4 +39,55 @@ describe("agentDetectionResultSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("accepts a full Phase 11 result with execution trust, capability observations, and limitations", () => {
+    const result = {
+      installed: true,
+      availability: "available" as const,
+      executionTrust: "isolated" as const,
+      capabilityObservations: [
+        {
+          capability: "project.edit" as const,
+          status: "verified" as const,
+          safeSummary: "Verified through an isolated fixture edit.",
+          evidence: "isolated_smoke_test" as const,
+        },
+      ],
+      limitations: ["Runs with --safe-mode; some interactive features are disabled."],
+    };
+    expect(parseAgentDetectionResult(result)).toEqual(result);
+  });
+
+  it("rejects an invalid execution trust value", () => {
+    const result = agentDetectionResultSchema.safeParse({
+      installed: true,
+      availability: "available",
+      executionTrust: "codex_bypass",
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects more than 8 capability observations", () => {
+    const observations = Array.from({ length: 9 }, () => ({
+      capability: "structured.events" as const,
+      status: "verified" as const,
+      safeSummary: "Verified.",
+      evidence: "deterministic_test" as const,
+    }));
+    const result = agentDetectionResultSchema.safeParse({
+      installed: true,
+      availability: "available",
+      capabilityObservations: observations,
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("rejects more than 6 limitations", () => {
+    const result = agentDetectionResultSchema.safeParse({
+      installed: true,
+      availability: "available",
+      limitations: Array.from({ length: 7 }, (_, index) => `Limitation ${String(index)}.`),
+    });
+    expect(result.success).toBe(false);
+  });
 });

@@ -20,6 +20,26 @@ export type { AgentCapabilities } from "./agent-capabilities.js";
 export { taskPrioritySchema, taskStatusSchema, hallTaskSchema, parseHallTask } from "./task.js";
 export type { TaskPriority, TaskStatus, HallTask } from "./task.js";
 
+export {
+  capabilityIdSchema,
+  capabilityStatusSchema,
+  executionTrustSchema,
+  capabilityEvidenceCategorySchema,
+  capabilityObservationSchema,
+  parseCapabilityObservation,
+  taskRequirementsSchema,
+  parseTaskRequirements,
+  dedupedCapabilityArray,
+} from "./capability.js";
+export type {
+  CapabilityId,
+  CapabilityStatus,
+  ExecutionTrust,
+  CapabilityEvidenceCategory,
+  CapabilityObservation,
+  TaskRequirements,
+} from "./capability.js";
+
 export { runStatusSchema, agentRunSchema, parseAgentRun } from "./agent-run.js";
 export type { RunStatus, AgentRun } from "./agent-run.js";
 

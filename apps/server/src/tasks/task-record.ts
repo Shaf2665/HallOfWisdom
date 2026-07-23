@@ -1,4 +1,4 @@
-import type { HallTask, StructuredFailure } from "@hall-of-wisdom/protocol";
+import type { ExecutionTrust, HallTask, StructuredFailure } from "@hall-of-wisdom/protocol";
 import type { TerminalEventType } from "@hall-of-wisdom/hall-runner";
 
 /**
@@ -29,4 +29,13 @@ export interface TaskRecord {
   readonly createdAt: string;
   startedAt: string | undefined;
   completedAt: string | undefined;
+  /**
+   * Phase 11 — a snapshot of the assigned adapter's `executionTrust` taken
+   * at the moment of assignment (from the same `detect()` call
+   * `assignTask()`/`routeAndAssign()` already make), not a live-recomputed
+   * value — so it cannot silently drift if trust configuration changes
+   * later while a task sits `assigned`. `undefined` until a task is
+   * assigned.
+   */
+  assignedExecutionTrust: ExecutionTrust | undefined;
 }

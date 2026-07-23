@@ -143,6 +143,25 @@ export function TaskDetail({
         {record.terminalEventType ? (
           <DetailField label="Terminal event" value={record.terminalEventType} />
         ) : null}
+        {task.requirements ? (
+          <DetailField
+            label="Required capabilities"
+            value={
+              task.requirements.requiredCapabilities.length === 0
+                ? "None"
+                : task.requirements.requiredCapabilities.join(", ")
+            }
+          />
+        ) : null}
+        {task.requirements ? (
+          <DetailField
+            label="Allowed execution trust"
+            value={task.requirements.allowedExecutionTrust.join(", ")}
+          />
+        ) : null}
+        {record.assignedExecutionTrust ? (
+          <DetailField label="Assigned trust mode" value={record.assignedExecutionTrust} />
+        ) : null}
       </dl>
 
       {record.failure ? (

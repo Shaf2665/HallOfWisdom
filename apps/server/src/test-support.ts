@@ -237,6 +237,7 @@ export function createGatedAdapter(adapterId = "hall.gated-agent"): {
         mcp: false,
         acp: false,
       },
+      declaredCapabilities: [],
     },
     detect(): Promise<AgentDetectionResult> {
       parked += 1;

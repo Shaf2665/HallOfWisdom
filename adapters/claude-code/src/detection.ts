@@ -1,5 +1,6 @@
 import { tmpdir } from "node:os";
 import type { AgentDetectionResult } from "@hall-of-wisdom/agent-adapter-sdk";
+import type { CapabilityObservation } from "@hall-of-wisdom/protocol";
 import { resolveClaudeExecutable, type FileSystemProbe } from "./executable-resolver.js";
 import { buildChildEnvironment } from "./environment.js";
 import { runBoundedProcess } from "./bounded-process.js";
@@ -29,8 +30,38 @@ const UNVERIFIED_SUBSCRIPTION_MESSAGE =
 const UNSUPPORTED_ISOLATION_PROFILE_MESSAGE =
   "Installed Claude Code does not support the required isolated execution profile.";
 
+/**
+ * Phase 11 — true regardless of this machine's current CLI/auth state:
+ * event mapping and process-tree cancellation are proven by this
+ * adapter's own deterministic test suite, not by anything `detect()`
+ * observes live. Reused on every non-`available` branch below so the
+ * capability catalog can still show these two facts even when the
+ * adapter overall is not currently usable — routing itself still excludes
+ * any non-`available` adapter outright (see `routing-policy.ts`).
+ */
+const BASELINE_OBSERVATIONS: CapabilityObservation[] = [
+  {
+    capability: "structured.events",
+    status: "verified",
+    safeSummary: "Verified by this adapter's deterministic event-mapping tests.",
+    evidence: "deterministic_test",
+  },
+  {
+    capability: "cancellation",
+    status: "verified",
+    safeSummary: "Verified by this adapter's deterministic cancellation tests.",
+    evidence: "deterministic_test",
+  },
+];
+
 function unavailable(diagnosticMessage: string): AgentDetectionResult {
-  return { installed: false, availability: "unavailable", diagnosticMessage };
+  return {
+    installed: false,
+    availability: "unavailable",
+    diagnosticMessage,
+    executionTrust: "unavailable",
+    capabilityObservations: BASELINE_OBSERVATIONS,
+  };
 }
 
 function unsupported(diagnosticMessage: string, detectedVersion?: string): AgentDetectionResult {
@@ -38,6 +69,8 @@ function unsupported(diagnosticMessage: string, detectedVersion?: string): Agent
     installed: true,
     availability: "unsupported",
     diagnosticMessage,
+    executionTrust: "unavailable",
+    capabilityObservations: BASELINE_OBSERVATIONS,
   };
   return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
 }
@@ -153,6 +186,8 @@ export async function detectClaudeCode(options: DetectionOptions): Promise<Agent
       installed: true,
       availability: "logged_out",
       diagnosticMessage: "Claude Code is installed but not logged in.",
+      executionTrust: "unavailable",
+      capabilityObservations: BASELINE_OBSERVATIONS,
     };
     return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
   }
@@ -165,6 +200,49 @@ export async function detectClaudeCode(options: DetectionOptions): Promise<Agent
     installed: true,
     availability: "available",
     diagnosticMessage: "Claude Code is installed and authenticated with a Claude subscription.",
+    executionTrust: "isolated",
+    capabilityObservations: [
+      {
+        capability: "project.read",
+        status: "verified",
+        safeSummary: "Verified through a real isolated fixture edit (Phase 9 smoke test).",
+        evidence: "isolated_smoke_test",
+      },
+      {
+        capability: "project.edit",
+        status: "verified",
+        safeSummary: "Verified through a real isolated fixture edit (Phase 9 smoke test).",
+        evidence: "isolated_smoke_test",
+      },
+      ...BASELINE_OBSERVATIONS,
+      {
+        capability: "command.execute",
+        status: "declared",
+        safeSummary: "The CLI supports shell command execution; not independently verified live.",
+        evidence: "declared_only",
+      },
+      {
+        capability: "git.inspect",
+        status: "declared",
+        safeSummary: "The CLI can inspect a Git repository; not independently verified live.",
+        evidence: "declared_only",
+      },
+      {
+        capability: "session.resume",
+        status: "unsupported",
+        safeSummary: "This adapter does not wire session resumption in this phase.",
+        evidence: "declared_only",
+      },
+      {
+        capability: "network.access",
+        status: "unsupported",
+        safeSummary: "Network access is never offered to a task through this adapter.",
+        evidence: "declared_only",
+      },
+    ],
+    limitations: [
+      "Runs in this adapter's fixed --safe-mode profile; no discretionary --setting-sources are passed.",
+    ],
   };
   return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
 }

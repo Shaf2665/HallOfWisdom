@@ -42,6 +42,17 @@ export const claudeCodeDescriptor: AgentAdapterDescriptor = parseAgentAdapterDes
     mcp: false,
     acp: false,
   },
+  // Phase 11 — static declaration of what this adapter was designed to
+  // support; `detect()`'s `capabilityObservations` report what's actually
+  // verified on the current machine, gated by this declaration.
+  declaredCapabilities: [
+    "project.read",
+    "project.edit",
+    "command.execute",
+    "git.inspect",
+    "structured.events",
+    "cancellation",
+  ],
   integrationLevel: "structured_cli",
   supportedOperatingSystems: ["windows", "macos", "linux"],
 });

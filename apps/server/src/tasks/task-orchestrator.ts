@@ -4,14 +4,23 @@ import type { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import { validateWorkspace } from "@hall-of-wisdom/hall-runner";
 import { RunnerError, runTask } from "@hall-of-wisdom/hall-runner";
 import { parseAgentTaskInput, type AgentAdapter } from "@hall-of-wisdom/agent-adapter-sdk";
-import { parseHallTask, type HallTask, type NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
+import {
+  parseHallTask,
+  type ExecutionTrust,
+  type HallTask,
+  type NormalizedAgentEvent,
+  type TaskRequirements,
+} from "@hall-of-wisdom/protocol";
 import {
   AdapterNotFoundError,
+  AdapterRequirementsMismatchError,
   AdapterUnavailableError,
   ActiveTaskTransitionDeniedError,
   InternalServerError,
   InvalidManualTransitionError,
   InvalidRequestError,
+  NoRoutingCandidateError,
+  TaskRequirementsNotSetError,
   TaskStateConflictError,
   WorkspaceValidationFailedError,
 } from "../errors/app-error.js";
@@ -37,6 +46,13 @@ import {
   transitionTaskRequestSchema,
   type TransitionTaskRequest,
 } from "../schemas/transition-task-request.js";
+import { routingRequestSchema, type RoutingRequest } from "../schemas/routing-request.js";
+import { detectRoutingCandidates } from "../routing/candidate-detection.js";
+import {
+  evaluateCandidateEligibility,
+  evaluateRouting,
+  type RoutingCandidate,
+} from "../routing/routing-policy.js";
 
 function formatUnknownError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -62,6 +78,24 @@ export interface CreateTaskResult {
 export interface StartTaskResult {
   readonly task: HallTask;
   readonly runId: string;
+}
+
+/** Phase 11 — the response shape for `POST .../routing-analysis`. Read-only: never mutates anything. */
+export interface RoutingAnalysisResult {
+  readonly taskId: string;
+  readonly requiredCapabilities: TaskRequirements["requiredCapabilities"];
+  readonly allowedExecutionTrust: TaskRequirements["allowedExecutionTrust"];
+  readonly candidates: readonly RoutingCandidate[];
+  readonly recommendedAdapterId: string | undefined;
+  readonly explanation: string;
+  readonly generatedAt: string;
+}
+
+/** Phase 11 — the response shape for `POST .../route-and-assign`. */
+export interface RouteAndAssignResult {
+  readonly record: TaskRecord;
+  readonly routingExplanation: string;
+  readonly generatedAt: string;
 }
 
 /**
@@ -142,6 +176,27 @@ export class TaskOrchestrator {
    * outwardly identical state — this throws `TaskStateConflictError` (409)
    * instead of silently overwriting whatever the task's current state
    * actually is.
+   *
+   * Phase 11.1 — **requirements are an assignment invariant, not merely a
+   * routing input**: if the task carries `requirements` (from a prior
+   * routing decision, or set directly), the selected adapter must satisfy
+   * them or this throws `AdapterRequirementsMismatchError` (409,
+   * `ADAPTER_REQUIREMENTS_MISMATCH`) before ever reaching
+   * `assignIfEligible`. The compatibility check reuses
+   * `evaluateCandidateEligibility` — the exact same function
+   * `routing-analysis`/`route-and-assign` use — never a second,
+   * independent capability-matching algorithm. A task with no
+   * `requirements` is completely unaffected (the check is skipped
+   * entirely), preserving the exact pre-11.1 assignment behavior for
+   * every task that has never gone through routing. `requirements` is
+   * read from `preCheck` (the same pre-`await` snapshot the four-field
+   * compare already uses), not re-fetched after `detect()` resolves — if
+   * a competing request changed `requirements` in the meantime, that
+   * always happens through `TaskStore.assignIfEligible()`, which always
+   * bumps the task's revision, so a stale `requirements` read here is
+   * still caught by the existing revision check below (as
+   * `TaskStateConflictError`, a different case from a requirements
+   * mismatch against an accurately-read snapshot).
    */
   async assignTask(taskId: string, rawRequest: unknown): Promise<TaskRecord> {
     const parsed = this.#parseAssignRequest(rawRequest);
@@ -158,6 +213,21 @@ export class TaskOrchestrator {
     const detection = await adapter.detect();
     if (detection.availability !== "available") {
       throw new AdapterUnavailableError(parsed.adapterId, detection.availability);
+    }
+    const executionTrust: ExecutionTrust = detection.executionTrust ?? "unavailable";
+
+    if (preCheck.task.requirements !== undefined) {
+      const eligibility = evaluateCandidateEligibility(preCheck.task.requirements, {
+        adapterId: parsed.adapterId,
+        displayName: adapter.descriptor.displayName,
+        integrationLevel: adapter.descriptor.integrationLevel,
+        availability: detection.availability,
+        executionTrust,
+        capabilityObservations: detection.capabilityObservations ?? [],
+      });
+      if (!eligibility.eligible) {
+        throw new AdapterRequirementsMismatchError();
+      }
     }
 
     const canonicalWorkingDirectory =
@@ -177,7 +247,11 @@ export class TaskOrchestrator {
         adapterId: preCheck.adapterId,
         agentId: preCheck.agentId,
       },
-      { adapterId: parsed.adapterId, agentId: adapter.descriptor.supportedAgent.agentId },
+      {
+        adapterId: parsed.adapterId,
+        agentId: adapter.descriptor.supportedAgent.agentId,
+        executionTrust,
+      },
     );
 
     // Only cache the resolved working directory once the assignment this
@@ -233,6 +307,117 @@ export class TaskOrchestrator {
     this.#beginExecution(taskId, adapter.descriptor.adapterId, taskInput);
 
     return { task: this.#taskStore.get(taskId).task, runId };
+  }
+
+  /**
+   * Phase 11 — read-only capability/trust routing analysis. Never mutates
+   * `TaskStore`, never emits an event, never starts or assigns anything —
+   * `rawRequest`'s optional `requirements` override (if supplied) is used
+   * only for this one call and is never persisted; when omitted, the
+   * task's own persisted `task.requirements` is used instead. Throws
+   * `TaskRequirementsNotSetError` if neither exists. Runs a fresh
+   * `detect()` across every registered adapter (via
+   * `detectRoutingCandidates`) so the analysis always reflects the current
+   * machine state, not a cached prior result.
+   */
+  async routingAnalysis(taskId: string, rawRequest: unknown): Promise<RoutingAnalysisResult> {
+    const parsed = this.#parseRoutingRequest(rawRequest);
+    const { task } = this.#taskStore.get(taskId);
+    const requirements = parsed.requirements ?? task.requirements;
+    if (requirements === undefined) {
+      throw new TaskRequirementsNotSetError(taskId);
+    }
+
+    const candidates = await detectRoutingCandidates(this.#registry);
+    const routing = evaluateRouting(requirements, candidates);
+
+    return {
+      taskId,
+      requiredCapabilities: requirements.requiredCapabilities,
+      allowedExecutionTrust: requirements.allowedExecutionTrust,
+      candidates: routing.candidates,
+      recommendedAdapterId: routing.recommendedAdapterId,
+      explanation: routing.explanation,
+      generatedAt: new Date().toISOString(),
+    };
+  }
+
+  /**
+   * Phase 11 — explicit-operator "route and assign" action: runs the same
+   * fresh detection and deterministic policy as `routingAnalysis()`, then
+   * atomically assigns the recommended adapter — assignment only, exactly
+   * like `assignTask()`; never starts execution, never creates a run.
+   * Mirrors `assignTask()`'s concurrency structure precisely: snapshot
+   * `expectedRevision` before any `await`, fast-fail the obviously
+   * ineligible case before the slow work, and commit through
+   * `TaskStore.assignIfEligible()` with no `await` between the read and
+   * the write — see that method's doc comment for why this is what
+   * actually closes the race, not this method's own pre-check. Persists
+   * whatever `requirements` this call actually routed against onto the
+   * task at commit time (including a body-supplied override that was
+   * never previously on the task), and a snapshot of the winning
+   * adapter's `executionTrust`, in the same atomic commit as the
+   * assignment — see `TaskStore.assignIfEligible()`'s doc comment.
+   */
+  async routeAndAssign(taskId: string, rawRequest: unknown): Promise<RouteAndAssignResult> {
+    const parsed = this.#parseRoutingRequest(rawRequest);
+    const preCheck = this.#taskStore.get(taskId);
+    const expectedRevision = this.#taskStore.getRevision(taskId);
+
+    const isFirstAssignment = preCheck.task.status === "ready";
+    const isReassignment = preCheck.task.status === "assigned" && preCheck.runId === undefined;
+    if (!isFirstAssignment && !isReassignment) {
+      throw new TaskStateConflictError(taskId, preCheck.task.status, "assigned");
+    }
+
+    const requirements = parsed.requirements ?? preCheck.task.requirements;
+    if (requirements === undefined) {
+      throw new TaskRequirementsNotSetError(taskId);
+    }
+
+    const candidates = await detectRoutingCandidates(this.#registry);
+    const routing = evaluateRouting(requirements, candidates);
+    if (routing.recommendedAdapterId === undefined) {
+      throw new NoRoutingCandidateError(taskId, routing.explanation);
+    }
+    const recommendedAdapterId = routing.recommendedAdapterId;
+
+    const adapter = this.#resolveAdapter(recommendedAdapterId);
+    const winningCandidate = candidates.find(
+      (candidate) => candidate.adapterId === recommendedAdapterId,
+    );
+    const executionTrust: ExecutionTrust = winningCandidate?.executionTrust ?? "unavailable";
+
+    const canonicalWorkingDirectory =
+      this.#pendingWorkingDirectories.get(taskId) ?? this.#resolveWorkingDirectory(undefined);
+
+    // Atomic commit — see TaskStore.assignIfEligible()'s doc comment. No
+    // `await` occurs between this call and the fast-fail check above other
+    // than the already-completed detection/policy evaluation.
+    const record = this.#taskStore.assignIfEligible(
+      taskId,
+      expectedRevision,
+      {
+        status: preCheck.task.status,
+        runId: preCheck.runId,
+        adapterId: preCheck.adapterId,
+        agentId: preCheck.agentId,
+      },
+      {
+        adapterId: recommendedAdapterId,
+        agentId: adapter.descriptor.supportedAgent.agentId,
+        executionTrust,
+        requirements,
+      },
+    );
+
+    this.#pendingWorkingDirectories.set(taskId, canonicalWorkingDirectory);
+
+    return {
+      record,
+      routingExplanation: routing.explanation,
+      generatedAt: new Date().toISOString(),
+    };
   }
 
   /**
@@ -334,6 +519,7 @@ export class TaskOrchestrator {
       createdAt: now,
       startedAt: undefined,
       completedAt: undefined,
+      assignedExecutionTrust: undefined,
     };
 
     this.#taskStore.add(record);
@@ -372,6 +558,9 @@ export class TaskOrchestrator {
       dependencyTaskIds: [],
       createdAt: now,
       updatedAt: now,
+      ...(parsedRequest.requirements !== undefined
+        ? { requirements: parsedRequest.requirements }
+        : {}),
     });
 
     const record: TaskRecord = {
@@ -387,6 +576,7 @@ export class TaskOrchestrator {
       createdAt: now,
       startedAt: undefined,
       completedAt: undefined,
+      assignedExecutionTrust: undefined,
     };
 
     this.#taskStore.add(record);
@@ -460,6 +650,25 @@ export class TaskOrchestrator {
         message: issue.message,
       }));
       throw new InvalidRequestError("Invalid transition-task request.", issues);
+    }
+    return result.data;
+  }
+
+  /**
+   * Phase 11 — `rawRequest` is entirely optional (`POST
+   * .../routing-analysis` and `.../route-and-assign` may be called with no
+   * body at all), so `undefined`/`null` is treated the same as `{}` before
+   * validation, rather than rejected as an invalid request shape.
+   */
+  #parseRoutingRequest(rawRequest: unknown): RoutingRequest {
+    const input = rawRequest ?? {};
+    const result = routingRequestSchema.safeParse(input);
+    if (!result.success) {
+      const issues = result.error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      }));
+      throw new InvalidRequestError("Invalid routing request.", issues);
     }
     return result.data;
   }

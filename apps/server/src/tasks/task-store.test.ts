@@ -39,6 +39,7 @@ function makeRecord(taskId: string, overrides: Partial<TaskRecord> = {}): TaskRe
     createdAt: "2026-07-15T12:00:00.000Z",
     startedAt: undefined,
     completedAt: undefined,
+    assignedExecutionTrust: undefined,
     ...overrides,
   };
 }
@@ -192,7 +193,7 @@ describe("TaskStore", () => {
         "task-1",
         store.getRevision("task-1"),
         { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
-        { adapterId: "hall.mock-agent", agentId: "mock-agent" },
+        { adapterId: "hall.mock-agent", agentId: "mock-agent", executionTrust: "isolated" },
       );
       expect(result.task.status).toBe("assigned");
       expect(result.adapterId).toBe("hall.mock-agent");
@@ -214,7 +215,7 @@ describe("TaskStore", () => {
         "task-1",
         store.getRevision("task-1"),
         { status: "assigned", runId: undefined, adapterId: "hall.old-agent", agentId: "old-agent" },
-        { adapterId: "hall.new-agent", agentId: "new-agent" },
+        { adapterId: "hall.new-agent", agentId: "new-agent", executionTrust: "isolated" },
       );
       expect(result.task.status).toBe("assigned");
       expect(result.adapterId).toBe("hall.new-agent");
@@ -231,7 +232,7 @@ describe("TaskStore", () => {
           "task-1",
           staleRevision,
           { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
-          { adapterId: "hall.mock-agent", agentId: "mock-agent" },
+          { adapterId: "hall.mock-agent", agentId: "mock-agent", executionTrust: "isolated" },
         );
       }).toThrow(TaskStateConflictError);
       // The rejected commit must not have mutated anything.
@@ -261,7 +262,7 @@ describe("TaskStore", () => {
             adapterId: "hall.old-agent",
             agentId: "old-agent",
           },
-          { adapterId: "hall.new-agent", agentId: "new-agent" },
+          { adapterId: "hall.new-agent", agentId: "new-agent", executionTrust: "isolated" },
         );
       }).toThrow(TaskStateConflictError);
     });
@@ -275,7 +276,7 @@ describe("TaskStore", () => {
         "task-1",
         staleRevision,
         { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
-        { adapterId: "hall.first-agent", agentId: "first-agent" },
+        { adapterId: "hall.first-agent", agentId: "first-agent", executionTrust: "isolated" },
       );
       // A second caller's snapshot (also taken while the task was still
       // "ready", at the same stale revision) is now stale: the live status
@@ -285,7 +286,7 @@ describe("TaskStore", () => {
           "task-1",
           staleRevision,
           { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
-          { adapterId: "hall.second-agent", agentId: "second-agent" },
+          { adapterId: "hall.second-agent", agentId: "second-agent", executionTrust: "isolated" },
         );
       }).toThrow(TaskStateConflictError);
       expect(store.get("task-1").adapterId).toBe("hall.first-agent");
@@ -314,11 +315,13 @@ describe("TaskStore", () => {
       store.assignIfEligible("task-1", revision, snapshot, {
         adapterId: "hall.winner-agent",
         agentId: "winner-agent",
+        executionTrust: "isolated",
       });
       expect(() => {
         store.assignIfEligible("task-1", revision, snapshot, {
           adapterId: "hall.loser-agent",
           agentId: "loser-agent",
+          executionTrust: "isolated",
         });
       }).toThrow(TaskStateConflictError);
       expect(store.get("task-1").adapterId).toBe("hall.winner-agent");
@@ -331,7 +334,7 @@ describe("TaskStore", () => {
           "nonexistent",
           0,
           { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
-          { adapterId: "hall.mock-agent", agentId: "mock-agent" },
+          { adapterId: "hall.mock-agent", agentId: "mock-agent", executionTrust: "isolated" },
         );
       }).toThrow(TaskNotFoundError);
     });
@@ -348,7 +351,7 @@ describe("TaskStore", () => {
           "task-1",
           store.getRevision("task-1"),
           { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
-          { adapterId: "hall.mock-agent", agentId: "mock-agent" },
+          { adapterId: "hall.mock-agent", agentId: "mock-agent", executionTrust: "isolated" },
         );
       }).toThrow(TaskStateConflictError);
     });
@@ -375,6 +378,7 @@ describe("TaskStore", () => {
         store.assignIfEligible("task-1", staleRevision, staleSnapshot, {
           adapterId: "hall.mock-agent",
           agentId: "mock-agent",
+          executionTrust: "isolated",
         });
       }).toThrow(TaskStateConflictError);
       // The rejected commit must not have mutated anything.
@@ -395,6 +399,7 @@ describe("TaskStore", () => {
         store.assignIfEligible("task-1", 999, correctSnapshot, {
           adapterId: "hall.mock-agent",
           agentId: "mock-agent",
+          executionTrust: "isolated",
         });
       }).toThrow(TaskStateConflictError);
     });
