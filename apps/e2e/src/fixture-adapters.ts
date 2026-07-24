@@ -1,9 +1,15 @@
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import type {
   AgentAdapter,
   AgentAdapterDescriptor,
   AgentDetectionResult,
+  AgentRunHandle,
+  AgentTaskInput,
+  RunTerminalState,
 } from "@hall-of-wisdom/agent-adapter-sdk";
-import type { CapabilityObservation } from "@hall-of-wisdom/protocol";
+import type { CapabilityObservation, NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
 
 /**
  * Deterministic, fixture `AgentAdapter` implementations for Playwright
@@ -167,4 +173,87 @@ export function createAllFixtureAdapters(): readonly AgentAdapter[] {
     createFixtureClaudeCodeAdapter(),
     createFixtureCodexAdapter(),
   ];
+}
+
+/**
+ * Phase 12 — unlike every adapter above, this one's `startTask()` actually
+ * completes: it writes a small fixed file into the given
+ * `AgentTaskInput.workingDirectory` (the candidate's own Git worktree,
+ * for the multi-agent comparison feature) and emits a real
+ * `run.started` -> `run.completed` lifecycle. Never used by the routing/
+ * assignment E2E specs (those intentionally never click "Start" and rely
+ * on every fixture rejecting `startTask()`); used only by the comparison
+ * E2E spec, which needs to observe a real candidate reach a terminal
+ * status and produce real result evidence. No real filesystem access
+ * outside the worktree it's handed, no network access, no subscription
+ * usage of any kind — this is still a fully deterministic, offline
+ * fixture, not a real Claude Code/Codex process.
+ */
+export function createFixtureComparisonAdapter(input: {
+  readonly adapterId: string;
+  readonly displayName: string;
+  readonly fileName: string;
+  readonly fileContent: string;
+}): AgentAdapter {
+  const descriptor = buildDescriptor(input.adapterId, input.displayName, input.adapterId);
+  return {
+    descriptor,
+    detect(): Promise<AgentDetectionResult> {
+      return Promise.resolve({
+        installed: true,
+        availability: "available",
+        executionTrust: "isolated",
+        capabilityObservations: [...IMPLEMENTATION_CAPABILITIES],
+      });
+    },
+    startTask(taskInput: AgentTaskInput): Promise<AgentRunHandle> {
+      fs.writeFileSync(path.join(taskInput.workingDirectory, input.fileName), input.fileContent);
+
+      const envelope = {
+        protocolVersion: "0.1" as const,
+        runId: taskInput.runId,
+        taskId: taskInput.hallTask.taskId,
+        agentId: taskInput.agentIdentity.agentId,
+        timestamp: new Date().toISOString(),
+      };
+      const startedEvent: NormalizedAgentEvent = {
+        ...envelope,
+        eventId: randomUUID(),
+        sequence: 0,
+        type: "run.started",
+        payload: {},
+      };
+      const completedEvent: NormalizedAgentEvent = {
+        ...envelope,
+        eventId: randomUUID(),
+        sequence: 1,
+        type: "run.completed",
+        payload: {},
+      };
+      const events: readonly NormalizedAgentEvent[] = [startedEvent, completedEvent];
+      const currentState: RunTerminalState = "running";
+
+      return Promise.resolve({
+        runId: taskInput.runId,
+        currentState,
+        completion: Promise.resolve(completedEvent),
+        events: {
+          [Symbol.asyncIterator]() {
+            let index = 0;
+            return {
+              next(): Promise<IteratorResult<NormalizedAgentEvent>> {
+                const value = events.at(index);
+                if (value === undefined) return Promise.resolve({ done: true, value: undefined });
+                index += 1;
+                return Promise.resolve({ done: false, value });
+              },
+            };
+          },
+        },
+        cancel(): void {
+          // no-op fixture: the event list is fixed at construction time.
+        },
+      });
+    },
+  };
 }

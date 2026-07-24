@@ -5,8 +5,10 @@ import {
 } from "./mock-agent-composition-root.js";
 import { registerClaudeCodeAdapter } from "./claude-code-composition-root.js";
 import { registerCodexAdapter } from "./codex-composition-root.js";
+import { createComparisonComposition } from "./comparison-composition-root.js";
 
 export type { ServerComposition, ServerCompositionOptions };
+export type { ComparisonComposition } from "./comparison-composition-root.js";
 
 /**
  * The single Hall Core startup composition entry point. Assembles the
@@ -17,6 +19,11 @@ export type { ServerComposition, ServerCompositionOptions };
  * know each adapter's own configuration). No adapter-specific composition
  * root knows about any other adapter; this function is the one place
  * that assembles all three onto one shared, provider-neutral registry.
+ *
+ * Phase 12 — the multi-agent comparison feature is layered on afterward,
+ * only when `options.comparisonRoot` is supplied, reusing the exact same
+ * `AgentRegistry` and `TaskStore` this function already built (never a
+ * second registry, never a second source of adapters).
  */
 export function createServerComposition(options: ServerCompositionOptions): ServerComposition {
   const composition = createMockAgentServerComposition(options);
@@ -25,5 +32,19 @@ export function createServerComposition(options: ServerCompositionOptions): Serv
     workspaceRoot: options.workspaceRoot,
     enableCodexTrustedLocal: options.enableCodexTrustedLocal,
   });
-  return composition;
+
+  if (options.comparisonRoot === undefined) {
+    return composition;
+  }
+
+  const comparison = createComparisonComposition({
+    registry: composition.registry,
+    taskStore: composition.taskStore,
+    workspaceRoot: options.workspaceRoot,
+    comparisonRoot: options.comparisonRoot,
+    limits: options.limits,
+    onExecutionError: options.onComparisonExecutionError,
+  });
+
+  return { ...composition, comparison };
 }

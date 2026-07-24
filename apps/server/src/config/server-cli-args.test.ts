@@ -101,6 +101,34 @@ describe("parseServerCliArguments", () => {
     });
   });
 
+  describe("--comparison-root (Phase 12)", () => {
+    it("is undefined when omitted", () => {
+      const options = parseServerCliArguments(["--workspace-root", "D:\\HallOfWisdom"]);
+      expect(options.comparisonRoot).toBeUndefined();
+    });
+
+    it("parses --comparison-root when supplied", () => {
+      const options = parseServerCliArguments([
+        "--workspace-root",
+        "D:\\HallOfWisdom",
+        "--comparison-root",
+        "D:\\HallOfWisdomComparisons",
+      ]);
+      expect(options.comparisonRoot).toBe("D:\\HallOfWisdomComparisons");
+    });
+
+    it("parses --comparison-root after the pnpm '--' script separator", () => {
+      const options = parseServerCliArguments([
+        "--",
+        "--workspace-root",
+        "D:\\HallOfWisdom",
+        "--comparison-root",
+        "D:\\HallOfWisdomComparisons",
+      ]);
+      expect(options.comparisonRoot).toBe("D:\\HallOfWisdomComparisons");
+    });
+  });
+
   describe("stripLeadingScriptSeparator (Phase 11.1)", () => {
     it("leaves argv without a leading separator untouched (direct node invocation)", () => {
       expect(stripLeadingScriptSeparator(["--workspace-root", "D:\\HallOfWisdom"])).toEqual([

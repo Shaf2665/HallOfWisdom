@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import type {
   AgentAdapter,
@@ -14,6 +17,10 @@ import { BoardStore } from "./boards/board-store.js";
 import { MessageStore } from "./boards/message-store.js";
 import { MessageBus } from "./boards/message-bus.js";
 import { DEFAULT_LIMITS, type ServerLimits } from "./config/server-config.js";
+import {
+  createComparisonComposition,
+  type ComparisonComposition,
+} from "./composition/comparison-composition-root.js";
 
 /** JSON shape of a `TaskRecord` as it round-trips through an HTTP response body. */
 export interface TaskRecordJson {
@@ -59,6 +66,8 @@ export interface TestHarnessOptions {
   readonly webOrigin?: string | undefined;
   /** Extra adapters registered alongside Mock Agent, e.g. a `ClaudeCodeAdapter` for coexistence tests. Defaults to none — existing callers are unaffected. */
   readonly additionalAdapters?: readonly AgentAdapter[] | undefined;
+  /** Phase 12 — when true, also composes the multi-agent comparison feature against a freshly created temp comparison-root directory (auto-cleaned by `TestHarness.cleanupComparisonRoot`). Defaults to false — existing callers are unaffected. */
+  readonly withComparisons?: boolean | undefined;
 }
 
 export interface TestHarness {
@@ -71,6 +80,9 @@ export interface TestHarness {
   readonly messageStore: MessageStore;
   readonly messageBus: MessageBus;
   readonly limits: ServerLimits;
+  readonly comparison?: ComparisonComposition | undefined;
+  /** No-op unless `withComparisons` was set — removes the temp comparison-root directory this harness created. */
+  cleanupComparisonRoot(): void;
 }
 
 export function buildTestHarness(options: TestHarnessOptions): TestHarness {
@@ -101,6 +113,21 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
   const generalBoard = boardStore.seedGeneralBoard(new Date().toISOString());
   messageStore.registerBoard(generalBoard.boardId);
 
+  let comparison: ComparisonComposition | undefined;
+  let comparisonRootDir: string | undefined;
+  if (options.withComparisons) {
+    comparisonRootDir = fs.realpathSync.native(
+      fs.mkdtempSync(path.join(os.tmpdir(), "hall-test-comparison-root-")),
+    );
+    comparison = createComparisonComposition({
+      registry,
+      taskStore,
+      workspaceRoot: options.workspaceRoot,
+      comparisonRoot: comparisonRootDir,
+      limits,
+    });
+  }
+
   return {
     registry,
     taskStore,
@@ -111,6 +138,10 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     messageStore,
     messageBus,
     limits,
+    comparison,
+    cleanupComparisonRoot(): void {
+      if (comparisonRootDir) fs.rmSync(comparisonRootDir, { recursive: true, force: true });
+    },
   };
 }
 
@@ -128,6 +159,7 @@ export async function buildTestApp(options: TestHarnessOptions): Promise<{
     messageStore: harness.messageStore,
     messageBus: harness.messageBus,
     registry: harness.registry,
+    comparison: harness.comparison,
     webOrigin: options.webOrigin,
     limits: harness.limits,
     logger: options.logger ?? false,

@@ -13,6 +13,7 @@ import { MessageStore } from "../boards/message-store.js";
 import { MessageBus } from "../boards/message-bus.js";
 import type { ServerLimits } from "../config/server-config.js";
 import { ServerCliError } from "../config/server-cli-args.js";
+import type { ComparisonComposition } from "./comparison-composition-root.js";
 
 export interface ServerCompositionOptions {
   /** Canonical, already-validated workspace root. */
@@ -27,6 +28,14 @@ export interface ServerCompositionOptions {
    * Defaults to `false` (Phase 10.1's fail-closed behavior, unchanged).
    */
   readonly enableCodexTrustedLocal?: boolean | undefined;
+  /**
+   * Phase 12 — canonical, already-validated comparison-root. Optional:
+   * when `undefined`, the multi-agent comparison feature is not composed
+   * at all (no `comparisonStore`/`comparisonOrchestrator`, no comparison
+   * routes registered) — comparisons are additive, never required.
+   */
+  readonly comparisonRoot?: string | undefined;
+  readonly onComparisonExecutionError?: ((candidateId: string, error: unknown) => void) | undefined;
 }
 
 export interface ServerComposition {
@@ -38,6 +47,8 @@ export interface ServerComposition {
   readonly boardStore: BoardStore;
   readonly messageStore: MessageStore;
   readonly messageBus: MessageBus;
+  /** Present only when `ServerCompositionOptions.comparisonRoot` was supplied. */
+  readonly comparison?: ComparisonComposition | undefined;
 }
 
 function resolveScenario(rawScenario: string | undefined): MockAgentScenario {

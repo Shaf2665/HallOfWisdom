@@ -8,6 +8,8 @@ import {
   executionTrustSchema,
   hallTaskSchema,
   structuredFailureSchema,
+  taskPrioritySchema,
+  taskRequirementsSchema,
 } from "@hall-of-wisdom/protocol";
 
 export {
@@ -242,3 +244,138 @@ export const listBoardMessagesResponseSchema = z
   .object({ messages: z.array(communicationMessageSchema) })
   .strict();
 export type ListBoardMessagesResponse = z.infer<typeof listBoardMessagesResponseSchema>;
+
+/**
+ * Phase 12 — controlled multi-agent execution comparison. Mirrors
+ * `apps/server/src/comparisons/comparison-record.ts` field-for-field —
+ * that file is the single source of truth; every schema below reproduces
+ * its shapes and status enums exactly, following this file's own
+ * established hand-mirroring convention. `ComparisonCandidateRecord` has
+ * no path field at all on the server (worktree paths are kept in a
+ * private, non-serialized map) — this schema, by construction, can never
+ * accept or forward one either.
+ */
+export const comparisonStatusSchema = z.enum([
+  "draft",
+  "preparing",
+  "ready",
+  "running",
+  "partially_completed",
+  "completed",
+  "failed",
+  "cancelled",
+  "cleaning",
+  "cleaned",
+]);
+export type ComparisonStatus = z.infer<typeof comparisonStatusSchema>;
+
+export const candidateStatusSchema = z.enum([
+  "pending",
+  "prepared",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type CandidateStatus = z.infer<typeof candidateStatusSchema>;
+
+export const cleanupStatusSchema = z.enum(["not_started", "in_progress", "completed", "failed"]);
+export type CleanupStatus = z.infer<typeof cleanupStatusSchema>;
+
+export const changedFileEntrySchema = z
+  .object({
+    relativePath: z.string().max(4096),
+    changeType: z.enum(["added", "modified", "deleted", "renamed"]),
+    additions: z.number().int().min(0),
+    deletions: z.number().int().min(0),
+  })
+  .strict();
+export type ChangedFileEntry = z.infer<typeof changedFileEntrySchema>;
+
+export const candidateResultEvidenceSchema = z
+  .object({
+    changedFiles: z.array(changedFileEntrySchema).max(500),
+    totalAdditions: z.number().int().min(0),
+    totalDeletions: z.number().int().min(0),
+    /** Unified diff text, bounded server-side; omitted entirely if there were no changes. */
+    boundedDiff: z.string().max(200_000).optional(),
+    truncated: z.boolean(),
+  })
+  .strict();
+export type CandidateResultEvidence = z.infer<typeof candidateResultEvidenceSchema>;
+
+export const comparisonCandidateRecordSchema = z
+  .object({
+    candidateId: z.string(),
+    adapterId: z.string(),
+    displayName: z.string(),
+    status: candidateStatusSchema,
+    executionTrust: executionTrustSchema.optional(),
+    runId: z.string().optional(),
+    agentId: z.string().optional(),
+    createdAt: z.string(),
+    preparedAt: z.string().optional(),
+    startedAt: z.string().optional(),
+    completedAt: z.string().optional(),
+    eventCount: z.number(),
+    lastSequence: z.number().optional(),
+    terminalEventType: terminalEventTypeSchema.optional(),
+    failure: structuredFailureSchema.optional(),
+    cancellationRequested: z.boolean(),
+    resultEvidence: candidateResultEvidenceSchema.optional(),
+    /** A safe, bounded, non-path failure reason for `preparing`-stage failures. */
+    safeFailureReason: z.string().optional(),
+  })
+  .strict();
+export type ComparisonCandidateRecord = z.infer<typeof comparisonCandidateRecordSchema>;
+
+export const comparisonPreferenceSchema = z
+  .object({
+    candidateId: z.string(),
+    note: z.string().optional(),
+    recordedAt: z.string(),
+  })
+  .strict();
+export type ComparisonPreference = z.infer<typeof comparisonPreferenceSchema>;
+
+export const agentComparisonRecordSchema = z
+  .object({
+    comparisonId: z.string(),
+    sourceTaskId: z.string(),
+    title: z.string(),
+    description: z.string(),
+    priority: taskPrioritySchema,
+    requirements: taskRequirementsSchema.optional(),
+    baseCommit: z.string().optional(),
+    status: comparisonStatusSchema,
+    createdAt: z.string(),
+    updatedAt: z.string(),
+    preparedAt: z.string().optional(),
+    candidates: z.tuple([comparisonCandidateRecordSchema, comparisonCandidateRecordSchema]),
+    cleanupStatus: cleanupStatusSchema,
+    cleanupError: z.string().optional(),
+    /** A stable, machine-checkable code for a `preparing`-stage failure that is not specific to either candidate (e.g. no source working directory, or a dirty source repository). */
+    prepareFailureCode: z.string().optional(),
+    /** A safe, bounded, path-free reason paired with `prepareFailureCode`. */
+    prepareFailureReason: z.string().optional(),
+    preference: comparisonPreferenceSchema.optional(),
+  })
+  .strict();
+export type AgentComparisonRecord = z.infer<typeof agentComparisonRecordSchema>;
+
+export const listComparisonsResponseSchema = z
+  .object({ comparisons: z.array(agentComparisonRecordSchema) })
+  .strict();
+export type ListComparisonsResponse = z.infer<typeof listComparisonsResponseSchema>;
+
+export const cancelComparisonCandidateResponseSchema = z
+  .object({
+    comparisonId: z.string(),
+    candidateId: z.string(),
+    cancellationRequested: z.literal(true),
+    alreadyRequested: z.boolean(),
+  })
+  .strict();
+export type CancelComparisonCandidateResponse = z.infer<
+  typeof cancelComparisonCandidateResponseSchema
+>;

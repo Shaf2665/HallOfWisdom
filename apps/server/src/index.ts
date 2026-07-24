@@ -54,6 +54,14 @@ export {
   AdapterNotFoundError,
   BoardCapacityReachedError,
   BoardNotFoundError,
+  ComparisonAdapterNotFoundError,
+  ComparisonCandidateNotEligibleError,
+  ComparisonCandidateNotFoundError,
+  ComparisonCapacityReachedError,
+  ComparisonNotFoundError,
+  ComparisonSourceTaskNotFoundError,
+  ComparisonStateConflictError,
+  DuplicateComparisonError,
   DuplicateTaskError,
   HallCoreError,
   InternalServerError,
@@ -68,3 +76,35 @@ export {
   WorkspaceValidationFailedError,
 } from "./errors/app-error.js";
 export type { RequestValidationIssue } from "./errors/app-error.js";
+
+export { createComparisonComposition } from "./composition/comparison-composition-root.js";
+export type {
+  ComparisonComposition,
+  ComparisonCompositionOptions,
+} from "./composition/comparison-composition-root.js";
+
+export { ComparisonStore } from "./comparisons/comparison-store.js";
+export type { ComparisonStoreOptions } from "./comparisons/comparison-store.js";
+export type {
+  AgentComparisonRecord,
+  CandidateResultEvidence,
+  ChangedFileEntry,
+  CleanupStatus,
+  ComparisonCandidateRecord,
+  ComparisonPreference,
+  ComparisonStatus,
+  CandidateStatus,
+} from "./comparisons/comparison-record.js";
+
+export { ComparisonOrchestrator } from "./comparisons/comparison-orchestrator.js";
+export type { ComparisonOrchestratorOptions } from "./comparisons/comparison-orchestrator.js";
+
+export { GitWorktreeManager } from "./comparisons/git-worktree-manager.js";
+export type {
+  GitWorktreeManagerOptions,
+  CreateWorktreeInput,
+  CreatedWorktree,
+} from "./comparisons/git-worktree-manager.js";
+
+export { nodeProcessSpawner } from "./comparisons/process-spawner.js";
+export type { ProcessSpawner } from "./comparisons/process-spawner.js";

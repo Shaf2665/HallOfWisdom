@@ -23,6 +23,7 @@ export function KanbanCard({
   onMove,
   onOpenAssign,
   onOpenFindAgent,
+  onOpenCompare,
   onStart,
   onCancel,
   onOpenDiscussion,
@@ -46,6 +47,7 @@ export function KanbanCard({
   readonly onMove: (taskId: string, targetStatus: TaskStatus) => Promise<void>;
   readonly onOpenAssign: (record: TaskRecord) => void;
   readonly onOpenFindAgent: (record: TaskRecord) => void;
+  readonly onOpenCompare: (record: TaskRecord) => void;
   readonly onStart: (taskId: string) => Promise<void>;
   readonly onCancel: (record: TaskRecord) => Promise<void>;
   readonly onOpenDiscussion: (taskId: string) => Promise<void>;
@@ -126,6 +128,15 @@ export function KanbanCard({
       // the same commit that mounts the routing dialog.
       actionsButtonRef.current?.focus();
       onOpenFindAgent(record);
+      return;
+    }
+    if (action.kind === "compare") {
+      // Same refocus-before-open discipline as "assign"/"find-agent"
+      // above, for the same reason: the popover item that was just
+      // clicked unmounts in the same commit that mounts the compare
+      // dialog.
+      actionsButtonRef.current?.focus();
+      onOpenCompare(record);
       return;
     }
     if (action.kind === "start") {

@@ -1,5 +1,6 @@
 import { pathToFileURL } from "node:url";
-import { validateWorkspace } from "@hall-of-wisdom/hall-runner";
+import path from "node:path";
+import { isContainedPath, validateWorkspace } from "@hall-of-wisdom/hall-runner";
 import { createHallCoreApp } from "./app.js";
 import { createServerComposition } from "./composition/server-composition.js";
 import { parseServerCliArguments, ServerCliError } from "./config/server-cli-args.js";
@@ -52,6 +53,39 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     return EXIT_INVALID_INPUT;
   }
 
+  // Phase 12 — `--comparison-root` is optional; when supplied, it must
+  // already exist (same requirement `--workspace-root` has) and must be
+  // mutually non-contained with `workspaceRoot`: neither may be nested
+  // inside, or an ancestor of, the other. Without this check, `git
+  // worktree add` could pollute or nest a comparison worktree inside the
+  // source repository itself (if comparisonRoot were inside workspaceRoot)
+  // or vice versa. Checked once, at startup — never re-derived per request.
+  let comparisonRoot: string | undefined;
+  if (cliOptions.comparisonRoot !== undefined) {
+    let canonicalComparisonRoot: string;
+    try {
+      canonicalComparisonRoot = validateWorkspace({
+        workspaceRoot: cliOptions.comparisonRoot,
+        workingDirectory: cliOptions.comparisonRoot,
+      }).workspaceRoot;
+    } catch (error) {
+      console.error(formatError(error));
+      return EXIT_INVALID_INPUT;
+    }
+
+    const caseSensitive = process.platform !== "win32" && process.platform !== "darwin";
+    const nested =
+      isContainedPath(workspaceRoot, canonicalComparisonRoot, { caseSensitive, path }) ||
+      isContainedPath(canonicalComparisonRoot, workspaceRoot, { caseSensitive, path });
+    if (nested) {
+      console.error(
+        `--comparison-root must not be nested inside, or an ancestor of, --workspace-root (workspaceRoot: "${workspaceRoot}", comparisonRoot: "${canonicalComparisonRoot}").`,
+      );
+      return EXIT_INVALID_INPUT;
+    }
+    comparisonRoot = canonicalComparisonRoot;
+  }
+
   let composition;
   try {
     composition = createServerComposition({
@@ -60,8 +94,14 @@ export async function runServer(argv: readonly string[]): Promise<number> {
       mockStepDelayMs: cliOptions.mockStepDelayMs,
       limits: DEFAULT_LIMITS,
       enableCodexTrustedLocal: cliOptions.enableCodexTrustedLocal,
+      comparisonRoot,
       onExecutionError: (taskId, error) => {
         console.error(`Task ${taskId} execution failed: ${formatError(error)}`);
+      },
+      onComparisonExecutionError: (candidateId, error) => {
+        console.error(
+          `Comparison candidate ${candidateId} execution failed: ${formatError(error)}`,
+        );
       },
     });
   } catch (error) {
@@ -81,6 +121,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     messageStore: composition.messageStore,
     messageBus: composition.messageBus,
     registry: composition.registry,
+    comparison: composition.comparison,
     webOrigin: cliOptions.webOrigin,
     limits: DEFAULT_LIMITS,
   });
@@ -102,6 +143,9 @@ export async function runServer(argv: readonly string[]): Promise<number> {
       "Codex trusted-local mode is enabled: if every other precondition passes, Codex will run with this operator's own filesystem permissions and Codex's internal sandbox/approval protections will be bypassed for its tasks.",
     );
   }
+  if (comparisonRoot !== undefined) {
+    app.log.info(`Multi-agent comparison is enabled. Comparison root: ${comparisonRoot}`);
+  }
 
   let resolveExitCode!: (code: number) => void;
   const exitCodePromise = new Promise<number>((resolve) => {
@@ -114,6 +158,13 @@ export async function runServer(argv: readonly string[]): Promise<number> {
       void (async () => {
         try {
           await composition.orchestrator.shutdown(SHUTDOWN_TIMEOUT_MS);
+          // Deliberately does NOT call `cleanupComparison` for every
+          // comparison here: shutdown aborts active runs and preserves
+          // worktrees for manual reconciliation on the next start, exactly
+          // like `ComparisonOrchestrator.shutdown()`'s own doc comment
+          // describes — it is not the same operation as an operator's
+          // explicit `DELETE`.
+          await composition.comparison?.comparisonOrchestrator.shutdown(SHUTDOWN_TIMEOUT_MS);
           await app.close();
         } finally {
           resolveExitCode(0);

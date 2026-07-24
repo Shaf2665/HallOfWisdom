@@ -523,6 +523,7 @@ export class TaskOrchestrator {
     };
 
     this.#taskStore.add(record);
+    this.#taskStore.setWorkingDirectory(taskId, parsedRequest.workingDirectory);
 
     const taskInput = parseAgentTaskInput({
       hallTask,
@@ -580,6 +581,7 @@ export class TaskOrchestrator {
     };
 
     this.#taskStore.add(record);
+    this.#taskStore.setWorkingDirectory(taskId, parsedRequest.workingDirectory);
 
     if (parsedRequest.workingDirectory !== undefined) {
       this.#pendingWorkingDirectories.set(

@@ -108,7 +108,8 @@ hall-of-wisdom/
                      0005-minimal-web-interface.md, 0006-kanban-board.md,
                      0007-communication-boards.md, 0008-claude-code-adapter.md,
                      0009-codex-adapter.md, 0010-paperclip-compatible-codex-mode.md,
-                     0011-agent-capabilities-trust-and-routing.md
+                     0011-agent-capabilities-trust-and-routing.md,
+                     0012-controlled-agent-comparison.md
   AGENTS.md
   CLAUDE.md
   README.md

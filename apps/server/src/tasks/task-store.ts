@@ -56,6 +56,29 @@ export class TaskStore {
    */
   readonly #revisions = new Map<string, number>();
 
+  /**
+   * The raw, schema-validated (relative, never-absolute) `workingDirectory`
+   * a task was created with — deliberately NOT a field on `TaskRecord` for
+   * the exact same reason `#revisions` isn't: `TaskRecord` is serialized
+   * directly as an HTTP response body. This is intentionally the *raw*
+   * string as submitted, not a canonicalized absolute path — canonicalizing
+   * requires a `workspaceRoot`, which `TaskStore` itself has no notion of;
+   * each reader (`TaskOrchestrator`, `ComparisonOrchestrator`) canonicalizes
+   * it against its own configured workspace root when it actually needs to
+   * touch the filesystem.
+   *
+   * Unlike `TaskOrchestrator`'s own `#pendingWorkingDirectories` (which is
+   * deleted the moment `startTask()` consumes it — a deliberately
+   * once-only cache for the immediate next execution), this is set once at
+   * task creation and never cleared: `ComparisonOrchestrator.prepareComparison`
+   * may need to read a deferred task's working directory long after
+   * creation, and potentially without the task ever going through
+   * `TaskOrchestrator.assignTask()`/`startTask()` at all. See
+   * `docs/architecture/0012-controlled-agent-comparison.md`, "Source
+   * repository resolution."
+   */
+  readonly #workingDirectories = new Map<string, string>();
+
   constructor(options: TaskStoreOptions) {
     this.#maxTasks = options.maxTasks;
   }
@@ -69,6 +92,31 @@ export class TaskStore {
     }
     this.#records.set(record.task.taskId, record);
     this.#revisions.set(record.task.taskId, 0);
+  }
+
+  /**
+   * Records the raw (relative, unvalidated-against-any-workspace-root)
+   * `workingDirectory` a task was created with — called at most once, by
+   * `TaskOrchestrator` immediately after `add()`. A `undefined` argument
+   * (no working directory supplied) is a no-op: `getWorkingDirectory` then
+   * simply returns `undefined`, exactly as if this were never called.
+   */
+  setWorkingDirectory(taskId: string, workingDirectory: string | undefined): void {
+    this.#mustGetLive(taskId);
+    if (workingDirectory === undefined) return;
+    this.#workingDirectories.set(taskId, workingDirectory);
+  }
+
+  /**
+   * The raw working directory a task was created with, or `undefined` if
+   * none was ever supplied — internal-only, never reachable from a route.
+   * Callers must canonicalize and validate this themselves against their
+   * own configured workspace root before touching the filesystem; this
+   * store performs no validation of its own.
+   */
+  getWorkingDirectory(taskId: string): string | undefined {
+    this.#mustGetLive(taskId);
+    return this.#workingDirectories.get(taskId);
   }
 
   get(taskId: string): TaskRecord {

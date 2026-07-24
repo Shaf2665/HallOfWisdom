@@ -223,9 +223,23 @@ export type CardAction =
   | { readonly kind: "find-agent"; readonly label: string }
   | { readonly kind: "start"; readonly label: string }
   | { readonly kind: "cancel"; readonly label: string }
-  | { readonly kind: "discuss"; readonly label: string };
+  | { readonly kind: "discuss"; readonly label: string }
+  | { readonly kind: "compare"; readonly label: "Compare agents" };
 
 const DISCUSS_ACTION: CardAction = { kind: "discuss", label: "Open discussion" };
+/**
+ * Phase 12 — offered only for `ready` tasks: a comparison snapshots the
+ * task's title/description/priority/requirements once at creation
+ * (`docs/architecture/0012-controlled-agent-comparison.md`, "Source task
+ * snapshot policy") and never touches the source task's own status, so it
+ * makes sense only before the task has committed to a single real
+ * assignment/run — `backlog` is excluded because a comparison needs a
+ * task the operator has actually decided is ready to work on;
+ * `assigned`/`running`/terminal are excluded because the task already has
+ * (or has finished) its own real single-adapter execution, which a
+ * comparison would run alongside redundantly.
+ */
+const COMPARE_ACTION: CardAction = { kind: "compare", label: "Compare agents" };
 
 /**
  * The exact action set for each card state, matching the Kanban spec's
@@ -265,6 +279,7 @@ export function availableActionsFor(record: TaskRecord): readonly CardAction[] {
         { kind: "move", targetStatus: "backlog", label: "Move to Backlog" },
         { kind: "assign", label: "Assign agent" },
         { kind: "find-agent", label: "Find suitable agent" },
+        COMPARE_ACTION,
         { kind: "move", targetStatus: "blocked", label: "Move to Blocked" },
         { kind: "cancel", label: "Cancel task" },
         DISCUSS_ACTION,

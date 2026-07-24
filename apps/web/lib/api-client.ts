@@ -2,6 +2,8 @@ import type { z } from "zod";
 import type { TaskStatus } from "@hall-of-wisdom/protocol";
 import {
   adapterSummarySchema,
+  agentComparisonRecordSchema,
+  cancelComparisonCandidateResponseSchema,
   cancelTaskResponseSchema,
   communicationBoardSchema,
   communicationMessageSchema,
@@ -12,10 +14,13 @@ import {
   listAdaptersResponseSchema,
   listBoardMessagesResponseSchema,
   listBoardsResponseSchema,
+  listComparisonsResponseSchema,
   listTasksResponseSchema,
   routeAndAssignResponseSchema,
   routingAnalysisResponseSchema,
   taskRecordSchema,
+  type AgentComparisonRecord,
+  type CancelComparisonCandidateResponse,
   type CancelTaskResponse,
   type CommunicationBoard,
   type CommunicationMessage,
@@ -24,6 +29,7 @@ import {
   type HealthResponse,
   type ListBoardMessagesResponse,
   type ListBoardsResponse,
+  type ListComparisonsResponse,
   type RouteAndAssignResponse,
   type RoutingAnalysisResponse,
   type TaskRecord,
@@ -120,7 +126,7 @@ function withTimeout(
 }
 
 interface RequestInit {
-  readonly method: "GET" | "POST";
+  readonly method: "GET" | "POST" | "DELETE";
   readonly body?: unknown;
 }
 
@@ -428,6 +434,142 @@ export function createBoardMessage(
     `${baseUrl}/api/v1/boards/${encodeURIComponent(boardId)}/messages`,
     { method: "POST", body: { text } },
     communicationMessageSchema,
+    options,
+  );
+}
+
+export interface CreateComparisonRequestBody {
+  readonly sourceTaskId: string;
+  readonly candidateAdapterIds: readonly [string, string];
+}
+
+export interface SetComparisonPreferenceRequestBody {
+  /** `null` clears any previously recorded preference. */
+  readonly candidateId: string | null;
+  readonly note?: string;
+}
+
+/**
+ * Phase 12 — controlled multi-agent execution comparison. Creates a
+ * comparison only (source task snapshotted, two pending candidates
+ * registered) — no filesystem/Git work happens until `prepareComparison()`
+ * is called, and no candidate is ever started here.
+ */
+export function createComparison(
+  baseUrl: string,
+  body: CreateComparisonRequestBody,
+  options: RequestOptions = {},
+): Promise<AgentComparisonRecord> {
+  return request(
+    `${baseUrl}/api/v1/comparisons`,
+    { method: "POST", body },
+    agentComparisonRecordSchema,
+    options,
+  );
+}
+
+export function listComparisons(
+  baseUrl: string,
+  options: RequestOptions = {},
+): Promise<ListComparisonsResponse> {
+  return request(
+    `${baseUrl}/api/v1/comparisons`,
+    { method: "GET" },
+    listComparisonsResponseSchema,
+    options,
+  );
+}
+
+export function getComparison(
+  baseUrl: string,
+  comparisonId: string,
+  options: RequestOptions = {},
+): Promise<AgentComparisonRecord> {
+  return request(
+    `${baseUrl}/api/v1/comparisons/${encodeURIComponent(comparisonId)}`,
+    { method: "GET" },
+    agentComparisonRecordSchema,
+    options,
+  );
+}
+
+/** Resolves the shared base commit and creates both candidates' worktrees. Starts nothing. */
+export function prepareComparison(
+  baseUrl: string,
+  comparisonId: string,
+  options: RequestOptions = {},
+): Promise<AgentComparisonRecord> {
+  return request(
+    `${baseUrl}/api/v1/comparisons/${encodeURIComponent(comparisonId)}/prepare`,
+    { method: "POST" },
+    agentComparisonRecordSchema,
+    options,
+  );
+}
+
+/**
+ * Starts exactly one candidate's run. The server enforces sequential-only
+ * execution (409 `COMPARISON_STATE_CONFLICT` if another candidate on this
+ * comparison is already running) — this function does not pre-check that
+ * client-side; callers must surface a rejected promise as an inline error.
+ */
+export function startComparisonCandidate(
+  baseUrl: string,
+  comparisonId: string,
+  candidateId: string,
+  options: RequestOptions = {},
+): Promise<AgentComparisonRecord> {
+  return request(
+    `${baseUrl}/api/v1/comparisons/${encodeURIComponent(comparisonId)}/candidates/${encodeURIComponent(candidateId)}/start`,
+    { method: "POST" },
+    agentComparisonRecordSchema,
+    options,
+  );
+}
+
+export function cancelComparisonCandidate(
+  baseUrl: string,
+  comparisonId: string,
+  candidateId: string,
+  options: RequestOptions = {},
+): Promise<CancelComparisonCandidateResponse> {
+  return request(
+    `${baseUrl}/api/v1/comparisons/${encodeURIComponent(comparisonId)}/candidates/${encodeURIComponent(candidateId)}/cancel`,
+    { method: "POST" },
+    cancelComparisonCandidateResponseSchema,
+    options,
+  );
+}
+
+/**
+ * Records (or, with `candidateId: null`, clears) a purely informational
+ * operator preference — never merges, commits, or picks a winner. See
+ * `docs/architecture/0012-controlled-agent-comparison.md`.
+ */
+export function setComparisonPreference(
+  baseUrl: string,
+  comparisonId: string,
+  body: SetComparisonPreferenceRequestBody,
+  options: RequestOptions = {},
+): Promise<AgentComparisonRecord> {
+  return request(
+    `${baseUrl}/api/v1/comparisons/${encodeURIComponent(comparisonId)}/preference`,
+    { method: "POST", body },
+    agentComparisonRecordSchema,
+    options,
+  );
+}
+
+/** Tears down both worktrees. Always returns the record (never throws on a partial failure) — a failed cleanup is retry-safe via a second call. */
+export function deleteComparison(
+  baseUrl: string,
+  comparisonId: string,
+  options: RequestOptions = {},
+): Promise<AgentComparisonRecord> {
+  return request(
+    `${baseUrl}/api/v1/comparisons/${encodeURIComponent(comparisonId)}`,
+    { method: "DELETE" },
+    agentComparisonRecordSchema,
     options,
   );
 }

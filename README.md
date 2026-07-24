@@ -33,6 +33,27 @@ for the full design — including the pnpm `--` CLI-argument-forwarding fix (the
 `pnpm ... run dev -- --flag` startup commands below are now verified working) and the new
 Playwright-based E2E verification suite (`apps/e2e`, no Chrome-extension dependency).
 
+**Phase 12 — Controlled Multi-Agent Execution Comparison**, hardened by **Phase 12.1 — Task-Scoped
+Source Repository Resolution**. An operator can give the same task to two different adapters and
+compare their results side by side, in separate, reproducible Git worktrees created at the identical
+base commit — no shared writable workspace, no automatic parallel execution (starting a candidate is
+explicit and sequential, one at a time), no AI judge, no automatic winner, no merge/commit/push.
+Optional at startup (`--comparison-root`, off by default); when enabled, `/comparisons` lists and
+drives comparisons (create, prepare, start each candidate, view changed files and a bounded diff,
+cancel, an optional non-binding preference note, and clean up), and a new "Compare agents" Kanban
+action opens the create dialog for a Ready task. A comparison's source repository is always resolved
+from its source task's own stored working directory — `--workspace-root` is a trusted security
+boundary, not itself the repository; it need not be a Git repository and may be dirty, so an
+operator's real, uncommitted development work sitting alongside a task's own clean repository never
+blocks a comparison. See
+[`docs/architecture/0012-controlled-agent-comparison.md`](docs/architecture/0012-controlled-agent-comparison.md)
+for the full design, including a real cleanup/finalization race and the source-repository-resolution
+defect, both found and fixed during this feature's own development. **A single, explicitly authorized
+real comparison has been run** — one genuine Claude Code (isolated) invocation and one genuine Codex
+(trusted-local) invocation, zero retries, both completed successfully with independent, correct
+results and no automatic winner; see that document's "Real Claude Code + Codex comparison" section.
+No further real-provider execution is needed or authorized for this feature.
+
 Eight packages now exist:
 `@hall-of-wisdom/protocol` (the wire contract), `@hall-of-wisdom/agent-adapter-sdk`
 (the adapter contract), `@hall-of-wisdom/mock-agent` (the first, deterministic adapter),
@@ -119,17 +140,17 @@ pnpm --filter @hall-of-wisdom/hall-core run verify:package-entry
 
 ## Packages
 
-| Package                                                           | Purpose                                                                                                                                                                                                                                                                                                  |
-| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@hall-of-wisdom/protocol`](packages/protocol)                   | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation.                                                                                                                                                        |
-| [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                                                                                                                     |
-| [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                                                                                                                    |
-| [`@hall-of-wisdom/claude-code-adapter`](adapters/claude-code)     | Real `AgentAdapter` that spawns your locally-installed, subscription-authenticated Claude Code CLI as a child process — never an API key, never cloud billing. See [`docs/architecture/0008-claude-code-adapter.md`](docs/architecture/0008-claude-code-adapter.md).                                     |
-| [`@hall-of-wisdom/codex-adapter`](adapters/codex)                 | Real `AgentAdapter` that spawns your locally-installed, ChatGPT-authenticated Codex CLI as a child process — never an API key, never an access token. File-editing capability is an unresolved, disclosed gap. See [`docs/architecture/0009-codex-adapter.md`](docs/architecture/0009-codex-adapter.md). |
-| [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events.                                                                                                     |
-| [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, hosts a General board and per-task discussion boards for local human communication, and binds to `127.0.0.1` only.                       |
-| [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: the Task Console (`/`) for immediate execution, the Kanban Board (`/board`) for planning tasks, and Communication Boards (`/boards`) for local discussion — talks to Hall Core directly (no proxy, no custom server); binds to `127.0.0.1` only.                              |
-| [`@hall-of-wisdom/e2e`](apps/e2e)                                 | Phase 11.1 — Playwright end-to-end verification against a deterministic, fixture-adapter Hall Core (`src/fixture-server.ts`, built from Hall Core's own public package entry) and the real Hall Web dev server; never a real Claude Code/Codex process, never any subscription usage.                    |
+| Package                                                           | Purpose                                                                                                                                                                                                                                                                                                                                                                             |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@hall-of-wisdom/protocol`](packages/protocol)                   | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation.                                                                                                                                                                                                                                   |
+| [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                                                                                                                                                                                                |
+| [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                                                                                                                                                                                               |
+| [`@hall-of-wisdom/claude-code-adapter`](adapters/claude-code)     | Real `AgentAdapter` that spawns your locally-installed, subscription-authenticated Claude Code CLI as a child process — never an API key, never cloud billing. See [`docs/architecture/0008-claude-code-adapter.md`](docs/architecture/0008-claude-code-adapter.md).                                                                                                                |
+| [`@hall-of-wisdom/codex-adapter`](adapters/codex)                 | Real `AgentAdapter` that spawns your locally-installed, ChatGPT-authenticated Codex CLI as a child process — never an API key, never an access token. File-editing capability is an unresolved, disclosed gap. See [`docs/architecture/0009-codex-adapter.md`](docs/architecture/0009-codex-adapter.md).                                                                            |
+| [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events.                                                                                                                                                                                |
+| [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, hosts a General board and per-task discussion boards for local human communication, optionally drives two-adapter Git-worktree-isolated comparisons (Phase 12, `--comparison-root`), and binds to `127.0.0.1` only. |
+| [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: the Task Console (`/`) for immediate execution, the Kanban Board (`/board`) for planning tasks, and Communication Boards (`/boards`) for local discussion — talks to Hall Core directly (no proxy, no custom server); binds to `127.0.0.1` only.                                                                                                         |
+| [`@hall-of-wisdom/e2e`](apps/e2e)                                 | Phase 11.1 — Playwright end-to-end verification against a deterministic, fixture-adapter Hall Core (`src/fixture-server.ts`, built from Hall Core's own public package entry) and the real Hall Web dev server; never a real Claude Code/Codex process, never any subscription usage.                                                                                               |
 
 ## Running Hall Runner
 
@@ -865,6 +886,33 @@ authentication verified (steps 2–3 above), re-run step 9's `Invoke-RestMethod`
 mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's
 filesystem permissions." — this same text also appears in Hall Web's "Assign agent" dialog beneath
 the agent dropdown once Codex is selected.
+
+## Enabling multi-agent comparison (Phase 12)
+
+The comparison feature is off by default. Enable it by also passing `--comparison-root`, pointing at
+an already-existing directory that is **not** nested inside, and not an ancestor of, your
+`--workspace-root` — Hall Core checks this at startup and refuses to start otherwise:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "D:\HallOfWisdomComparisons" | Out-Null
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario success `
+  --web-origin "http://127.0.0.1:3000" `
+  --comparison-root "D:\HallOfWisdomComparisons"
+```
+
+With it set, Hall Web's nav bar gains a "Comparisons" link, and a Ready task's Kanban card gains a
+"Compare agents" action. **The source task must have its own "Working directory" set, pointing at a
+real, clean Git repository somewhere inside `--workspace-root`** — comparisons resolve their source
+repository from the task's working directory, never from `--workspace-root` directly (Phase 12.1), so
+a task with no working directory set is rejected at "Prepare" with a safe
+`COMPARISON_SOURCE_WORKING_DIRECTORY_REQUIRED` reason. `--workspace-root` itself need not be a Git
+repository and may be dirty. See
+[`docs/architecture/0012-controlled-agent-comparison.md`](docs/architecture/0012-controlled-agent-comparison.md)
+for the full design and its explicit restriction list (no auto-parallel execution, no AI judge, no
+automatic winner, no merge/commit/push).
 
 ---
 

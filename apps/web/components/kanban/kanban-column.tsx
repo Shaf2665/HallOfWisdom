@@ -17,6 +17,7 @@ export function KanbanColumn({
   onMove,
   onOpenAssign,
   onOpenFindAgent,
+  onOpenCompare,
   onStart,
   onCancel,
   onOpenDiscussion,
@@ -32,6 +33,7 @@ export function KanbanColumn({
   readonly onMove: (taskId: string, targetStatus: TaskStatus) => Promise<void>;
   readonly onOpenAssign: (record: TaskRecord) => void;
   readonly onOpenFindAgent: (record: TaskRecord) => void;
+  readonly onOpenCompare: (record: TaskRecord) => void;
   readonly onStart: (taskId: string) => Promise<void>;
   readonly onCancel: (record: TaskRecord) => Promise<void>;
   readonly onOpenDiscussion: (taskId: string) => Promise<void>;
@@ -95,6 +97,7 @@ export function KanbanColumn({
               onMove={onMove}
               onOpenAssign={onOpenAssign}
               onOpenFindAgent={onOpenFindAgent}
+              onOpenCompare={onOpenCompare}
               onStart={onStart}
               onCancel={onCancel}
               onOpenDiscussion={onOpenDiscussion}

@@ -10,6 +10,9 @@ import { registerAdapterRoutes } from "./routes/adapters.js";
 import { registerRoutingRoutes } from "./routes/routing.js";
 import { registerBoardRoutes } from "./routes/boards.js";
 import { registerBoardMessagesRoute } from "./routes/board-messages.js";
+import { registerComparisonRoutes } from "./routes/comparisons.js";
+import { registerComparisonCandidateEventsRoute } from "./routes/comparison-candidate-events.js";
+import type { ComparisonComposition } from "./composition/comparison-composition-root.js";
 import type { TaskOrchestrator } from "./tasks/task-orchestrator.js";
 import type { TaskStore } from "./tasks/task-store.js";
 import type { EventStore } from "./events/event-store.js";
@@ -29,6 +32,8 @@ export interface CreateHallCoreAppOptions {
   readonly messageBus: MessageBus;
   readonly registry: AgentRegistry;
   readonly limits: ServerLimits;
+  /** Phase 12 — present only when `--comparison-root` was supplied at startup; when absent, no comparison routes are registered at all. */
+  readonly comparison?: ComparisonComposition | undefined;
   /** The single browser origin allowed by CORS and WebSocket Origin validation. */
   readonly webOrigin?: string | undefined;
   /** Passed straight through to Fastify's `logger` option; pass `false` in tests to keep output quiet. */
@@ -63,7 +68,12 @@ export async function createHallCoreApp(
   // policy".
   await app.register(fastifyCors, {
     origin: [webOrigin],
-    methods: ["GET", "POST", "OPTIONS"],
+    // Phase 12 — "DELETE" added for comparison cleanup
+    // (`DELETE /api/v1/comparisons/:comparisonId`), the first endpoint in
+    // this codebase to use that method; every other mutating route uses
+    // POST. Without it, a browser blocks the request (and its CORS
+    // preflight) before it ever reaches this server.
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
     credentials: false,
     maxAge: CORS_PREFLIGHT_MAX_AGE_SECONDS,
@@ -101,6 +111,20 @@ export async function createHallCoreApp(
     maxBufferedBytes: options.limits.maxWebSocketMessageBytes * 16,
     allowedOrigin: webOrigin,
   });
+
+  if (options.comparison) {
+    registerComparisonRoutes(app, {
+      orchestrator: options.comparison.comparisonOrchestrator,
+      comparisonStore: options.comparison.comparisonStore,
+    });
+    registerComparisonCandidateEventsRoute(app, {
+      comparisonStore: options.comparison.comparisonStore,
+      eventStore: options.comparison.comparisonEventStore,
+      eventBus: options.comparison.comparisonEventBus,
+      maxBufferedBytes: options.limits.maxWebSocketMessageBytes * 16,
+      allowedOrigin: webOrigin,
+    });
+  }
 
   return app;
 }

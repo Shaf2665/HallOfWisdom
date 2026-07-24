@@ -8,6 +8,7 @@ const LINKS = [
   { href: "/board", label: "Kanban Board" },
   { href: "/boards", label: "Communication Boards" },
   { href: "/agents", label: "Agents" },
+  { href: "/comparisons", label: "Comparisons" },
 ] as const;
 
 /**
@@ -22,7 +23,7 @@ export function NavBar() {
   const pathname = usePathname();
 
   return (
-    <nav aria-label="Main" className="flex gap-1">
+    <nav aria-label="Main" className="flex flex-wrap gap-1">
       {LINKS.map((link) => {
         const isCurrent = pathname === link.href;
         return (

@@ -462,4 +462,61 @@ describe("TaskStore", () => {
       expect(store.getRevision("task-1")).toBe(2);
     });
   });
+
+  describe("working directory (Phase 12.1)", () => {
+    it("getWorkingDirectory returns undefined for a task no working directory was ever set for", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1"));
+      expect(store.getWorkingDirectory("task-1")).toBeUndefined();
+    });
+
+    it("setWorkingDirectory then getWorkingDirectory round-trips the raw string exactly", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1"));
+      store.setWorkingDirectory("task-1", "packages/protocol");
+      expect(store.getWorkingDirectory("task-1")).toBe("packages/protocol");
+    });
+
+    it("setWorkingDirectory with undefined is a no-op, not a clearing operation", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1"));
+      store.setWorkingDirectory("task-1", "packages/protocol");
+      store.setWorkingDirectory("task-1", undefined);
+      expect(store.getWorkingDirectory("task-1")).toBe("packages/protocol");
+    });
+
+    it("working directory is never a key on a public task snapshot from get() or list()", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1"));
+      store.setWorkingDirectory("task-1", "packages/protocol");
+      const snapshot = store.get("task-1");
+      expect(Object.keys(snapshot)).not.toContain("workingDirectory");
+      expect(JSON.stringify(snapshot)).not.toContain("packages/protocol");
+      const [listed] = store.list();
+      if (!listed) throw new Error("expected one task");
+      expect(JSON.stringify(listed)).not.toContain("packages/protocol");
+    });
+
+    it("setWorkingDirectory throws TaskNotFoundError for an unknown task", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      expect(() => {
+        store.setWorkingDirectory("does-not-exist", ".");
+      }).toThrow(TaskNotFoundError);
+    });
+
+    it("getWorkingDirectory throws TaskNotFoundError for an unknown task", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      expect(() => store.getWorkingDirectory("does-not-exist")).toThrow(TaskNotFoundError);
+    });
+
+    it("two different tasks resolve independently", () => {
+      const store = new TaskStore({ maxTasks: 10 });
+      store.add(makeRecord("task-1"));
+      store.add(makeRecord("task-2"));
+      store.setWorkingDirectory("task-1", "repo-a");
+      store.setWorkingDirectory("task-2", "repo-b");
+      expect(store.getWorkingDirectory("task-1")).toBe("repo-a");
+      expect(store.getWorkingDirectory("task-2")).toBe("repo-b");
+    });
+  });
 });

@@ -258,3 +258,81 @@ export class MessageBoardIdentityMismatchError extends HallCoreError {
     super(`Message boardId mismatch: expected "${expectedBoardId}", received "${actualBoardId}".`);
   }
 }
+
+/** Phase 12 — controlled multi-agent execution comparison. */
+export class ComparisonNotFoundError extends HallCoreError {
+  readonly code = "COMPARISON_NOT_FOUND";
+  readonly statusCode = 404;
+
+  constructor(comparisonId: string) {
+    super(`No comparison found with comparisonId "${comparisonId}".`);
+  }
+}
+
+export class ComparisonCandidateNotFoundError extends HallCoreError {
+  readonly code = "COMPARISON_CANDIDATE_NOT_FOUND";
+  readonly statusCode = 404;
+
+  constructor(comparisonId: string, candidateId: string) {
+    super(`No candidate "${candidateId}" found on comparison "${comparisonId}".`);
+  }
+}
+
+export class ComparisonStateConflictError extends HallCoreError {
+  readonly code = "COMPARISON_STATE_CONFLICT";
+  readonly statusCode = 409;
+
+  constructor(comparisonId: string, currentStatus: string, attemptedAction: string) {
+    super(
+      `Comparison "${comparisonId}" cannot be ${attemptedAction} while in status "${currentStatus}".`,
+    );
+  }
+}
+
+export class ComparisonCapacityReachedError extends HallCoreError {
+  readonly code = "COMPARISON_CAPACITY_REACHED";
+  readonly statusCode = 429;
+
+  constructor(limit: number) {
+    super(`The server has reached its configured comparison capacity (${String(limit)}).`);
+  }
+}
+
+/** Should be unreachable in practice (comparison IDs are freshly generated UUIDs); guards the store's own invariant. */
+export class DuplicateComparisonError extends HallCoreError {
+  readonly code = "INTERNAL_ERROR";
+  readonly statusCode = 500;
+
+  constructor(comparisonId: string) {
+    super(`A comparison with comparisonId "${comparisonId}" already exists.`);
+  }
+}
+
+/** The source task referenced by a comparison-create request does not exist. Distinct from `TaskNotFoundError` for clarity in comparison-specific error handling, but same HTTP semantics. */
+export class ComparisonSourceTaskNotFoundError extends HallCoreError {
+  readonly code = "COMPARISON_SOURCE_TASK_NOT_FOUND";
+  readonly statusCode = 404;
+
+  constructor(taskId: string) {
+    super(`No task found with taskId "${taskId}" to compare against.`);
+  }
+}
+
+export class ComparisonAdapterNotFoundError extends HallCoreError {
+  readonly code = "COMPARISON_ADAPTER_NOT_FOUND";
+  readonly statusCode = 404;
+
+  constructor(adapterId: string) {
+    super(`No adapter is registered with adapterId "${adapterId}".`);
+  }
+}
+
+/** The candidate's adapter did not report itself available, or no longer satisfies the comparison's snapshotted requirements, at the moment `POST .../start` re-checked it. */
+export class ComparisonCandidateNotEligibleError extends HallCoreError {
+  readonly code = "COMPARISON_CANDIDATE_NOT_ELIGIBLE";
+  readonly statusCode = 409;
+
+  constructor(adapterId: string, reason: string) {
+    super(`Adapter "${adapterId}" is not currently eligible to start: ${reason}`);
+  }
+}

@@ -21,7 +21,7 @@ import {
   startTask,
   transitionTask,
 } from "../../lib/api-client";
-import type { CreateTaskResponse, TaskRecord } from "../../lib/api-schemas";
+import type { AgentComparisonRecord, CreateTaskResponse, TaskRecord } from "../../lib/api-schemas";
 import { useKanbanTasks } from "../../hooks/use-kanban-tasks";
 import {
   COLUMN_DEFINITIONS,
@@ -34,6 +34,7 @@ import {
 } from "../../lib/kanban";
 import { AssignDialog } from "./assign-dialog";
 import { BacklogTaskForm } from "./backlog-task-form";
+import { CompareAgentsDialog } from "./compare-agents-dialog";
 import { KanbanColumn } from "./kanban-column";
 import { KanbanFiltersBar } from "./kanban-filters";
 import { RoutingDialog } from "./routing-dialog";
@@ -76,6 +77,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
   const [pendingTaskIds, setPendingTaskIds] = useState<ReadonlySet<string>>(new Set());
   const [assigningRecord, setAssigningRecord] = useState<TaskRecord | null>(null);
   const [findingAgentRecord, setFindingAgentRecord] = useState<TaskRecord | null>(null);
+  const [comparingRecord, setComparingRecord] = useState<TaskRecord | null>(null);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
   // The task a card should reclaim focus for once it (re)mounts — see
@@ -244,6 +246,21 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
     setFindingAgentRecord(null);
   }, []);
 
+  const handleCloseCompare = useCallback(() => {
+    setComparingRecord(null);
+  }, []);
+
+  /**
+   * Unlike assign/route/move, a successful comparison creation navigates
+   * away from the board entirely (to the new comparison's detail page) —
+   * so, mirroring `handleOpenDiscussion`'s reasoning, there is nothing on
+   * this page left to `refresh()` or restore focus to.
+   */
+  function handleCompared(created: AgentComparisonRecord): void {
+    setComparingRecord(null);
+    router.push(`/comparisons/${encodeURIComponent(created.comparisonId)}`);
+  }
+
   function handleCreated(created: CreateTaskResponse): void {
     setAnnouncement(`${created.task.title} added to Backlog.`);
     void refresh();
@@ -366,6 +383,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
                 onMove={handleMove}
                 onOpenAssign={setAssigningRecord}
                 onOpenFindAgent={setFindingAgentRecord}
+                onOpenCompare={setComparingRecord}
                 onStart={handleStart}
                 onCancel={handleCancel}
                 onOpenDiscussion={handleOpenDiscussion}
@@ -401,6 +419,15 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
             void handleRouted(updated);
           }}
           onClose={handleCloseFindAgent}
+        />
+      ) : null}
+
+      {comparingRecord ? (
+        <CompareAgentsDialog
+          baseUrl={baseUrl}
+          record={comparingRecord}
+          onCreated={handleCompared}
+          onClose={handleCloseCompare}
         />
       ) : null}
     </div>

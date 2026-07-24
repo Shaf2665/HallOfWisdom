@@ -16,6 +16,17 @@ export interface ServerLimits {
   readonly maxBoards: number;
   readonly maxMessagesPerBoard: number;
   readonly maxSubscribersPerBoard: number;
+  /** Phase 12 — independent of `maxTasks`: comparisons are a separate aggregate with their own capacity budget. */
+  readonly maxComparisons: number;
+  /** Per-candidate, not per-comparison (each comparison has exactly two candidates, each with its own event stream). */
+  readonly maxEventsPerComparisonCandidate: number;
+  readonly maxSubscribersPerComparisonCandidate: number;
+  /** Bounded timeout for every `git` invocation Phase 12 issues (worktree create/remove/prune, status/diff/rev-parse). */
+  readonly gitCommandTimeoutMs: number;
+  readonly maxComparisonChangedFiles: number;
+  readonly maxComparisonDiffChars: number;
+  /** Bounded wait, during comparison cleanup, for an actively running (or just-finished) candidate to fully terminate before its worktree is removed. */
+  readonly comparisonCleanupGraceTimeoutMs: number;
 }
 
 /**
@@ -33,6 +44,13 @@ export const DEFAULT_LIMITS: ServerLimits = {
   maxBoards: 500,
   maxMessagesPerBoard: 1000,
   maxSubscribersPerBoard: 20,
+  maxComparisons: 100,
+  maxEventsPerComparisonCandidate: 2000,
+  maxSubscribersPerComparisonCandidate: 20,
+  gitCommandTimeoutMs: 30_000,
+  maxComparisonChangedFiles: 500,
+  maxComparisonDiffChars: 200_000,
+  comparisonCleanupGraceTimeoutMs: 10_000,
 };
 
 /** Bounded wait for active runs to reach a terminal state during graceful shutdown. */

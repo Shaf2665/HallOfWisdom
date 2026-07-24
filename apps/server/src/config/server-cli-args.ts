@@ -26,6 +26,13 @@ const serverCliOptionsSchema = z
     // set this from Hall Web, a task, or any REST request body; see
     // docs/architecture/0010-paperclip-compatible-codex-mode.md.
     enableCodexTrustedLocal: z.boolean().default(false),
+    // Phase 12 — optional. When omitted, the multi-agent comparison
+    // feature is not composed at all (no comparison routes, no
+    // comparison store): comparisons are additive and every existing
+    // startup command remains valid without this flag. Never settable
+    // via any client input — process-startup-only, exactly like
+    // `--workspace-root`.
+    comparisonRoot: boundedNonBlankString(4096).optional(),
   })
   .strict();
 
@@ -102,6 +109,7 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
         "mock-step-delay-ms": { type: "string" },
         "web-origin": { type: "string" },
         "enable-codex-trusted-local": { type: "boolean" },
+        "comparison-root": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -124,6 +132,9 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
     ...(values["enable-codex-trusted-local"] === undefined
       ? {}
       : { enableCodexTrustedLocal: values["enable-codex-trusted-local"] }),
+    ...(values["comparison-root"] === undefined
+      ? {}
+      : { comparisonRoot: values["comparison-root"] }),
   };
 
   const result = serverCliOptionsSchema.safeParse(candidate);
