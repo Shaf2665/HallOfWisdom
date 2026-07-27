@@ -1,5 +1,5 @@
 import { expect, type Page, test } from "@playwright/test";
-import { E2E_SOURCE_REPO_RELATIVE_DIR } from "../src/fixture-server.js";
+import { E2E_SOURCE_REPO_RELATIVE_DIR } from "../src/fixture-constants.js";
 
 /**
  * Phase 12 E2E — the multi-agent comparison workflow, against the

@@ -18,6 +18,7 @@ import {
 } from "@hall-of-wisdom/hall-core";
 import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import { createAllFixtureAdapters, createFixtureComparisonAdapter } from "./fixture-adapters.js";
+import { E2E_SOURCE_REPO_RELATIVE_DIR } from "./fixture-constants.js";
 
 function git(args: readonly string[], cwd: string): void {
   execFileSync("git", args, {
@@ -26,9 +27,6 @@ function git(args: readonly string[], cwd: string): void {
     windowsHide: true,
   });
 }
-
-/** Relative to `workspaceRoot` — the nested, independent, clean Git repository comparison tasks point their working directory at. See `initFixtureWorkspace`'s doc comment. */
-export const E2E_SOURCE_REPO_RELATIVE_DIR = "source-repo";
 
 function initGitRepo(repoPath: string, readmeContent: string): void {
   git(["init", "--quiet"], repoPath);
