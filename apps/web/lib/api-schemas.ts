@@ -51,6 +51,52 @@ export const healthResponseSchema = z
   .strict();
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
+/**
+ * Phase 13 — `GET /api/v1/system/storage`. Mirrors the server's own
+ * bounded, path-free response shape (`routes/system.ts`): `schemaVersion`/
+ * `previousShutdown`/`recovery` are `null` in ephemeral (`"in-memory"`)
+ * mode, since there is nothing durable to report.
+ */
+const worktreeHealthCountsSchema = z
+  .object({
+    healthy: z.number(),
+    interrupted: z.number(),
+    workspace_missing: z.number(),
+    workspace_unverified: z.number(),
+    cleanup_required: z.number(),
+    unsafe_path: z.number(),
+  })
+  .strict();
+
+const recoverySummarySchema = z
+  .object({
+    tasksScanned: z.number(),
+    taskEventProjectionsRepaired: z.number(),
+    taskTerminalOutcomesReplayed: z.number(),
+    interruptedTaskRunCount: z.number(),
+    comparisonsScanned: z.number(),
+    interruptedPreparationCount: z.number(),
+    interruptedCleanupCount: z.number(),
+    comparisonEventProjectionsRepaired: z.number(),
+    comparisonTerminalOutcomesReplayed: z.number(),
+    interruptedCandidateRunCount: z.number(),
+    worktreeHealthCounts: worktreeHealthCountsSchema,
+    orphanWorktreeCount: z.number(),
+  })
+  .strict();
+
+export const systemStorageResponseSchema = z
+  .object({
+    mode: z.enum(["durable", "in-memory"]),
+    ready: z.boolean(),
+    schemaVersion: z.number().nullable(),
+    startedAt: z.string(),
+    previousShutdown: z.enum(["clean", "unclean", "first_start"]).nullable(),
+    recovery: recoverySummarySchema.nullable(),
+  })
+  .strict();
+export type SystemStorageResponse = z.infer<typeof systemStorageResponseSchema>;
+
 const terminalEventTypeSchema = z.enum(["run.completed", "run.failed", "run.cancelled"]);
 
 /**

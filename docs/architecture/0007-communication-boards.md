@@ -132,9 +132,11 @@ uses for task events:
   `sequence` + `messageId`, both stable and safe to key on.
 - A slow client is disconnected (`4504`), never left silently missing frames.
 - Reconnect uses `afterSequence=<last contiguous sequence accepted>`.
-- Replay only ever works within the same Hall Core process's lifetime — a restart clears
-  `BoardStore`/`MessageStore` entirely (see "In-memory storage, restart, and data loss" below).
-  There is no cross-process replay claim anywhere in this design.
+- By default, replay only ever works within the same Hall Core process's lifetime — a restart
+  clears `BoardStore`/`MessageStore` entirely (see "In-memory storage, restart, and data loss"
+  below). With Phase 13's optional durable mode (`--data-dir`), boards and messages instead survive
+  a restart, and replay works across the process boundary too — but there is still no cross-process
+  claim beyond that: durability is opt-in, not a default guarantee this design makes.
 
 ## Shutdown
 
@@ -145,14 +147,17 @@ policy. See `0004-hall-core-server.md`, "Graceful shutdown".
 
 ## In-memory storage, restart, and data loss
 
-`BoardStore` and `MessageStore` are plain in-memory maps, exactly like `TaskStore`/`EventStore`
-(`0004-hall-core-server.md`, "In-memory storage limitations"). A Hall Core restart re-seeds a fresh
-General board (a new `createdAt`, zero messages) and discards every task discussion board and every
-message that existed in the old process — this was verified live: a message posted to General,
-followed by a process restart, followed by `GET /boards` and `GET /boards/hall.general/messages`
-against the new process, shows a freshly seeded General board with `messageCount: 0` and an empty
-message list. There is no persistence in this phase, and nothing about Communication Boards implies
-otherwise.
+`BoardStore` and `MessageStore` are plain in-memory maps by default, exactly like
+`TaskStore`/`EventStore` (`0004-hall-core-server.md`, "In-memory storage limitations"). In this
+default mode, a Hall Core restart re-seeds a fresh General board (a new `createdAt`, zero messages)
+and discards every task discussion board and every message that existed in the old process — this
+was verified live: a message posted to General, followed by a process restart, followed by `GET
+/boards` and `GET /boards/hall.general/messages` against the new process, shows a freshly seeded
+General board with `messageCount: 0` and an empty message list. Nothing about Communication Boards
+implies otherwise on its own. Phase 13 added an opt-in exception: with `--data-dir` set, both
+stores are SQLite-backed instead, the General board (and every message on it) survives a restart
+verbatim, and `BoardStore.seedGeneralBoard` upserts idempotently rather than re-seeding — see
+[`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md).
 
 ## The web page (`/boards`)
 
@@ -231,12 +236,15 @@ contiguity for late joiners?) — a real design question this phase does not nee
 the board/message model itself. Reactions, nested replies, and attachments each add their own
 schema, storage, and UI surface for a flat local-discussion prototype that has no requirement for
 any of them yet. Notifications and search indexing both presuppose data living longer than one Hall
-Core process lifetime, which contradicts this phase's explicit in-memory-only scope.
+Core process lifetime by default — Phase 13's opt-in durable mode makes that possible for board
+data, but this phase itself never assumed it, and notifications/search indexing remain unbuilt
+regardless of storage backend.
 
-## Why authentication and persistence remain deferred
+## Why authentication and persistence remained deferred at this phase
 
-Unchanged from every prior phase's reasoning (`0004-hall-core-server.md`, "Why authentication is
-deferred" and "Why persistence is deferred"): nothing in this system is reachable from outside
-`127.0.0.1`, and introducing a database now would couple this phase to schema/migration concerns
-unrelated to proving the communication model works. Phase 9 (per `0001-initial-architecture.md`'s
-phase plan) is where persistence enters, if and when it does.
+Unchanged from this phase's own original reasoning (`0004-hall-core-server.md`, "Why authentication
+is deferred"): nothing in this system is reachable from outside `127.0.0.1`. Persistence itself is
+no longer deferred as of Phase 13 (opt-in, `--data-dir`) — see
+[`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md) — but adding
+it was intentionally out of scope for this phase, to avoid coupling the communication-board model to
+schema/migration concerns unrelated to proving it worked.

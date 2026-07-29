@@ -193,10 +193,11 @@ only ever called from `TaskOrchestrator`'s un-awaited background execution, afte
 drives the deterministic capacity/invariant-failure workflow described in "Event-capacity terminal
 handling" below, which stops the run and lands the task in `failed` with a stable, safe failure
 code. Fastify's own body-limit error (`413`) and WebSocket `maxPayload` rejection remain the two
-limits enforced before any task-specific state is touched at all. There is no persistence:
-restarting the process discards all tasks and events, which is an explicit, accepted prototype
-limitation (see "Why persistence is deferred" below) — the event-capacity handling in this section
-makes a _running_ task terminate deterministically, it does not make Hall Core survive a restart.
+limits enforced before any task-specific state is touched at all. By default there is still no
+persistence: restarting the process discards all tasks and events unless the operator opts into
+durable mode (see "Persistence and restart recovery (Phase 13)" below) — the event-capacity
+handling in this section makes a _running_ task terminate deterministically either way; it does not
+by itself make Hall Core survive a restart.
 
 ## Event-capacity terminal handling
 
@@ -485,11 +486,18 @@ Nothing in this phase is reachable from outside `127.0.0.1`. A local-only protot
 local-only coding agent has no unauthenticated network boundary to protect yet; adding
 authentication now would be complexity with no corresponding threat this phase actually faces.
 
-## Why persistence is deferred
+## Persistence and restart recovery (Phase 13)
 
-`TaskStore` and `EventStore` are deliberately plain in-memory `Map`s. Introducing Prisma/SQLite now
-would couple this phase to schema and migration concerns unrelated to proving the task/event model
-itself works. Phase 9 (per `0001-initial-architecture.md`'s phase plan) is where persistence enters.
+`TaskStore` and `EventStore` (and every other store) were deliberately plain in-memory `Map`s
+through Phase 12 — introducing SQLite earlier would have coupled those phases to schema and
+migration concerns unrelated to proving the task/event model itself worked. Phase 13 adds an
+**optional** SQLite-backed durable mode, off by default, opted into with `--data-dir`: the
+in-memory `TaskStore`/`EventStore`/`BoardStore`/`MessageStore`/`ComparisonStore` and their
+SQLite-backed siblings implement the same port interface, so every domain/route/orchestrator type
+in this document is unchanged regardless of which backend composition selects. See
+[`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md) for the full
+design — the persistence module itself, the restart-recovery sequence, and the new `GET
+/api/v1/system/storage` route.
 
 ## The web interface (Phases 6, 7, and 8)
 

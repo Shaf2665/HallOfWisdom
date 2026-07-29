@@ -20,7 +20,7 @@ import {
   InvalidRequestError,
 } from "../errors/app-error.js";
 import type { AgentComparisonRecord, ComparisonCandidateRecord } from "./comparison-record.js";
-import type { ComparisonStore } from "./comparison-store.js";
+import type { ComparisonStorePort } from "./comparison-store-port.js";
 import type { GitWorktreeManager } from "./git-worktree-manager.js";
 import {
   GitWorktreeError,
@@ -36,11 +36,12 @@ import {
 import { captureResultEvidence, type CaptureResultEvidenceOptions } from "./result-evidence.js";
 import { evaluateCandidateEligibility } from "../routing/routing-policy.js";
 import { detectRoutingCandidates } from "../routing/candidate-detection.js";
-import type { EventStore } from "../events/event-store.js";
+import type { NormalizedEventStorePort } from "../events/event-store-port.js";
 import type { EventBus } from "../events/event-bus.js";
 import { EventStoreError } from "../events/event-store-errors.js";
 import { buildInfrastructureFailureEvent } from "../events/synthetic-events.js";
-import type { TaskStore } from "../tasks/task-store.js";
+import type { TaskStorePort } from "../tasks/task-store-port.js";
+import type { ComparisonInternalPathsPort } from "./comparison-internal-paths-port.js";
 import {
   createComparisonRequestSchema,
   setComparisonPreferenceRequestSchema,
@@ -54,9 +55,9 @@ function formatUnknownError(error: unknown): string {
 }
 
 export interface ComparisonOrchestratorOptions {
-  readonly comparisonStore: ComparisonStore;
-  readonly taskStore: TaskStore;
-  readonly eventStore: EventStore;
+  readonly comparisonStore: ComparisonStorePort;
+  readonly taskStore: TaskStorePort;
+  readonly eventStore: NormalizedEventStorePort;
   readonly eventBus: EventBus;
   readonly registry: AgentRegistry;
   readonly gitWorktreeManager: GitWorktreeManager;
@@ -72,6 +73,15 @@ export interface ComparisonOrchestratorOptions {
   /** Bounded wait, when cleanup begins, for any still-running candidate to actually terminate (not merely be abort-signalled) before its worktree is removed — see `docs/architecture/0012-controlled-agent-comparison.md`, "Cleanup safety." */
   readonly cleanupGraceTimeoutMs: number;
   readonly onExecutionError?: ((candidateId: string, error: unknown) => void) | undefined;
+  /**
+   * Durable-mode-only. When supplied, every write/delete this class already
+   * makes to its own private `#sourceRepositoryPaths`/`#worktreePaths` maps
+   * is mirrored here too, so those facts survive a restart — see
+   * `comparison-internal-paths-port.ts`'s doc comment. `undefined` in
+   * ephemeral mode (the default), which leaves this class's behavior
+   * byte-identical to before Phase 13.
+   */
+  readonly internalPaths?: ComparisonInternalPathsPort | undefined;
 }
 
 /**
@@ -94,9 +104,9 @@ export interface ComparisonOrchestratorOptions {
  * map, exactly like `TaskOrchestrator#pendingWorkingDirectories`.
  */
 export class ComparisonOrchestrator {
-  readonly #comparisonStore: ComparisonStore;
-  readonly #taskStore: TaskStore;
-  readonly #eventStore: EventStore;
+  readonly #comparisonStore: ComparisonStorePort;
+  readonly #taskStore: TaskStorePort;
+  readonly #eventStore: NormalizedEventStorePort;
   readonly #eventBus: EventBus;
   readonly #registry: AgentRegistry;
   readonly #gitWorktreeManager: GitWorktreeManager;
@@ -104,6 +114,7 @@ export class ComparisonOrchestrator {
   readonly #resultEvidenceOptions: CaptureResultEvidenceOptions;
   readonly #cleanupGraceTimeoutMs: number;
   readonly #onExecutionError: ((candidateId: string, error: unknown) => void) | undefined;
+  readonly #internalPaths: ComparisonInternalPathsPort | undefined;
 
   readonly #worktreePaths = new Map<string, string>();
   /**
@@ -144,6 +155,35 @@ export class ComparisonOrchestrator {
     this.#resultEvidenceOptions = options.resultEvidenceOptions;
     this.#cleanupGraceTimeoutMs = options.cleanupGraceTimeoutMs;
     this.#onExecutionError = options.onExecutionError;
+    this.#internalPaths = options.internalPaths;
+  }
+
+  /**
+   * Restores in-memory path tracking for comparisons that survived a
+   * restart — called at most once, by composition/`restart-recovery.ts`,
+   * before the server accepts requests. Only meaningful in durable mode
+   * (`#internalPaths` is what `restart-recovery.ts` reads `listAll()` from
+   * in the first place); calling this in ephemeral mode would simply have
+   * nothing to pass. Never overwrites an existing in-flight entry — this
+   * runs once at startup, when `#sourceRepositoryPaths`/`#worktreePaths`
+   * are still empty.
+   */
+  rehydrateInternalPaths(paths: {
+    readonly sourceRepositoryPaths: readonly {
+      readonly comparisonId: string;
+      readonly sourceRepositoryPath: string;
+    }[];
+    readonly worktreePaths: readonly {
+      readonly candidateId: string;
+      readonly worktreePath: string;
+    }[];
+  }): void {
+    for (const { comparisonId, sourceRepositoryPath } of paths.sourceRepositoryPaths) {
+      this.#sourceRepositoryPaths.set(comparisonId, sourceRepositoryPath);
+    }
+    for (const { candidateId, worktreePath } of paths.worktreePaths) {
+      this.#worktreePaths.set(candidateId, worktreePath);
+    }
   }
 
   /** Creates a `draft` comparison: snapshots the source task's title/description/priority/requirements at this moment and never re-reads it again — see `docs/architecture/0012-controlled-agent-comparison.md`, "Source task snapshot policy." Spends no filesystem or Git work. */
@@ -233,6 +273,7 @@ export class ComparisonOrchestrator {
     // Recorded only once we're past every rejection check above — kept
     // alive for the whole comparison lifetime; see the field's doc comment.
     this.#sourceRepositoryPaths.set(comparisonId, repositoryRoot);
+    this.#internalPaths?.setSourceRepositoryPath(comparisonId, repositoryRoot);
 
     const detected = await detectRoutingCandidates(this.#registry);
     const trustByAdapterId = new Map(
@@ -248,11 +289,13 @@ export class ComparisonOrchestrator {
           worktreeId: candidate.candidateId,
         });
         this.#worktreePaths.set(candidate.candidateId, worktreePath);
+        this.#internalPaths?.setWorktreePath(candidate.candidateId, comparisonId, worktreePath);
         createdWorktrees.push({ candidateId: candidate.candidateId, worktreePath });
       }
     } catch (error) {
       for (const created of createdWorktrees) {
         this.#worktreePaths.delete(created.candidateId);
+        this.#internalPaths?.deleteWorktreePath(created.candidateId);
         await this.#tryRemoveWorktree(repositoryRoot, created.worktreePath);
       }
       const failedCandidateId =
@@ -480,6 +523,7 @@ export class ComparisonOrchestrator {
       try {
         await this.#gitWorktreeManager.removeWorktree(repositoryRoot, worktreePath);
         this.#worktreePaths.delete(candidate.candidateId);
+        this.#internalPaths?.deleteWorktreePath(candidate.candidateId);
       } catch (error) {
         console.error(
           `Failed to remove worktree for candidate "${candidate.candidateId}": ${formatUnknownError(error)}`,
@@ -495,6 +539,7 @@ export class ComparisonOrchestrator {
       );
     }
     this.#sourceRepositoryPaths.delete(comparisonId);
+    this.#internalPaths?.deleteSourceRepositoryPath(comparisonId);
     return this.#comparisonStore.setCleanupCompleted(comparisonId);
   }
 

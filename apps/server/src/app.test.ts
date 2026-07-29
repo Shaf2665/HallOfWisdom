@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION } from "@hall-of-wisdom/protocol";
 import { buildTestApp } from "./test-support.js";
+import { OwnershipLostError } from "./persistence/persistence-errors.js";
 
 describe("createHallCoreApp", () => {
   let tempRoot: string;
@@ -55,6 +56,46 @@ describe("createHallCoreApp", () => {
     expect(body.error.code).toBe("INTERNAL_ERROR");
     expect(body.error.message).not.toContain("boom");
     expect(JSON.stringify(body)).not.toMatch(/at .*\.ts:\d+:\d+/);
+    void harness;
+    await app.close();
+  });
+
+  // Phase 13.2, kickoff §10 — a mutation rejected by the durable
+  // ownership fence maps to a dedicated bounded 503, never an unmapped
+  // generic 500, and (like every other error path here) never leaks a
+  // path or raw internal detail.
+  it("returns a bounded 503 with code OWNERSHIP_LOST when a route throws OwnershipLostError", async () => {
+    const { app, harness } = await buildTestApp({ workspaceRoot: tempRoot });
+    app.get("/__ownership-lost", () => {
+      throw new OwnershipLostError();
+    });
+    const response = await app.inject({ method: "GET", url: "/__ownership-lost" });
+    expect(response.statusCode).toBe(503);
+    const body = response.json<{ error: { code: string; message: string } }>();
+    expect(body.error.code).toBe("OWNERSHIP_LOST");
+    expect(JSON.stringify(body)).not.toContain(tempRoot);
+    void harness;
+    await app.close();
+  });
+
+  // Phase 13.2, kickoff §3/§10 — "health must not report ready" once an
+  // instance has lost durable ownership (or is otherwise mid-controlled-
+  // shutdown). `readiness` is the same mutable ref `server.ts` flips as
+  // the first step of its shared shutdown routine.
+  it("GET /api/v1/health returns 503/not_ready once the shared readiness ref is flipped false", async () => {
+    const readiness = { ready: true };
+    const { app, harness } = await buildTestApp({ workspaceRoot: tempRoot, readiness });
+
+    const beforeResponse = await app.inject({ method: "GET", url: "/api/v1/health" });
+    expect(beforeResponse.statusCode).toBe(200);
+    expect(beforeResponse.json<{ status: string }>().status).toBe("ok");
+
+    readiness.ready = false;
+
+    const afterResponse = await app.inject({ method: "GET", url: "/api/v1/health" });
+    expect(afterResponse.statusCode).toBe(503);
+    expect(afterResponse.json<{ status: string }>().status).toBe("not_ready");
+
     void harness;
     await app.close();
   });

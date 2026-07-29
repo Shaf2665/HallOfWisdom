@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { ProtocolValidationError } from "@hall-of-wisdom/protocol";
 import { HallCoreError, InvalidRequestError } from "./app-error.js";
+import { OwnershipLostError } from "../persistence/persistence-errors.js";
 
 interface ErrorResponseBody {
   readonly error: {
@@ -31,6 +32,19 @@ function sendError(
  */
 export function installErrorHandler(app: FastifyInstance): void {
   app.setErrorHandler((error: unknown, request: FastifyRequest, reply: FastifyReply) => {
+    // Phase 13.2 — a mutation rejected by the durable ownership fence
+    // (`transaction.ts`) because this instance has been displaced by
+    // another. `error.message` is already bounded and path-free (see
+    // `OwnershipLostError`'s own doc comment), but a dedicated bounded
+    // code/status is still better than falling through to a generic
+    // `500 INTERNAL_ERROR` — this is a "this instance can no longer
+    // accept writes" condition, not an unexpected internal failure. See
+    // this phase's kickoff §10.
+    if (error instanceof OwnershipLostError) {
+      sendError(reply, 503, "OWNERSHIP_LOST", error.message);
+      return;
+    }
+
     if (error instanceof InvalidRequestError) {
       sendError(reply, error.statusCode, error.code, error.message, error.details);
       return;

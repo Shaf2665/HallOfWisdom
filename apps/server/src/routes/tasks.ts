@@ -1,10 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import type { TaskOrchestrator } from "../tasks/task-orchestrator.js";
-import type { TaskStore } from "../tasks/task-store.js";
+import type { TaskStorePort } from "../tasks/task-store-port.js";
 
 export interface TaskRoutesDeps {
   readonly orchestrator: TaskOrchestrator;
-  readonly taskStore: TaskStore;
+  readonly taskStore: TaskStorePort;
 }
 
 interface TaskIdParams {

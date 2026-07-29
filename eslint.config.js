@@ -22,6 +22,7 @@ export default defineConfig(
       "**/node_modules/**",
       "**/verify-package-entry.mjs",
       "**/.next/**",
+      "**/.next-durable-restart-e2e/**",
       "**/next-env.d.ts",
     ],
   },

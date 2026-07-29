@@ -6,6 +6,8 @@ dist/
 build/
 *.tsbuildinfo
 .next/
+.next-durable-restart-e2e/
+apps/web/tsconfig.durable-restart-e2e.json
 next-env.d.ts
 
 # Test / coverage

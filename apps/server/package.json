@@ -24,6 +24,7 @@
     "build": "tsc -p tsconfig.build.json",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:process": "vitest run --config vitest.process.config.ts",
     "dev": "tsc -p tsconfig.build.json && node dist/server.js",
     "verify:package-entry": "node verify-package-entry.mjs"
   },

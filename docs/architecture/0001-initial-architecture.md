@@ -109,7 +109,8 @@ hall-of-wisdom/
                      0007-communication-boards.md, 0008-claude-code-adapter.md,
                      0009-codex-adapter.md, 0010-paperclip-compatible-codex-mode.md,
                      0011-agent-capabilities-trust-and-routing.md,
-                     0012-controlled-agent-comparison.md
+                     0012-controlled-agent-comparison.md,
+                     0013-durable-persistence-and-recovery.md
   AGENTS.md
   CLAUDE.md
   README.md
@@ -117,12 +118,15 @@ hall-of-wisdom/
   .prettierrc.json, .editorconfig, .gitattributes, .gitignore
 ```
 
-No `integrations/` directory exists yet, and no Git-related or database packages exist yet — the
-remaining packages listed in "Planned module structure" above are created only when the phase that
-needs them arrives. `database/` was originally slotted for "Phase 9" in that planned structure; the
-user's actual Phase 9 kickoff redirected this phase slot to the Claude Code adapter instead (brought
-forward from its originally-planned Phase 12/14) — the database/Prisma work remains unscheduled, not
-cancelled.
+No `integrations/` directory exists yet, and no Git-related or standalone database package exists
+yet — the remaining packages listed in "Planned module structure" above are created only when the
+phase that needs them arrives. `database/` was originally slotted for "Phase 9" in that planned
+structure; the user's actual Phase 9 kickoff redirected this phase slot to the Claude Code adapter
+instead (brought forward from its originally-planned Phase 12/14) — a dedicated, shared
+`database/` package (e.g. Prisma-backed, used by more than one app) remains unscheduled, not
+cancelled. Phase 13 added optional, restart-durable SQLite persistence, but scoped narrowly inside
+`apps/server/src/persistence/` via Node's built-in `node:sqlite`, not as a new workspace package —
+see [`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md).
 
 ## The Hall protocol (`@hall-of-wisdom/protocol`, Phase 2)
 
@@ -225,7 +229,8 @@ future CEO Agent or agent-to-agent messaging will use.
   Core vs. Hall Runner.
 - Event ordering and deduplication (by `sequence`) are now implemented in Hall Core's `EventStore`
   (Phase 5) — see `0004-hall-core-server.md`, "Event sequencing and duplicate policy". Persistence
-  itself remains unbuilt (in-memory only); Phase 9 is where that is planned to land.
+  across a restart is now implemented too, but as an opt-in mode (Phase 13, `--data-dir`, off by
+  default) rather than always-on — see `0013-durable-persistence-and-recovery.md`.
 - `AgentTaskInput.workingDirectory` path validation is now implemented in Hall Runner (Phase 4) —
   see `0003-hall-runner-boundary.md`.
 - The secret-redaction layer for adapter-captured output (failure details, detection diagnostics)

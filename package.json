@@ -16,7 +16,8 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --check .",
     "format:write": "prettier --write .",
-    "test": "pnpm -r run test"
+    "test": "pnpm -r run test",
+    "verify:process-recovery": "pnpm --filter @hall-of-wisdom/hall-core run build && pnpm --filter @hall-of-wisdom/hall-core run test:process"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",

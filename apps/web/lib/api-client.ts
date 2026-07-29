@@ -18,6 +18,7 @@ import {
   listTasksResponseSchema,
   routeAndAssignResponseSchema,
   routingAnalysisResponseSchema,
+  systemStorageResponseSchema,
   taskRecordSchema,
   type AgentComparisonRecord,
   type CancelComparisonCandidateResponse,
@@ -32,6 +33,7 @@ import {
   type ListComparisonsResponse,
   type RouteAndAssignResponse,
   type RoutingAnalysisResponse,
+  type SystemStorageResponse,
   type TaskRecord,
   type TaskRequirements,
 } from "./api-schemas";
@@ -217,6 +219,18 @@ async function request<S extends z.ZodTypeAny>(
 
 export function getHealth(baseUrl: string, options: RequestOptions = {}): Promise<HealthResponse> {
   return request(`${baseUrl}/api/v1/health`, { method: "GET" }, healthResponseSchema, options);
+}
+
+export function getSystemStorage(
+  baseUrl: string,
+  options: RequestOptions = {},
+): Promise<SystemStorageResponse> {
+  return request(
+    `${baseUrl}/api/v1/system/storage`,
+    { method: "GET" },
+    systemStorageResponseSchema,
+    options,
+  );
 }
 
 export function listAdapters(

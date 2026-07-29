@@ -2,13 +2,13 @@ import type { FastifyInstance } from "fastify";
 import type { WebSocket } from "@fastify/websocket";
 import { communicationMessageSchema, type CommunicationMessage } from "@hall-of-wisdom/protocol";
 import { MessageSubscriberLimitReachedError, type MessageBus } from "../boards/message-bus.js";
-import type { MessageStore } from "../boards/message-store.js";
-import type { BoardStore } from "../boards/board-store.js";
+import type { MessageStorePort } from "../boards/message-store-port.js";
+import type { BoardStorePort } from "../boards/board-store-port.js";
 import { parseWebOrigin } from "../config/web-origin.js";
 
 export interface BoardMessagesRouteDeps {
-  readonly boardStore: BoardStore;
-  readonly messageStore: MessageStore;
+  readonly boardStore: BoardStorePort;
+  readonly messageStore: MessageStorePort;
   readonly messageBus: MessageBus;
   /** A client is disconnected (not silently skipped) once its `bufferedAmount` exceeds this many bytes. */
   readonly maxBufferedBytes: number;

@@ -391,10 +391,12 @@ live-streaming surface.
 ## In-memory limitations
 
 Nothing about deferred tasks changes Hall Core's storage model: `TaskStore` remains a bounded
-in-memory map (`docs/architecture/0004-hall-core-server.md`, "In-memory storage limitations"). A
-Hall Core restart discards backlog/ready/assigned planning tasks exactly as it discards running or
-completed ones — there is no persistence in this phase, and the Kanban board does not imply
-otherwise.
+in-memory map by default (`docs/architecture/0004-hall-core-server.md`, "In-memory storage
+limitations"). A Hall Core restart discards backlog/ready/assigned planning tasks exactly as it
+discards running or completed ones — unless the operator opted into Phase 13's durable mode
+(`--data-dir`), in which case a planning task's status survives a restart exactly like a terminal
+one does; nothing about how the Kanban board itself renders or polls changes either way — see
+[`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md).
 
 ## Why Agent Review and Human Approval are visible but not automated
 

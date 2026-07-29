@@ -55,3 +55,6 @@ export const DEFAULT_LIMITS: ServerLimits = {
 
 /** Bounded wait for active runs to reach a terminal state during graceful shutdown. */
 export const SHUTDOWN_TIMEOUT_MS = 5000;
+
+/** `PRAGMA busy_timeout` for the durable-mode SQLite connection — see `persistence/database.ts`. */
+export const DATABASE_BUSY_TIMEOUT_MS = 5000;

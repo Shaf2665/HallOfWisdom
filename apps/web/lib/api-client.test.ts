@@ -9,6 +9,7 @@ import {
   ensureTaskBoard,
   getBoard,
   getHealth,
+  getSystemStorage,
   getTask,
   listAdapters,
   listBoardMessages,
@@ -468,6 +469,66 @@ const message1 = {
   text: "hello",
   createdAt: "2026-07-15T12:00:00.000Z",
 };
+
+describe("api-client: system storage", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("getSystemStorage: accepts every value in the strict previousShutdown enum", async () => {
+    for (const previousShutdown of ["first_start", "clean", "unclean"] as const) {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          mode: "durable",
+          ready: true,
+          schemaVersion: 1,
+          startedAt: "2026-07-15T12:00:00.000Z",
+          previousShutdown,
+          recovery: null,
+        }),
+      );
+      const result = await getSystemStorage(BASE_URL);
+      expect(result.previousShutdown).toBe(previousShutdown);
+    }
+  });
+
+  it("getSystemStorage: rejects an unknown previousShutdown value as an invalid response rather than passing it through", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        mode: "durable",
+        ready: true,
+        schemaVersion: 1,
+        startedAt: "2026-07-15T12:00:00.000Z",
+        // Neither the current enum nor its retired predecessor ("none")
+        // — this must fail validation, not silently render.
+        previousShutdown: "not_a_real_value",
+        recovery: null,
+      }),
+    );
+    await expect(getSystemStorage(BASE_URL)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+
+  it('getSystemStorage: rejects the retired "none" value now that the enum uses "first_start"', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        mode: "durable",
+        ready: true,
+        schemaVersion: 1,
+        startedAt: "2026-07-15T12:00:00.000Z",
+        previousShutdown: "none",
+        recovery: null,
+      }),
+    );
+    await expect(getSystemStorage(BASE_URL)).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+  });
+});
 
 describe("api-client: boards", () => {
   let fetchMock: ReturnType<typeof vi.fn>;

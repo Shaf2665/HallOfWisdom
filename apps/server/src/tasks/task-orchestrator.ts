@@ -30,8 +30,8 @@ import {
   isTerminalTaskStatus,
 } from "./task-status-transitions.js";
 import type { TaskRecord } from "./task-record.js";
-import type { TaskStore } from "./task-store.js";
-import type { EventStore } from "../events/event-store.js";
+import type { TaskStorePort } from "./task-store-port.js";
+import type { NormalizedEventStorePort } from "../events/event-store-port.js";
 import type { EventBus } from "../events/event-bus.js";
 import { EventStoreError } from "../events/event-store-errors.js";
 import { buildInfrastructureFailureEvent } from "../events/synthetic-events.js";
@@ -60,8 +60,8 @@ function formatUnknownError(error: unknown): string {
 }
 
 export interface TaskOrchestratorOptions {
-  readonly taskStore: TaskStore;
-  readonly eventStore: EventStore;
+  readonly taskStore: TaskStorePort;
+  readonly eventStore: NormalizedEventStorePort;
   readonly eventBus: EventBus;
   readonly registry: AgentRegistry;
   /** Canonical, already-validated workspace root — see `server.ts` / `validateWorkspace`. */
@@ -107,8 +107,8 @@ export interface RouteAndAssignResult {
  * `onEvent` sink instead of writing JSON Lines to stdout.
  */
 export class TaskOrchestrator {
-  readonly #taskStore: TaskStore;
-  readonly #eventStore: EventStore;
+  readonly #taskStore: TaskStorePort;
+  readonly #eventStore: NormalizedEventStorePort;
   readonly #eventBus: EventBus;
   readonly #registry: AgentRegistry;
   readonly #workspaceRoot: string;

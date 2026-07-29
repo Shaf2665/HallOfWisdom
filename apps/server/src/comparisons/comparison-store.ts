@@ -10,10 +10,11 @@ import type {
   CandidateResultEvidence,
   ComparisonCandidateRecord,
   ComparisonPreference,
-  ComparisonStatus,
 } from "./comparison-record.js";
 import type { ExecutionTrust, StructuredFailure } from "@hall-of-wisdom/protocol";
 import type { TerminalEventType } from "@hall-of-wisdom/hall-runner";
+import { deriveComparisonStatus } from "./derive-comparison-status.js";
+import type { ComparisonStorePort } from "./comparison-store-port.js";
 
 export interface ComparisonStoreOptions {
   readonly maxComparisons: number;
@@ -33,7 +34,7 @@ export interface ComparisonStoreOptions {
  * validated, and written with no `await` anywhere in between, so two
  * concurrent callers can never both win the same claim.
  */
-export class ComparisonStore {
+export class ComparisonStore implements ComparisonStorePort {
   readonly #records = new Map<string, AgentComparisonRecord>();
   readonly #revisions = new Map<string, number>();
   readonly #maxComparisons: number;
@@ -200,7 +201,10 @@ export class ComparisonStore {
     candidate.runId = undefined;
     candidate.agentId = undefined;
     candidate.startedAt = undefined;
-    record.status = this.#deriveComparisonStatus(record);
+    record.status = deriveComparisonStatus(record.status, [
+      record.candidates[0].status,
+      record.candidates[1].status,
+    ]);
     record.updatedAt = new Date().toISOString();
     this.#bumpRevision(comparisonId);
   }
@@ -235,7 +239,10 @@ export class ComparisonStore {
         : input.terminalEventType === "run.cancelled"
           ? "cancelled"
           : "failed";
-    record.status = this.#deriveComparisonStatus(record);
+    record.status = deriveComparisonStatus(record.status, [
+      record.candidates[0].status,
+      record.candidates[1].status,
+    ]);
     record.updatedAt = new Date().toISOString();
     this.#bumpRevision(comparisonId);
     return structuredClone(record);
@@ -269,7 +276,10 @@ export class ComparisonStore {
     const now = new Date().toISOString();
     candidate.status = "cancelled";
     candidate.completedAt = now;
-    record.status = this.#deriveComparisonStatus(record);
+    record.status = deriveComparisonStatus(record.status, [
+      record.candidates[0].status,
+      record.candidates[1].status,
+    ]);
     record.updatedAt = now;
     this.#bumpRevision(comparisonId);
     return structuredClone(record);
@@ -362,39 +372,6 @@ export class ComparisonStore {
       throw new ComparisonCandidateNotFoundError(record.comparisonId, candidateId);
     }
     return candidate;
-  }
-
-  /**
-   * Recomputes the comparison-level status from its two candidates'
-   * statuses — only ever transforms `ready`/`running`. Every other
-   * status (`draft`/`preparing`/`failed`/`cancelled`/`cleaning`/`cleaned`)
-   * is a fixed point set by its own dedicated method above and must never
-   * be silently overwritten here — in particular, a candidate terminal
-   * event that arrives after cleanup has already begun (the run was
-   * abort-signalled but had not yet actually stopped) must not resurrect
-   * an outcome status and clobber `cleaning`/`cleaned`.
-   */
-  #deriveComparisonStatus(record: AgentComparisonRecord): ComparisonStatus {
-    if (record.status !== "ready" && record.status !== "running") {
-      return record.status;
-    }
-    const statuses = record.candidates.map((candidate) => candidate.status);
-    const allTerminal = statuses.every(
-      (status) => status === "completed" || status === "failed" || status === "cancelled",
-    );
-    if (allTerminal) {
-      return statuses.every((status) => status === "completed")
-        ? "completed"
-        : "partially_completed";
-    }
-    const anyProgressMade = statuses.some(
-      (status) =>
-        status === "running" ||
-        status === "completed" ||
-        status === "failed" ||
-        status === "cancelled",
-    );
-    return anyProgressMade ? "running" : "ready";
   }
 
   #mustGetLive(comparisonId: string): AgentComparisonRecord {

@@ -14,19 +14,22 @@ import {
 } from "../errors/app-error.js";
 import { isValidTaskTransition } from "./task-status-transitions.js";
 import type { TaskRecord } from "./task-record.js";
+import type { TaskStorePort } from "./task-store-port.js";
 
 export interface TaskStoreOptions {
   readonly maxTasks: number;
 }
 
 /**
- * In-memory task storage. `get`/`list` always return `structuredClone`d
- * copies — callers (routes, tests) can freely read or even mutate what
- * they get back without corrupting the store's internal state, and
- * without the store ever handing out a live reference to something an
- * external caller could use to bypass `updateStatus`'s transition checks.
+ * In-memory task storage — the ephemeral implementation of `TaskStorePort`
+ * (Phase 13's durable sibling is `SqliteTaskStore`). `get`/`list` always
+ * return `structuredClone`d copies — callers (routes, tests) can freely
+ * read or even mutate what they get back without corrupting the store's
+ * internal state, and without the store ever handing out a live
+ * reference to something an external caller could use to bypass
+ * `updateStatus`'s transition checks.
  */
-export class TaskStore {
+export class TaskStore implements TaskStorePort {
   readonly #records = new Map<string, TaskRecord>();
   readonly #maxTasks: number;
 

@@ -1,5 +1,6 @@
 import type { NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
 import { isTerminalEventType } from "@hall-of-wisdom/hall-runner";
+import type { NormalizedEventStorePort } from "./event-store-port.js";
 import {
   EventAfterTerminalError,
   EventCapacityReachedError,
@@ -81,7 +82,7 @@ export class EventStoreConfigError extends Error {
  * `docs/architecture/0004-hall-core-server.md`, "Event-capacity terminal
  * handling".
  */
-export class EventStore {
+export class EventStore implements NormalizedEventStorePort {
   readonly #eventsByTaskId = new Map<string, NormalizedAgentEvent[]>();
   readonly #terminalSequenceByTaskId = new Map<string, number>();
   readonly #maxEventsPerTask: number;

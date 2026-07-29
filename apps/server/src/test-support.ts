@@ -68,6 +68,8 @@ export interface TestHarnessOptions {
   readonly additionalAdapters?: readonly AgentAdapter[] | undefined;
   /** Phase 12 — when true, also composes the multi-agent comparison feature against a freshly created temp comparison-root directory (auto-cleaned by `TestHarness.cleanupComparisonRoot`). Defaults to false — existing callers are unaffected. */
   readonly withComparisons?: boolean | undefined;
+  /** Phase 13.2 — passed straight through to `createHallCoreApp`; see `CreateHallCoreAppOptions.readiness`. `undefined` (the default) means `/api/v1/health` always reports ready. */
+  readonly readiness?: CreateHallCoreAppOptions["readiness"];
 }
 
 export interface TestHarness {
@@ -163,6 +165,7 @@ export async function buildTestApp(options: TestHarnessOptions): Promise<{
     webOrigin: options.webOrigin,
     limits: harness.limits,
     logger: options.logger ?? false,
+    readiness: options.readiness,
   };
   const app = await createHallCoreApp(appOptions);
   return { app, harness };

@@ -3,13 +3,13 @@ import type { WebSocket } from "@fastify/websocket";
 import { isTerminalEventType } from "@hall-of-wisdom/hall-runner";
 import type { NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
 import { SubscriberLimitReachedError, type EventBus } from "../events/event-bus.js";
-import type { EventStore } from "../events/event-store.js";
-import type { TaskStore } from "../tasks/task-store.js";
+import type { NormalizedEventStorePort } from "../events/event-store-port.js";
+import type { TaskStorePort } from "../tasks/task-store-port.js";
 import { parseWebOrigin } from "../config/web-origin.js";
 
 export interface TaskEventsRouteDeps {
-  readonly taskStore: TaskStore;
-  readonly eventStore: EventStore;
+  readonly taskStore: TaskStorePort;
+  readonly eventStore: NormalizedEventStorePort;
   readonly eventBus: EventBus;
   /** A client is disconnected (not silently skipped) once its `bufferedAmount` exceeds this many bytes. */
   readonly maxBufferedBytes: number;

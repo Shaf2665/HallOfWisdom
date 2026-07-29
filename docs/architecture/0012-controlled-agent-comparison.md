@@ -29,7 +29,10 @@ Restated here because it shaped every design decision below, not just the UI cop
 - No automatic merge, commit, or push of either candidate's changes.
 - No branch publishing, no PR creation, no GitHub/Azure DevOps integration.
 - No cost/token comparison, no model selection.
-- No persistence across server restarts (in-memory, like every other Hall Core store).
+- No persistence across server restarts by default (in-memory, like every other Hall Core store at
+  the time this phase was written) — Phase 13 later added an opt-in durable mode covering
+  comparisons too; see
+  [`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md).
 - No CEO Agent, no agent-to-agent communication.
 - No real Claude Code or Codex execution without the operator's own explicit, per-run action — this
   phase never spends provider usage on its own initiative.
@@ -367,4 +370,6 @@ implications hold under a genuine invocation, not just in the abstract.
 ## What's next
 
 Phase 12 (deterministic implementation + the real comparison above) and Phase 12.1
-(source-repository-resolution hardening) are both complete. Phase 13 has not been proposed or started.
+(source-repository-resolution hardening) are both complete. Phase 13 — Durable State Persistence
+and Restart Recovery — followed and is documented separately; see
+[`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md).

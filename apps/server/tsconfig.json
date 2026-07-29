@@ -14,6 +14,6 @@
       "@hall-of-wisdom/protocol": ["../../packages/protocol/src/index.ts"]
     }
   },
-  "include": ["src", "vitest.config.ts"],
+  "include": ["src", "vitest.config.ts", "vitest.process.config.ts"],
   "exclude": ["dist", "node_modules"]
 }

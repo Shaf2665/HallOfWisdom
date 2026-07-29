@@ -33,6 +33,16 @@ const serverCliOptionsSchema = z
     // via any client input — process-startup-only, exactly like
     // `--workspace-root`.
     comparisonRoot: boundedNonBlankString(4096).optional(),
+    // Phase 13 — optional. When omitted, Hall Core runs exactly as it did
+    // before this phase: every store is purely in-memory and a restart
+    // loses all state. Supplying it opts into SQLite-backed durable state
+    // under this directory — see `persistence/database-config.ts` for the
+    // actual filesystem validation (absolute, created if missing,
+    // symlink-canonicalized, mutually non-contained with `workspaceRoot`
+    // and `comparisonRoot`), which `server.ts` performs, not this schema.
+    // Never settable via any client input — process-startup-only, exactly
+    // like `--workspace-root`.
+    dataDir: boundedNonBlankString(4096).optional(),
   })
   .strict();
 
@@ -110,6 +120,7 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
         "web-origin": { type: "string" },
         "enable-codex-trusted-local": { type: "boolean" },
         "comparison-root": { type: "string" },
+        "data-dir": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -135,6 +146,7 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
     ...(values["comparison-root"] === undefined
       ? {}
       : { comparisonRoot: values["comparison-root"] }),
+    ...(values["data-dir"] === undefined ? {} : { dataDir: values["data-dir"] }),
   };
 
   const result = serverCliOptionsSchema.safeParse(candidate);

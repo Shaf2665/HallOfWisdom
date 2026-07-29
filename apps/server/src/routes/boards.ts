@@ -3,13 +3,13 @@ import type { FastifyInstance } from "fastify";
 import type { CommunicationAuthor } from "@hall-of-wisdom/protocol";
 import { createMessageRequestSchema } from "../schemas/create-message-request.js";
 import { InvalidMessageError, InvalidRequestError } from "../errors/app-error.js";
-import type { BoardStore } from "../boards/board-store.js";
-import type { MessageStore } from "../boards/message-store.js";
+import type { BoardStorePort } from "../boards/board-store-port.js";
+import type { MessageStorePort } from "../boards/message-store-port.js";
 import type { MessageBus } from "../boards/message-bus.js";
 
 export interface BoardRoutesDeps {
-  readonly boardStore: BoardStore;
-  readonly messageStore: MessageStore;
+  readonly boardStore: BoardStorePort;
+  readonly messageStore: MessageStorePort;
   readonly messageBus: MessageBus;
 }
 

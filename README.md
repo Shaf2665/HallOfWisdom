@@ -54,6 +54,25 @@ real comparison has been run** — one genuine Claude Code (isolated) invocation
 results and no automatic winner; see that document's "Real Claude Code + Codex comparison" section.
 No further real-provider execution is needed or authorized for this feature.
 
+**Phase 13 — Durable State Persistence and Restart Recovery** (with follow-ups **13.1** and
+**13.2**). Every Hall Core store still defaults to in-memory, exactly as before; an operator can now
+opt in to a SQLite-backed durable mode (`--data-dir`, off by default) so tasks, events, boards,
+messages, and comparisons survive a restart. The in-memory and SQLite backends for every store
+implement the same port interface and are exercised by the same contract tests. A restart-recovery
+pass runs on every durable boot, reconciling any run an unclean shutdown left non-terminal into
+exactly one synthetic "interrupted" failure — never an automatic resume or retry against a real
+provider — and classifies every comparison candidate's worktree health without ever auto-deleting
+anything. A new `/system` page and `GET /api/v1/system/storage` route report storage mode, schema
+version, and a bounded recovery summary. **13.1** added exclusive single-instance ownership of a
+`--data-dir` (a filesystem lock — see "A `--data-dir` is exclusively owned..." below), a mandatory
+`pnpm verify:process-recovery` real-process test suite, and a genuine browser-driven durable-restart
+Playwright spec. **13.2** added a second, database-level ownership fence — closing the one gap
+13.1's filesystem lock alone could not (a _frozen_, not crashed, former owner resuming and writing
+after a legitimate takeover) — plus a second Playwright spec proving a full multi-agent comparison
+can be genuinely restarted and continued, both candidates started via real UI clicks. See
+[`docs/architecture/0013-durable-persistence-and-recovery.md`](docs/architecture/0013-durable-persistence-and-recovery.md)
+for the full design.
+
 Eight packages now exist:
 `@hall-of-wisdom/protocol` (the wire contract), `@hall-of-wisdom/agent-adapter-sdk`
 (the adapter contract), `@hall-of-wisdom/mock-agent` (the first, deterministic adapter),
@@ -86,9 +105,11 @@ boards for local human communication), and `@hall-of-wisdom/web` — a Next.js b
 three pages: the Task Console (`/`, Phase 6, immediate task execution), the Kanban Board (`/board`,
 Phase 7, planning tasks — Backlog → Ready → Assigned → In Progress → a terminal outcome — with
 drag-and-drop and full keyboard-accessible equivalents), and Communication Boards (`/boards`, Phase
-8, a General board plus one discussion board per task, with live WebSocket message delivery). No
-authentication, persistence, agent-to-agent or agent-to-human messaging, Git integration, human
-approval workflow, or further-provider integration exists yet.
+8, a General board plus one discussion board per task, with live WebSocket message delivery), plus
+a fourth `/system` page (Phase 13) reporting storage mode and restart-recovery status. No
+authentication, agent-to-agent or agent-to-human messaging, Git integration, or human approval
+workflow exists yet; state persistence across a restart is optional (`--data-dir`, off by default —
+see "Enabling durable state persistence (Phase 13)" below) rather than always-on.
 
 ## Requirements
 
@@ -140,17 +161,17 @@ pnpm --filter @hall-of-wisdom/hall-core run verify:package-entry
 
 ## Packages
 
-| Package                                                           | Purpose                                                                                                                                                                                                                                                                                                                                                                             |
-| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@hall-of-wisdom/protocol`](packages/protocol)                   | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation.                                                                                                                                                                                                                                   |
-| [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                                                                                                                                                                                                |
-| [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                                                                                                                                                                                               |
-| [`@hall-of-wisdom/claude-code-adapter`](adapters/claude-code)     | Real `AgentAdapter` that spawns your locally-installed, subscription-authenticated Claude Code CLI as a child process — never an API key, never cloud billing. See [`docs/architecture/0008-claude-code-adapter.md`](docs/architecture/0008-claude-code-adapter.md).                                                                                                                |
-| [`@hall-of-wisdom/codex-adapter`](adapters/codex)                 | Real `AgentAdapter` that spawns your locally-installed, ChatGPT-authenticated Codex CLI as a child process — never an API key, never an access token. File-editing capability is an unresolved, disclosed gap. See [`docs/architecture/0009-codex-adapter.md`](docs/architecture/0009-codex-adapter.md).                                                                            |
-| [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events.                                                                                                                                                                                |
-| [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks in memory through Hall Runner's public API, streams normalized events over WebSocket with replay, hosts a General board and per-task discussion boards for local human communication, optionally drives two-adapter Git-worktree-isolated comparisons (Phase 12, `--comparison-root`), and binds to `127.0.0.1` only. |
-| [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: the Task Console (`/`) for immediate execution, the Kanban Board (`/board`) for planning tasks, and Communication Boards (`/boards`) for local discussion — talks to Hall Core directly (no proxy, no custom server); binds to `127.0.0.1` only.                                                                                                         |
-| [`@hall-of-wisdom/e2e`](apps/e2e)                                 | Phase 11.1 — Playwright end-to-end verification against a deterministic, fixture-adapter Hall Core (`src/fixture-server.ts`, built from Hall Core's own public package entry) and the real Hall Web dev server; never a real Claude Code/Codex process, never any subscription usage.                                                                                               |
+| Package                                                           | Purpose                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@hall-of-wisdom/protocol`](packages/protocol)                   | Provider-neutral wire contract: agent identity, capabilities, tasks, agent runs, and normalized agent events, with Zod-backed runtime validation.                                                                                                                                                                                                                                                                                                                         |
+| [`@hall-of-wisdom/agent-adapter-sdk`](packages/agent-adapter-sdk) | The contract every coding-agent adapter implements: descriptors, detection results, task input, an event-sequencing factory, and a terminal-event guard. Depends only on `protocol`.                                                                                                                                                                                                                                                                                      |
+| [`@hall-of-wisdom/mock-agent`](adapters/mock-agent)               | Deterministic, local-only, network-free `AgentAdapter` implementation used to develop and test Hall Runner/Hall Core without consuming real agent subscription usage.                                                                                                                                                                                                                                                                                                     |
+| [`@hall-of-wisdom/claude-code-adapter`](adapters/claude-code)     | Real `AgentAdapter` that spawns your locally-installed, subscription-authenticated Claude Code CLI as a child process — never an API key, never cloud billing. See [`docs/architecture/0008-claude-code-adapter.md`](docs/architecture/0008-claude-code-adapter.md).                                                                                                                                                                                                      |
+| [`@hall-of-wisdom/codex-adapter`](adapters/codex)                 | Real `AgentAdapter` that spawns your locally-installed, ChatGPT-authenticated Codex CLI as a child process — never an API key, never an access token. File-editing capability is an unresolved, disclosed gap. See [`docs/architecture/0009-codex-adapter.md`](docs/architecture/0009-codex-adapter.md).                                                                                                                                                                  |
+| [`@hall-of-wisdom/hall-runner`](runners/hall-runner)              | Local process/CLI: registers adapters via `AgentRegistry`, validates the workspace and working directory, runs one task through the generic `AgentAdapter` interface, and streams JSON Lines events.                                                                                                                                                                                                                                                                      |
+| [`@hall-of-wisdom/hall-core`](apps/server)                        | Local Fastify HTTP + WebSocket server: creates and runs tasks (in memory by default, optionally SQLite-backed and restart-durable via `--data-dir`, Phase 13) through Hall Runner's public API, streams normalized events over WebSocket with replay, hosts a General board and per-task discussion boards for local human communication, optionally drives two-adapter Git-worktree-isolated comparisons (Phase 12, `--comparison-root`), and binds to `127.0.0.1` only. |
+| [`@hall-of-wisdom/web`](apps/web)                                 | Next.js browser dashboard: the Task Console (`/`) for immediate execution, the Kanban Board (`/board`) for planning tasks, Communication Boards (`/boards`) for local discussion, and System (`/system`) for storage mode and restart-recovery status — talks to Hall Core directly (no proxy, no custom server); binds to `127.0.0.1` only.                                                                                                                              |
+| [`@hall-of-wisdom/e2e`](apps/e2e)                                 | Phase 11.1 — Playwright end-to-end verification against a deterministic, fixture-adapter Hall Core (`src/fixture-server.ts`, built from Hall Core's own public package entry) and the real Hall Web dev server; never a real Claude Code/Codex process, never any subscription usage.                                                                                                                                                                                     |
 
 ## Running Hall Runner
 
@@ -601,6 +622,31 @@ trusted-local-allowed ranking (isolated ranked ahead of trusted-local), keyboard
 console cleanliness. After a run, confirm ports 3000/4310 are free again — Playwright's own teardown
 does this automatically; if a run is interrupted, stop any lingering `node` process manually.
 
+**Phase 13.1 — genuine durable browser restart** (`tests/durable-restart.spec.ts`, included in the
+same `e2e` run above): spawns its own dedicated, real `dist/server.js` Hall Core binary and its own
+dedicated real Hall Web dev server — on their own ports (4395/3095), entirely separate from the
+shared fixture pair above — so it can stop and restart Hall Core mid-test while Hall Web and the
+browser stay open, without touching the shared suite's process lifecycle at all. Requires
+`pnpm --filter @hall-of-wisdom/hall-core run build` to have been run first (the same requirement
+`pnpm verify:process-recovery` below has); `requireDurableRestartBuildArtifacts()` throws a clear,
+actionable error rather than hanging or failing obscurely if it hasn't been. Drives the full
+task/board/comparison lifecycle, a graceful restart, and verifies every piece of state survived —
+see [`docs/architecture/0013-durable-persistence-and-recovery.md`](docs/architecture/0013-durable-persistence-and-recovery.md),
+"Testing," item 5, for the exact workflow and two disclosed adaptations (Mock Agent is the only
+adapter the real binary can safely, deterministically run to completion; Codex isn't even
+selectable in the real "Compare agents" dialog).
+
+**Phase 13.2 — genuine durable comparison restart, both candidates genuinely started**
+(`tests/dual-fixture-durable-restart.spec.ts`, also included in the same `e2e` run above): closes
+exactly the gap the spec above discloses, using `apps/e2e`'s own durable-capable fixture composition
+(`fixture-server.ts`, two genuinely-completing comparison fixture adapters — never a production CLI
+flag) instead of the real binary, so it can genuinely click "Start" on _both_ comparison candidates —
+one before a durable restart, one after it — and confirm both complete with correctly isolated event
+streams. Requires `pnpm --filter @hall-of-wisdom/e2e run build` to have been run first;
+`requireDualFixtureDurableRestartBuildArtifacts()` throws the same kind of clear, actionable error if
+it hasn't. See the same document, "Testing," item 6, for the full flow and a real Windows
+short-path-vs-long-path bug found and fixed while building it.
+
 ## Running Communication Boards
 
 Communication Boards (`/boards`) share the same Hall Core process and the same two-terminal setup
@@ -991,6 +1037,71 @@ Remove-Item -Recurse -Force "D:\HallOfWisdom\.tmp\codex-adapter-smoke"
 Get-Process codex -ErrorAction SilentlyContinue | Select-Object Id, ProcessName
 ```
 
+## Enabling durable state persistence (Phase 13)
+
+Every store defaults to in-memory, exactly as in every prior phase — a restart still loses
+everything unless you opt in. Pass `--data-dir`, pointing at an already-existing-or-creatable
+directory that is **not** nested inside, and not an ancestor of, either `--workspace-root` or
+`--comparison-root`:
+
+```powershell
+New-Item -ItemType Directory -Force -Path "D:\HallOfWisdomData" | Out-Null
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario success `
+  --web-origin "http://127.0.0.1:3000" `
+  --data-dir "D:\HallOfWisdomData"
+```
+
+The `dev` script above rebuilds and runs `dist/server.js` in one step. To run the already-built
+production binary directly instead — e.g. to reuse a build without recompiling, or to match exactly
+what `apps/e2e`'s process-level tests spawn — build once, then invoke it with the same flags. Every
+flag after the first line needs its own trailing backtick continuation (or put the whole command on
+one line) — a flag placed on a new line with no continuation character is silently dropped by
+PowerShell:
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run build
+node apps/server/dist/server.js `
+  --workspace-root "D:\HallOfWisdom" `
+  --data-dir "D:\HallOfWisdomData" `
+  --port 4310 `
+  --mock-scenario success
+```
+
+With it set, Hall Core opens (creating on first use) a SQLite database under `--data-dir`, applies
+its schema migrations, and every task, event, board, message, comparison, and comparison-candidate
+worktree record survives a restart against the same directory. On every durable boot, Hall Core
+runs a restart-recovery pass: any run left non-terminal by an unclean prior shutdown is marked
+failed with a single synthetic "interrupted" event — it is never automatically resumed or retried
+against a real provider. Hall Web's new `/system` page (and the underlying `GET
+/api/v1/system/storage` route) reports the current storage mode, schema version, the previous
+shutdown's cleanliness (`"first_start"` / `"clean"` / `"unclean"`), and a bounded restart-recovery
+summary. See
+[`docs/architecture/0013-durable-persistence-and-recovery.md`](docs/architecture/0013-durable-persistence-and-recovery.md)
+for the full design, including what is and is not covered by automated tests.
+
+**A `--data-dir` is exclusively owned by one running Hall Core process at a time (Phase 13.1).**
+Starting a second instance against the same directory while the first is still running fails
+closed within seconds, with exit code 2 and a generic diagnostic that never names the directory —
+the first instance is completely unaffected. After a genuine crash (not a graceful stop), a new
+instance against the same directory is briefly refused too, until the crashed owner's lock has
+aged past a 20-second staleness window, at which point it's automatically, safely reclaimed — no
+manual cleanup is ever required. See that same document, "Durable single-instance ownership," for
+the full design.
+
+**A former owner that merely freezes (rather than crashes) can never commit a write after being
+displaced (Phase 13.2).** The filesystem lock above only governs who may _start_ — a database-level
+ownership epoch, re-checked inside every durable transaction, is what stops an already-running
+instance from resuming and mutating state after a legitimate takeover, closing the one gap the
+filesystem lock's own design deliberately leaves open (it cannot distinguish "frozen" from
+"crashed" — see its doc comment). No configuration is needed to get this; it applies automatically
+whenever `--data-dir` is used. See
+[`docs/architecture/0013-durable-persistence-and-recovery.md`](docs/architecture/0013-durable-persistence-and-recovery.md),
+"Database ownership fencing (Phase 13.2)," for the full design and the real bugs found and fixed
+while building it.
+
 ## Full workspace verification
 
 ```powershell
@@ -1000,6 +1111,7 @@ pnpm lint
 pnpm format
 pnpm test
 pnpm build
+pnpm verify:process-recovery
 ```
 
 `typecheck`/`test`/`build` run recursively across all nine packages (including `apps/web`'s own
@@ -1008,6 +1120,16 @@ pnpm build
 its Playwright suite spawns a real browser and two real servers, so it's never swept up by an
 ordinary `pnpm test` run); run it separately as its own step, described in "Running the Playwright
 E2E Suite" above.
+
+`pnpm verify:process-recovery` (Phase 13.1) is a separate, required step `pnpm test` intentionally
+does not include: it rebuilds `@hall-of-wisdom/hall-core` and then runs `apps/server/src/process-tests/**`
+— tests that spawn the actual built `dist/server.js` binary as a real OS process to verify durable
+single-instance ownership and crash/restart behavior the source-level test suite can't reach. Takes
+roughly 65 seconds (three of its four tests each wait out a real 20-second ownership-staleness
+window — Phase 13.2 added a fourth: a frozen, not crashed, former owner is proven unable to commit
+after a real takeover). See
+[`docs/architecture/0013-durable-persistence-and-recovery.md`](docs/architecture/0013-durable-persistence-and-recovery.md),
+"Process-level verification," for what it proves and why it's a separate command.
 
 ## Repository Layout (current)
 

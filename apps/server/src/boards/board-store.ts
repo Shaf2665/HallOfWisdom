@@ -1,6 +1,7 @@
 import type { CommunicationBoard } from "@hall-of-wisdom/protocol";
 import { BoardCapacityReachedError, BoardNotFoundError } from "../errors/app-error.js";
-import type { TaskStore } from "../tasks/task-store.js";
+import type { TaskStorePort } from "../tasks/task-store-port.js";
+import type { BoardStorePort, EnsureTaskBoardResult } from "./board-store-port.js";
 
 /** Stable, documented identifier for the one General board — never generated, never looked up through an index. */
 export const GENERAL_BOARD_ID = "hall.general";
@@ -21,25 +22,23 @@ export function taskBoardId(taskId: string): string {
 export interface BoardStoreOptions {
   readonly maxBoards: number;
   /** Read-only dependency: used only to validate a task exists and to read its (already-public) title/projectId when creating a task board. Never mutated. */
-  readonly taskStore: TaskStore;
+  readonly taskStore: TaskStorePort;
 }
 
-export interface EnsureTaskBoardResult {
-  readonly board: CommunicationBoard;
-  /** `true` only when this call actually created the board; `false` when an existing board was returned unchanged. */
-  readonly created: boolean;
-}
+export type { EnsureTaskBoardResult } from "./board-store-port.js";
 
 /**
- * In-memory board storage. `get`/`list`/`ensureTaskBoard` always return
- * `structuredClone`d snapshots, the same discipline `TaskStore` and
- * `EventStore` already follow — callers can never mutate this store's
- * internal state through a returned value.
+ * In-memory board storage — the ephemeral implementation of
+ * `BoardStorePort` (Phase 13's durable sibling is `SqliteBoardStore`).
+ * `get`/`list`/`ensureTaskBoard` always return `structuredClone`d
+ * snapshots, the same discipline `TaskStore` and `EventStore` already
+ * follow — callers can never mutate this store's internal state through a
+ * returned value.
  */
-export class BoardStore {
+export class BoardStore implements BoardStorePort {
   readonly #boards = new Map<string, CommunicationBoard>();
   readonly #maxBoards: number;
-  readonly #taskStore: TaskStore;
+  readonly #taskStore: TaskStorePort;
 
   constructor(options: BoardStoreOptions) {
     this.#maxBoards = options.maxBoards;

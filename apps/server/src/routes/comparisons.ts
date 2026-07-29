@@ -1,10 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import type { ComparisonOrchestrator } from "../comparisons/comparison-orchestrator.js";
-import type { ComparisonStore } from "../comparisons/comparison-store.js";
+import type { ComparisonStorePort } from "../comparisons/comparison-store-port.js";
 
 export interface ComparisonRoutesDeps {
   readonly orchestrator: ComparisonOrchestrator;
-  readonly comparisonStore: ComparisonStore;
+  readonly comparisonStore: ComparisonStorePort;
 }
 
 interface ComparisonIdParams {

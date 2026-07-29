@@ -129,6 +129,34 @@ describe("parseServerCliArguments", () => {
     });
   });
 
+  describe("--data-dir (Phase 13)", () => {
+    it("is undefined when omitted", () => {
+      const options = parseServerCliArguments(["--workspace-root", "D:\\HallOfWisdom"]);
+      expect(options.dataDir).toBeUndefined();
+    });
+
+    it("parses --data-dir when supplied", () => {
+      const options = parseServerCliArguments([
+        "--workspace-root",
+        "D:\\HallOfWisdom",
+        "--data-dir",
+        "D:\\HallOfWisdomData",
+      ]);
+      expect(options.dataDir).toBe("D:\\HallOfWisdomData");
+    });
+
+    it("parses --data-dir after the pnpm '--' script separator", () => {
+      const options = parseServerCliArguments([
+        "--",
+        "--workspace-root",
+        "D:\\HallOfWisdom",
+        "--data-dir",
+        "D:\\HallOfWisdomData",
+      ]);
+      expect(options.dataDir).toBe("D:\\HallOfWisdomData");
+    });
+  });
+
   describe("stripLeadingScriptSeparator (Phase 11.1)", () => {
     it("leaves argv without a leading separator untouched (direct node invocation)", () => {
       expect(stripLeadingScriptSeparator(["--workspace-root", "D:\\HallOfWisdom"])).toEqual([

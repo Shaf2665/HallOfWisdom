@@ -4,6 +4,7 @@ import {
   MessageBoardIdentityMismatchError,
   MessageCapacityReachedError,
 } from "../errors/app-error.js";
+import type { MessageStorePort } from "./message-store-port.js";
 
 export interface MessageStoreOptions {
   readonly maxMessagesPerBoard: number;
@@ -30,7 +31,7 @@ export interface AppendMessageInput {
  * appended to" (defense-in-depth, mirroring `EventStore.append()`'s
  * `ExpectedEventIdentity` check).
  */
-export class MessageStore {
+export class MessageStore implements MessageStorePort {
   readonly #messagesByBoardId = new Map<string, CommunicationMessage[]>();
   readonly #maxMessagesPerBoard: number;
 

@@ -44,6 +44,7 @@ export function createServerComposition(options: ServerCompositionOptions): Serv
     comparisonRoot: options.comparisonRoot,
     limits: options.limits,
     onExecutionError: options.onComparisonExecutionError,
+    db: options.db,
   });
 
   return { ...composition, comparison };

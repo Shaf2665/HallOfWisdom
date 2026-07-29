@@ -108,3 +108,33 @@ export type {
 
 export { nodeProcessSpawner } from "./comparisons/process-spawner.js";
 export type { ProcessSpawner } from "./comparisons/process-spawner.js";
+
+// Phase 13.2 — the durable-storage lifecycle, exported so the E2E
+// dual-fixture composition (`apps/e2e/src/fixture-server.ts`) can call the
+// exact same functions `server.ts` does, rather than reimplementing any
+// part of the fencing sequence. See
+// `docs/architecture/0013-durable-persistence-and-recovery.md`.
+export { HallDatabase } from "./persistence/database.js";
+export type { OwnershipFence } from "./persistence/database.js";
+export { resolveDataDir } from "./persistence/database-config.js";
+export { openDurableStorage } from "./persistence/durable-startup.js";
+export type {
+  OpenDurableStorageOptions,
+  OpenDurableStorageResult,
+} from "./persistence/durable-startup.js";
+export type { InstanceOwnershipHandle } from "./persistence/instance-ownership.js";
+export { startOwnershipFenceMonitor } from "./persistence/ownership-fence-monitor.js";
+export type {
+  OwnershipFenceMonitorHandle,
+  OwnershipFenceMonitorOptions,
+} from "./persistence/ownership-fence-monitor.js";
+export { recordCleanShutdown } from "./persistence/boot-repository.js";
+export { PersistenceError } from "./persistence/persistence-errors.js";
+export { installShutdownSignals, STDIN_SHUTDOWN_COMMAND } from "./process/signal-shutdown.js";
+export type { SignalShutdownHandle, SignalShutdownHandlers } from "./process/signal-shutdown.js";
+export { DATABASE_BUSY_TIMEOUT_MS } from "./config/server-config.js";
+export { createCoreStoresComposition } from "./composition/mock-agent-composition-root.js";
+export type {
+  CoreStoresComposition,
+  CoreStoresCompositionOptions,
+} from "./composition/mock-agent-composition-root.js";

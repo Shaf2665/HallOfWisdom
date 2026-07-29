@@ -3,13 +3,13 @@ import type { WebSocket } from "@fastify/websocket";
 import { isTerminalEventType } from "@hall-of-wisdom/hall-runner";
 import type { NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
 import { SubscriberLimitReachedError, type EventBus } from "../events/event-bus.js";
-import type { EventStore } from "../events/event-store.js";
-import type { ComparisonStore } from "../comparisons/comparison-store.js";
+import type { NormalizedEventStorePort } from "../events/event-store-port.js";
+import type { ComparisonStorePort } from "../comparisons/comparison-store-port.js";
 import { parseWebOrigin } from "../config/web-origin.js";
 
 export interface ComparisonCandidateEventsRouteDeps {
-  readonly comparisonStore: ComparisonStore;
-  readonly eventStore: EventStore;
+  readonly comparisonStore: ComparisonStorePort;
+  readonly eventStore: NormalizedEventStorePort;
   readonly eventBus: EventBus;
   readonly maxBufferedBytes: number;
   readonly allowedOrigin: string;

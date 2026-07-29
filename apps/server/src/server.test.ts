@@ -65,6 +65,151 @@ describe("runServer", () => {
     expect(exitCode).toBe(2);
   });
 
+  it("rejects a --data-dir nested inside --workspace-root with exit code 2 and does not bind a port", async () => {
+    const nestedDataDir = path.join(tempRoot, "data");
+    const exitCode = await runServer(["--workspace-root", tempRoot, "--data-dir", nestedDataDir]);
+    expect(exitCode).toBe(2);
+  });
+
+  it("boots twice in a row with --data-dir against the same directory, reporting previousShutdown clean on the second boot after a graceful first shutdown", async () => {
+    const workspaceRoot = path.join(tempRoot, "workspace");
+    fs.mkdirSync(workspaceRoot);
+    const dataDir = path.join(tempRoot, "data");
+    const previousShutdowns: unknown[] = [];
+
+    for (let i = 0; i < 2; i += 1) {
+      const port = 47020 + i;
+      const beforeSigint = process.listenerCount("SIGINT");
+      const exitCodePromise = runServer([
+        "--workspace-root",
+        workspaceRoot,
+        "--data-dir",
+        dataDir,
+        "--port",
+        String(port),
+        "--mock-scenario",
+        "success",
+      ]);
+
+      await waitUntil(() => process.listenerCount("SIGINT") > beforeSigint, 3000);
+
+      const response = await fetch(`http://127.0.0.1:${String(port)}/api/v1/system/storage`);
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { mode: string; previousShutdown: unknown };
+      expect(body.mode).toBe("durable");
+      previousShutdowns.push(body.previousShutdown);
+
+      process.emit("SIGINT", "SIGINT");
+      const exitCode = await exitCodePromise;
+      expect(exitCode).toBe(0);
+    }
+
+    expect(previousShutdowns).toEqual(["first_start", "clean"]);
+    expect(fs.existsSync(path.join(dataDir, "hall-core.db"))).toBe(true);
+  });
+
+  it("holds the instance-ownership lock while running, releases it on a graceful shutdown, and a new instance can reacquire it immediately", async () => {
+    const workspaceRoot = path.join(tempRoot, "workspace");
+    fs.mkdirSync(workspaceRoot);
+    const dataDir = path.join(tempRoot, "data");
+    const lockPath = path.join(dataDir, "hall-core.lock");
+
+    const beforeSigint = process.listenerCount("SIGINT");
+    const firstExitCodePromise = runServer([
+      "--workspace-root",
+      workspaceRoot,
+      "--data-dir",
+      dataDir,
+      "--port",
+      "47030",
+      "--mock-scenario",
+      "success",
+    ]);
+    await waitUntil(() => process.listenerCount("SIGINT") > beforeSigint, 3000);
+
+    expect(fs.existsSync(lockPath)).toBe(true);
+
+    // Real cross-process SIGINT delivery on Windows behaves like a
+    // forceful kill (see `process-tests/concurrent-instance-rejected.test.ts`'s
+    // doc comment) — so graceful-shutdown behavior is verified here,
+    // in-process, via a synthetic signal on the SAME process actually
+    // running `runServer`'s real code, exactly like every other signal
+    // test in this file.
+    process.emit("SIGINT", "SIGINT");
+    const firstExitCode = await firstExitCodePromise;
+    expect(firstExitCode).toBe(0);
+
+    expect(fs.existsSync(lockPath)).toBe(false);
+
+    // No staleness wait needed — the lock was genuinely released, not
+    // merely stale, so a new instance acquires it immediately.
+    const beforeSecondSigint = process.listenerCount("SIGINT");
+    const secondExitCodePromise = runServer([
+      "--workspace-root",
+      workspaceRoot,
+      "--data-dir",
+      dataDir,
+      "--port",
+      "47031",
+      "--mock-scenario",
+      "success",
+    ]);
+    await waitUntil(() => process.listenerCount("SIGINT") > beforeSecondSigint, 3000);
+    expect(fs.existsSync(lockPath)).toBe(true);
+
+    process.emit("SIGINT", "SIGINT");
+    const secondExitCode = await secondExitCodePromise;
+    expect(secondExitCode).toBe(0);
+    expect(fs.existsSync(lockPath)).toBe(false);
+  });
+
+  it("releases the instance-ownership lock if startup fails after ownership was already acquired", async () => {
+    const workspaceRoot = path.join(tempRoot, "workspace");
+    fs.mkdirSync(workspaceRoot);
+    const dataDir = path.join(tempRoot, "data");
+    fs.mkdirSync(dataDir, { recursive: true });
+    const lockPath = path.join(dataDir, "hall-core.lock");
+    // A corrupt (non-SQLite) file at the expected database path makes
+    // `HallDatabase.open`/`runMigrations` fail AFTER ownership has
+    // already been acquired — exercising the "startup failure after
+    // ownership acquisition releases resources" requirement without
+    // needing a real second OS process.
+    fs.writeFileSync(path.join(dataDir, "hall-core.db"), "not a real sqlite file");
+
+    const exitCode = await runServer([
+      "--workspace-root",
+      workspaceRoot,
+      "--data-dir",
+      dataDir,
+      "--port",
+      "47032",
+      "--mock-scenario",
+      "success",
+    ]);
+
+    expect(exitCode).not.toBe(0);
+    expect(fs.existsSync(lockPath)).toBe(false);
+
+    // A subsequent legitimate start against the same (now-fixed) dataDir
+    // must not be blocked by a dangling lock from the failed attempt.
+    fs.rmSync(path.join(dataDir, "hall-core.db"));
+    const beforeSigint = process.listenerCount("SIGINT");
+    const recoveredExitCodePromise = runServer([
+      "--workspace-root",
+      workspaceRoot,
+      "--data-dir",
+      dataDir,
+      "--port",
+      "47033",
+      "--mock-scenario",
+      "success",
+    ]);
+    await waitUntil(() => process.listenerCount("SIGINT") > beforeSigint, 3000);
+    expect(fs.existsSync(lockPath)).toBe(true);
+    process.emit("SIGINT", "SIGINT");
+    expect(await recoveredExitCodePromise).toBe(0);
+  });
+
   it("does not accumulate SIGINT/SIGTERM listeners across repeated start/stop cycles", async () => {
     const beforeInt = process.listenerCount("SIGINT");
     const beforeTerm = process.listenerCount("SIGTERM");
