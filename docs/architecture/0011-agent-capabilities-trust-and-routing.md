@@ -164,6 +164,13 @@ The result includes **every** candidate, even excluded ones (`rank: undefined` f
 templated `safeReason`/`explanation` per candidate — always a hand-built sentence referencing only
 the candidate's own fields, never raw provider output.
 
+**Reused verbatim by Phase 14's CEO Agent** (`ceo-plan-routing.ts`'s `recommendStepAdapter`, and
+`CeoPlanOrchestrator.delegate()`'s own re-check at delegation time) — never a second, divergent
+compatibility algorithm. A CEO plan step with no `requirements` at all (the parent task was never
+routed) gets no recommendation, by the same "never fabricate" discipline this module already
+applies to a task with no requirements. See
+[`0014-ceo-planning-approval-and-delegation.md`](0014-ceo-planning-approval-and-delegation.md).
+
 ## Routes and orchestration
 
 Two new routes, both delegating to `TaskOrchestrator`:

@@ -239,4 +239,51 @@ describe("MessageStore", () => {
     });
     expect(message.sequence).toBe(0);
   });
+
+  describe("snapshot/restore (Phase 14.1 — ephemeral atomic delegation)", () => {
+    it("restore() undoes messages appended after the snapshot", () => {
+      const store = newStore();
+      store.append("board-1", {
+        messageId: "msg-1",
+        boardId: "board-1",
+        author: LOCAL_OPERATOR,
+        text: "before snapshot",
+        createdAt: "2026-07-15T12:00:00.000Z",
+      });
+      const snap = store.snapshot();
+
+      store.append("board-1", {
+        messageId: "msg-2",
+        boardId: "board-1",
+        author: LOCAL_OPERATOR,
+        text: "after snapshot",
+        createdAt: "2026-07-15T12:01:00.000Z",
+      });
+
+      store.restore(snap);
+
+      const messages = store.list("board-1");
+      expect(messages).toHaveLength(1);
+      expect(messages[0]?.text).toBe("before snapshot");
+      // The next append after a restore reuses the sequence the rolled-back
+      // message occupied — proving the store's own bookkeeping (not just
+      // the visible list) was genuinely rolled back, not just filtered.
+      const next = store.append("board-1", {
+        messageId: "msg-3",
+        boardId: "board-1",
+        author: LOCAL_OPERATOR,
+        text: "third",
+        createdAt: "2026-07-15T12:02:00.000Z",
+      });
+      expect(next.sequence).toBe(1);
+    });
+
+    it("restore() undoes registerBoard() called after the snapshot", () => {
+      const store = newStore();
+      const snap = store.snapshot();
+      store.registerBoard("board-2");
+      store.restore(snap);
+      expect(() => store.list("board-2")).toThrow(BoardNotFoundError);
+    });
+  });
 });

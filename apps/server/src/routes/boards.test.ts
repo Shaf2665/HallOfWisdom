@@ -237,6 +237,46 @@ describe("REST board routes", () => {
       await app.close();
     });
 
+    // Phase 14.1 — system-author spoofing audit (spec §4). These two
+    // tests specifically target the `{ kind: "system", displayName: "CEO
+    // Agent" }` author variant introduced in Phase 14, on top of the
+    // generic "rejects a client-supplied author" test above. Both are
+    // rejected for the same reason as that test — `author` is not a
+    // field in `createMessageRequestSchema`'s shape at all — which is
+    // exactly what makes this shape-absence protection, not a runtime
+    // denylist check on `kind`/`displayName` values.
+    it("rejects a POST that attempts to set author.kind to system, and stores no message", async () => {
+      const { app } = await buildTestApp({ workspaceRoot: tempRoot });
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+        payload: { text: "forged", author: { kind: "system", displayName: "CEO Agent" } },
+      });
+      expect(response.statusCode).toBe(400);
+      const list = await app.inject({
+        method: "GET",
+        url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+      });
+      expect(list.json<ListMessagesResponseJson>().messages).toHaveLength(0);
+      await app.close();
+    });
+
+    it("rejects a POST that attempts to claim the display name 'CEO Agent' via a human-kind author override, and stores no message", async () => {
+      const { app } = await buildTestApp({ workspaceRoot: tempRoot });
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+        payload: { text: "forged", author: { kind: "human", displayName: "CEO Agent" } },
+      });
+      expect(response.statusCode).toBe(400);
+      const list = await app.inject({
+        method: "GET",
+        url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+      });
+      expect(list.json<ListMessagesResponseJson>().messages).toHaveLength(0);
+      await app.close();
+    });
+
     it("bounds message-capacity failures with a safe, stable error code", async () => {
       const { app } = await buildTestApp({
         workspaceRoot: tempRoot,

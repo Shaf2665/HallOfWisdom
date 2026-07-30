@@ -458,4 +458,138 @@ describe("KanbanBoard", () => {
     expect(workingDirectoryField).toHaveFocus();
     expect(workingDirectoryField).toHaveValue("src");
   });
+
+  // Phase 14.3 — layout containment. jsdom performs no real CSS layout
+  // (`getBoundingClientRect` is always zero), so these assert the actual
+  // structural/class-level contract that prevents document-level
+  // horizontal overflow, rather than simulating geometry; the real
+  // browser regression (`move-menu-accumulation.spec.ts`) verifies the
+  // resulting numbers.
+  describe("mobile/overflow layout contract", () => {
+    it("the columns row establishes its own containing block and contains its own horizontal scroll", async () => {
+      vi.mocked(apiClient.listTasks).mockResolvedValue({ tasks: [] });
+      render(<KanbanBoard baseUrl={BASE_URL} />);
+      await screen.findByRole("heading", { name: "Backlog" });
+      const grid = screen
+        .getByRole("heading", { name: "Backlog" })
+        .closest("section")?.parentElement;
+      if (!grid) throw new Error("columns row not found");
+      // `relative` gives every descendant (including any `position:
+      // absolute` element, e.g. an `sr-only` label inside a card) a local
+      // containing block scoped to this row — without it, an absolutely
+      // positioned descendant's un-scrolled static position can leak past
+      // this row's own `overflow-x-auto` clipping and widen
+      // `document.documentElement` itself, even though the row's own
+      // visible content stays correctly scrollable. This is the actual
+      // Phase 14.3 root cause and fix — see
+      // `docs/architecture/0014-ceo-planning-approval-and-delegation.md`.
+      expect(grid.className).toMatch(/\brelative\b/);
+      expect(grid.className).toMatch(/\boverflow-x-auto\b/);
+    });
+
+    it("the scrollable columns row has an accessible name announcing that it scrolls", async () => {
+      vi.mocked(apiClient.listTasks).mockResolvedValue({ tasks: [] });
+      render(<KanbanBoard baseUrl={BASE_URL} />);
+      const region = await screen.findByRole("region", {
+        name: /scrollable horizontally/i,
+      });
+      expect(region).toContainElement(
+        (await screen.findByRole("heading", { name: "Backlog" })).closest("section"),
+      );
+    });
+
+    it("every column keeps its intended fixed usable width and never shrinks", async () => {
+      vi.mocked(apiClient.listTasks).mockResolvedValue({ tasks: [] });
+      render(<KanbanBoard baseUrl={BASE_URL} />);
+      const headings = await Promise.all(
+        [
+          "Backlog",
+          "Ready",
+          "Assigned",
+          "In Progress",
+          "Agent Review",
+          "Human Approval",
+          "Blocked",
+          "Completed",
+          "Failed",
+          "Cancelled",
+        ].map((label) => screen.findByRole("heading", { name: label })),
+      );
+      expect(headings).toHaveLength(10);
+      for (const heading of headings) {
+        const section = heading.closest("section");
+        if (!section) throw new Error("column section not found");
+        expect(section.className).toMatch(/\bw-72\b/);
+        expect(section.className).toMatch(/\bshrink-0\b/);
+      }
+    });
+
+    it("a long, unbroken task title does not disable wrapping on the card", async () => {
+      const longTitle = "a".repeat(200);
+      vi.mocked(apiClient.listTasks).mockResolvedValue({
+        tasks: [makeRecord({ title: longTitle })],
+      });
+      render(<KanbanBoard baseUrl={BASE_URL} />);
+      const titleButton = await screen.findByRole("button", {
+        name: new RegExp(`^Drag ${longTitle}`),
+      });
+      expect(titleButton.className).toMatch(/\bbreak-words\b/);
+    });
+
+    it("card metadata (project, priority, assigned agent) wraps rather than forcing the column wider", async () => {
+      vi.mocked(apiClient.listTasks).mockResolvedValue({
+        tasks: [makeRecord({ projectId: "p".repeat(120) }, "run-1")],
+      });
+      render(<KanbanBoard baseUrl={BASE_URL} />);
+      await screen.findByText("Fix the bug");
+      const dl = document.querySelector("dl");
+      if (!dl) throw new Error("metadata <dl> not found");
+      expect(dl.className).toMatch(/\bbreak-words\b/);
+    });
+
+    it("the MoveMenu trigger ('Actions') remains present and reachable regardless of viewport", async () => {
+      vi.mocked(apiClient.listTasks).mockResolvedValue({
+        tasks: [makeRecord({ status: "backlog" })],
+      });
+      render(<KanbanBoard baseUrl={BASE_URL} />);
+      const trigger = await screen.findByRole("button", { name: "Actions" });
+      expect(trigger).toBeEnabled();
+      expect(trigger).toBeVisible();
+    });
+
+    it("all 10 workflow columns render side by side (desktop multi-column layout preserved)", async () => {
+      vi.mocked(apiClient.listTasks).mockResolvedValue({ tasks: [] });
+      render(<KanbanBoard baseUrl={BASE_URL} />);
+      const backlog = await screen.findByRole("heading", { name: "Backlog" });
+      const grid = backlog.closest("section")?.parentElement;
+      if (!grid) throw new Error("columns row not found");
+      // A row layout (`flex`), not a stack (`flex-col`) — columns sit
+      // side by side, scrolling horizontally as a unit when they don't
+      // fit, rather than wrapping or stacking vertically.
+      expect(grid.className).toMatch(/\bflex\b/);
+      expect(grid.className).not.toMatch(/\bflex-col\b/);
+      expect(grid.children).toHaveLength(10);
+    });
+
+    it("does not rely on a global overflow-x:hidden workaround anywhere in the board tree", async () => {
+      vi.mocked(apiClient.listTasks).mockResolvedValue({
+        tasks: [makeRecord()],
+      });
+      const { container } = render(<KanbanBoard baseUrl={BASE_URL} />);
+      await screen.findByText("Fix the bug");
+      const offenders = Array.from(container.querySelectorAll("*")).filter((el) =>
+        /\boverflow-x-hidden\b/.test(el.className),
+      );
+      expect(offenders).toHaveLength(0);
+    });
+
+    it("the title button's focus ring remains visible (focus-visible outline present)", async () => {
+      vi.mocked(apiClient.listTasks).mockResolvedValue({
+        tasks: [makeRecord()],
+      });
+      render(<KanbanBoard baseUrl={BASE_URL} />);
+      const titleButton = await screen.findByRole("button", { name: /^Drag Fix the bug/ });
+      expect(titleButton.className).toMatch(/focus-visible:outline-2/);
+    });
+  });
 });

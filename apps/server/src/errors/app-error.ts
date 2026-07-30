@@ -336,3 +336,132 @@ export class ComparisonCandidateNotEligibleError extends HallCoreError {
     super(`Adapter "${adapterId}" is not currently eligible to start: ${reason}`);
   }
 }
+
+/** Phase 14 — CEO Agent planning, approval-gated delegation, and plan tracking. */
+export class CeoPlanNotFoundError extends HallCoreError {
+  readonly code = "CEO_PLAN_NOT_FOUND";
+  readonly statusCode = 404;
+
+  constructor(planId: string) {
+    super(`No CEO plan found with planId "${planId}".`);
+  }
+}
+
+export class CeoPlanVersionNotFoundError extends HallCoreError {
+  readonly code = "CEO_PLAN_VERSION_NOT_FOUND";
+  readonly statusCode = 404;
+
+  constructor(planId: string, version: number) {
+    super(`CEO plan "${planId}" has no version ${String(version)}.`);
+  }
+}
+
+/** Wrong status for the attempted transition (e.g. approving a plan that is not `awaiting_approval`), or a stale optimistic-concurrency revision — both are the same "the plan moved since you last read it" family the client resolves by re-fetching. */
+export class CeoPlanStateConflictError extends HallCoreError {
+  readonly code = "CEO_PLAN_STATE_CONFLICT";
+  readonly statusCode = 409;
+
+  constructor(planId: string, currentStatus: string, attemptedAction: string) {
+    super(`CEO plan "${planId}" cannot be ${attemptedAction} while in status "${currentStatus}".`);
+  }
+}
+
+/**
+ * Kickoff, "Plan versioning": approval/delegation is bound to an exact
+ * `(planId, version, contentHash)` triple. Thrown when a request targets
+ * a version or hash that is no longer the plan's active one — including
+ * the case a client never learns the real reason for (a concurrent edit
+ * landed between the client reading the plan and submitting a decision)
+ * — the message deliberately says only that the binding no longer holds,
+ * never which specific field changed, so a client cannot use this
+ * response to probe plan internals it does not already have.
+ */
+export class CeoPlanApprovalBindingError extends HallCoreError {
+  readonly code = "CEO_PLAN_APPROVAL_BINDING_MISMATCH";
+  readonly statusCode = 409;
+
+  constructor(planId: string) {
+    super(
+      `CEO plan "${planId}"'s active version or content no longer matches what was submitted for this decision. Re-fetch the plan and try again.`,
+    );
+  }
+}
+
+export class CeoPlanAlreadyDelegatedError extends HallCoreError {
+  readonly code = "CEO_PLAN_ALREADY_DELEGATED";
+  readonly statusCode = 409;
+
+  constructor(planId: string) {
+    super(`CEO plan "${planId}" has already been delegated.`);
+  }
+}
+
+/**
+ * Delegation-time revalidation (kickoff, "Delegation semantics") failed —
+ * an ineligible or unavailable adapter, a parent task that no longer
+ * exists or has entered an incompatible terminal state, or a dependency
+ * graph that no longer validates. `safeReason` is always a bounded,
+ * pre-composed sentence, never raw adapter output or a stack trace.
+ * Delegation creates zero child tasks and zero assignments whenever this
+ * is thrown — see `ceo-plan-orchestrator.ts`'s `delegate()`.
+ */
+export class CeoPlanDelegationBlockedError extends HallCoreError {
+  readonly code = "CEO_PLAN_DELEGATION_BLOCKED";
+  readonly statusCode = 422;
+
+  constructor(planId: string, safeReason: string) {
+    super(`CEO plan "${planId}" cannot be delegated: ${safeReason}`);
+  }
+}
+
+/**
+ * Phase 14.1 — a plan version's step names a `selectedAdapterId` that is
+ * either not currently registered or does not satisfy that step's own
+ * `requirements` — checked at version-creation time (not just delegation
+ * time) so a browser cannot save an override that could never actually
+ * delegate. Distinct from `CeoPlanDelegationBlockedError`, which fires
+ * later, at delegation, when eligibility has drifted since the version
+ * was saved.
+ */
+export class CeoPlanStepAdapterInvalidError extends HallCoreError {
+  readonly code = "CEO_PLAN_STEP_ADAPTER_INVALID";
+  readonly statusCode = 422;
+
+  constructor(planId: string, stepId: string, safeReason: string) {
+    super(`CEO plan "${planId}" step "${stepId}"'s selected adapter is invalid: ${safeReason}`);
+  }
+}
+
+/**
+ * Phase 14.1 — a client-submitted mutation token did not match the
+ * plan's current state: either genuinely stale (a concurrent mutation
+ * landed first) or malformed/forged. The message is deliberately
+ * identical in both cases so a client cannot use the response to
+ * distinguish "stale" from "forged," matching
+ * `CeoPlanApprovalBindingError`'s own discipline. Replaces the old
+ * plain-integer `revision` conflict path — see
+ * `ceo-plan-mutation-token.ts`.
+ */
+export class CeoPlanMutationTokenInvalidError extends HallCoreError {
+  readonly code = "CEO_PLAN_MUTATION_TOKEN_INVALID";
+  readonly statusCode = 409;
+
+  constructor(planId: string) {
+    super(
+      `CEO plan "${planId}"'s mutation token is stale or invalid. Re-fetch the plan and try again.`,
+    );
+  }
+}
+
+/** The deterministic (or scripted) planner returned a bounded "insufficient information" result rather than a plan — not a server error, but distinct from a normal successful generation so routes can respond with a clear, safe status. */
+export class CeoPlanningBlockedError extends HallCoreError {
+  readonly code = "CEO_PLANNING_BLOCKED";
+  readonly statusCode = 422;
+
+  // Re-declared (not just inherited) to widen HallCoreError's protected
+  // constructor back to public, matching WorkspaceValidationFailedError's
+  // pattern above.
+  public constructor(reason: string) {
+    super(reason);
+  }
+}

@@ -23,6 +23,12 @@ import type { ServerLimits } from "../config/server-config.js";
 import { ServerCliError } from "../config/server-cli-args.js";
 import type { ComparisonComposition } from "./comparison-composition-root.js";
 import type { HallDatabase } from "../persistence/database.js";
+import {
+  createCeoPlanComposition,
+  type CeoPlanComposition,
+} from "../ceo-plans/ceo-plan-composition.js";
+import { wrapTaskStoreWithMutationHook } from "../ceo-plans/task-mutation-hook.js";
+import type { CeoPlanOrchestrator } from "../ceo-plans/ceo-plan-orchestrator.js";
 
 export interface ServerCompositionOptions {
   /** Canonical, already-validated workspace root. */
@@ -66,6 +72,8 @@ export interface ServerComposition {
   readonly messageBus: MessageBus;
   /** Present only when `ServerCompositionOptions.comparisonRoot` was supplied. */
   readonly comparison?: ComparisonComposition | undefined;
+  /** Phase 14 — always composed (unlike `comparison`, CEO plans need no separate filesystem root). */
+  readonly ceoPlans: CeoPlanComposition;
 }
 
 function resolveScenario(rawScenario: string | undefined): MockAgentScenario {
@@ -85,6 +93,19 @@ export interface CoreStoresCompositionOptions {
   readonly limits: ServerLimits;
   readonly onExecutionError?: ((taskId: string, error: unknown) => void) | undefined;
   readonly db?: HallDatabase | undefined;
+  /**
+   * Phase 14.1 — an optional generic hook fired after every status-changing
+   * `taskStore` mutation, regardless of which caller performed it. This
+   * function itself has no notion of CEO plans (it just wraps `taskStore`
+   * with `wrapTaskStoreWithMutationHook` before handing it to
+   * `TaskOrchestrator`, if supplied) — the caller (`createMockAgentServerComposition`,
+   * `apps/e2e/src/fixture-server.ts`) is what actually knows the callback
+   * exists to trigger CEO plan progress synchronization. This has to
+   * happen here, before `TaskOrchestrator` is constructed, because
+   * `TaskOrchestrator` takes `taskStore` once, by reference, in its
+   * constructor — there is no way to swap it in afterward.
+   */
+  readonly onTaskMutated?: ((taskId: string) => void) | undefined;
 }
 
 export interface CoreStoresComposition {
@@ -117,10 +138,14 @@ export function createCoreStoresComposition(
 ): CoreStoresComposition {
   const db = options.db;
 
-  const taskStore: TaskStorePort =
+  const rawTaskStore: TaskStorePort =
     db !== undefined
       ? new SqliteTaskStore({ db, maxTasks: options.limits.maxTasks })
       : new TaskStore({ maxTasks: options.limits.maxTasks });
+  const taskStore: TaskStorePort =
+    options.onTaskMutated !== undefined
+      ? wrapTaskStoreWithMutationHook(rawTaskStore, options.onTaskMutated)
+      : rawTaskStore;
   const eventStore: NormalizedEventStorePort =
     db !== undefined
       ? new SqliteEventStore({
@@ -188,13 +213,36 @@ export function createMockAgentServerComposition(
   const registry = new AgentRegistry();
   registry.register(adapter);
 
+  // Phase 14.1 — `ceoOrchestratorRef` closes the loop: the hook needs a
+  // callback at `taskStore` construction time, but `CeoPlanOrchestrator`
+  // does not exist until after `createCoreStoresComposition` (and the
+  // `TaskOrchestrator` it builds) already have. A `const`-bound mutable
+  // box (rather than a `let`) so the callback captures a stable
+  // reference to `.current`, which safely resolves to the real
+  // orchestrator once `ceoPlans` is built below — `.current` is only
+  // ever read after this whole function has returned (the earliest any
+  // task mutation could occur is a subsequent route call).
+  const ceoOrchestratorRef: { current: CeoPlanOrchestrator | undefined } = { current: undefined };
   const stores = createCoreStoresComposition({
     registry,
     workspaceRoot: options.workspaceRoot,
     limits: options.limits,
     onExecutionError: options.onExecutionError,
     db: options.db,
+    onTaskMutated: (taskId) => {
+      ceoOrchestratorRef.current?.onChildTaskMutated(taskId);
+    },
   });
 
-  return { registry, ...stores };
+  const ceoPlans = createCeoPlanComposition({
+    registry,
+    taskStore: stores.taskStore,
+    boardStore: stores.boardStore,
+    messageStore: stores.messageStore,
+    messageBus: stores.messageBus,
+    db: options.db,
+  });
+  ceoOrchestratorRef.current = ceoPlans.orchestrator;
+
+  return { registry, ...stores, ceoPlans };
 }

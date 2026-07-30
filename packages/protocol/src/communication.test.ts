@@ -160,10 +160,28 @@ describe("communicationMessageSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("rejects an author kind other than human", () => {
+  it("rejects an author kind other than human or system", () => {
     const result = communicationMessageSchema.safeParse({
       ...validMessage,
       author: { kind: "agent", displayName: "Some Agent" },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  // Phase 14 — the CEO Agent posts bounded audit summaries as a
+  // "system"-authored message, never "human".
+  it("accepts a system-authored message", () => {
+    const result = communicationMessageSchema.safeParse({
+      ...validMessage,
+      author: { kind: "system", displayName: "CEO Agent" },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("rejects a system author with an unknown field", () => {
+    const result = communicationMessageSchema.safeParse({
+      ...validMessage,
+      author: { kind: "system", displayName: "CEO Agent", raw: "extra" },
     });
     expect(result.success).toBe(false);
   });

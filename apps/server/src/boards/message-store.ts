@@ -10,6 +10,12 @@ export interface MessageStoreOptions {
   readonly maxMessagesPerBoard: number;
 }
 
+/** Opaque to every caller except `MessageStore` itself — see `snapshot()`'s doc comment. */
+export interface MessageStoreSnapshot {
+  readonly _brand: "MessageStoreSnapshot";
+  readonly messagesByBoardId: ReadonlyMap<string, CommunicationMessage[]>;
+}
+
 export interface AppendMessageInput {
   readonly messageId: string;
   /** Must equal the `boardId` this is appended to — see `append()`'s doc comment. */
@@ -99,5 +105,31 @@ export class MessageStore implements MessageStorePort {
       throw new BoardNotFoundError(boardId);
     }
     return messages.length;
+  }
+
+  /**
+   * Phase 14.1 — the ephemeral-mode analogue of `withTransaction`'s
+   * durable-mode SAVEPOINT (see `TaskStore.snapshot()`'s doc comment for
+   * the full rationale). Unlike `TaskStore`/`BoardStore`, a per-board
+   * shallow array copy is sufficient here — no per-message deep clone is
+   * needed: `append()` only ever pushes a brand-new, already-immutable
+   * `CommunicationMessage` object onto a board's array; no method on this
+   * class ever mutates a stored message's own fields after it is pushed.
+   */
+  snapshot(): MessageStoreSnapshot {
+    return {
+      _brand: "MessageStoreSnapshot",
+      messagesByBoardId: new Map(
+        Array.from(this.#messagesByBoardId, ([boardId, messages]) => [boardId, [...messages]]),
+      ),
+    };
+  }
+
+  /** Replaces this store's entire state with `snapshot`'s — see `TaskStore.restore()`'s doc comment. */
+  restore(snapshot: MessageStoreSnapshot): void {
+    this.#messagesByBoardId.clear();
+    for (const [boardId, messages] of snapshot.messagesByBoardId) {
+      this.#messagesByBoardId.set(boardId, messages);
+    }
   }
 }

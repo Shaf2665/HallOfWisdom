@@ -212,7 +212,127 @@ const MIGRATION_2: Migration = {
   },
 };
 
+/**
+ * Migration 3 — Phase 14's CEO plan control plane. `ceo_plan_versions` is
+ * append-only (never `UPDATE`d, never deleted): "editing" a plan always
+ * inserts a new row with `version = active_version + 1`, so historical
+ * versions stay readable exactly as they were created (kickoff, "Plan
+ * versioning," item 3). `ceo_approvals` is append-only for the same
+ * reason ("Rejection does not delete history"); the current, binding
+ * approval (if any) is whichever row has the highest `id` for a
+ * `plan_version` equal to the plan's current `active_version` — an older
+ * approval row is never deleted when a new version invalidates it, it
+ * simply stops being "the current one." `ceo_delegation_links.child_task_id
+ * UNIQUE` and its `(plan_id, step_id)` primary key together enforce, at
+ * the database level, "each plan step may link to at most one child task"
+ * and "each child task may originate from at most one CEO plan step"
+ * (kickoff, "Delegation links") — a second delegation attempt against an
+ * already-delegated step cannot silently double-insert. `ceo_plan_events`
+ * is its own dedicated stream/table (own `sequence` scoped by `plan_id`),
+ * deliberately never inserted into the shared `events` table migration 1
+ * created for task/comparison-candidate streams (kickoff, "Do not insert
+ * these into agent-run normalized-event streams... comparison-candidate
+ * event streams").
+ */
+const MIGRATION_3: Migration = {
+  version: 3,
+  description: "Phase 14: CEO plan control plane (plans, versions, approvals, delegation, events).",
+  up(db) {
+    db.exec(`
+      CREATE TABLE ceo_plans (
+        plan_id TEXT PRIMARY KEY,
+        parent_task_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        active_version INTEGER NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        delegated_at TEXT,
+        completed_at TEXT,
+        revision INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX idx_ceo_plans_parent_task ON ceo_plans (parent_task_id);
+
+      CREATE TABLE ceo_plan_versions (
+        plan_id TEXT NOT NULL REFERENCES ceo_plans(plan_id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,
+        objective TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        assumptions_json TEXT NOT NULL,
+        constraints_json TEXT NOT NULL,
+        steps_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        created_by TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        PRIMARY KEY (plan_id, version)
+      );
+
+      CREATE TABLE ceo_approvals (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id TEXT NOT NULL REFERENCES ceo_plans(plan_id) ON DELETE CASCADE,
+        plan_version INTEGER NOT NULL,
+        decision TEXT NOT NULL CHECK (decision IN ('approve', 'reject')),
+        operator_note TEXT,
+        decided_at TEXT NOT NULL,
+        content_hash TEXT NOT NULL
+      );
+      CREATE INDEX idx_ceo_approvals_plan ON ceo_approvals (plan_id);
+
+      CREATE TABLE ceo_delegation_links (
+        plan_id TEXT NOT NULL REFERENCES ceo_plans(plan_id) ON DELETE CASCADE,
+        plan_version INTEGER NOT NULL,
+        step_id TEXT NOT NULL,
+        child_task_id TEXT NOT NULL UNIQUE,
+        adapter_id TEXT NOT NULL,
+        delegated_at TEXT NOT NULL,
+        PRIMARY KEY (plan_id, step_id)
+      );
+
+      CREATE TABLE ceo_plan_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        plan_id TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (plan_id, sequence)
+      );
+      CREATE INDEX idx_ceo_plan_events_plan ON ceo_plan_events (plan_id);
+    `);
+  },
+};
+
+/**
+ * Phase 14.1 — backs the idempotent progress synchronizer
+ * (`ceo-plan-progress-sync.ts`): a SHA-256 fingerprint of a plan's
+ * derived per-step progress, compared on every sync attempt so a
+ * repeated or out-of-order trigger appends at most one
+ * `ceo.plan.progress_changed`/`ceo.plan.completed`/`ceo.plan.failed`
+ * event per real transition. Nullable — every plan created before this
+ * migration (and every plan not yet delegated) simply has no fingerprint
+ * yet, which the synchronizer treats as "never synced," not an error.
+ * Internal-only, like `revision`: never selected into `planRowToPlan`'s
+ * public `CeoPlan` shape, exposed only via `SqliteCeoPlanStore`'s own
+ * dedicated `getLastProgressFingerprint` accessor.
+ *
+ * `ceo_delegation_links.child_task_id UNIQUE` (migration 3) already gives
+ * `findPlanIdByChildTaskId`'s `WHERE child_task_id = ?` lookup a unique
+ * index for free — no new index needed for that query.
+ */
+const MIGRATION_4: Migration = {
+  version: 4,
+  description: "Phase 14.1: idempotent CEO plan progress fingerprint.",
+  up(db) {
+    db.exec(`ALTER TABLE ceo_plans ADD COLUMN last_progress_fingerprint TEXT;`);
+  },
+};
+
 /** Ordered by `version`, ascending — `migration-runner.ts` applies whichever ones a given database hasn't recorded yet, one transaction each. */
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_1, MIGRATION_2];
+export const MIGRATIONS: readonly Migration[] = [
+  MIGRATION_1,
+  MIGRATION_2,
+  MIGRATION_3,
+  MIGRATION_4,
+];
 
 export const HIGHEST_KNOWN_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

@@ -27,6 +27,12 @@ export interface BoardStoreOptions {
 
 export type { EnsureTaskBoardResult } from "./board-store-port.js";
 
+/** Opaque to every caller except `BoardStore` itself — see `snapshot()`'s doc comment. */
+export interface BoardStoreSnapshot {
+  readonly _brand: "BoardStoreSnapshot";
+  readonly boards: ReadonlyMap<string, CommunicationBoard>;
+}
+
 /**
  * In-memory board storage — the ephemeral implementation of
  * `BoardStorePort` (Phase 13's durable sibling is `SqliteBoardStore`).
@@ -158,5 +164,29 @@ export class BoardStore implements BoardStorePort {
     }
     board.messageCount = messageCount;
     board.updatedAt = now;
+  }
+
+  /**
+   * Phase 14.1 — the ephemeral-mode analogue of `withTransaction`'s
+   * durable-mode SAVEPOINT (see `TaskStore.snapshot()`'s doc comment for
+   * the full rationale). A deep clone, not a shallow `Map` copy:
+   * `recordMessageAppended` mutates an already-stored board's
+   * `messageCount`/`updatedAt` in place rather than replacing the whole
+   * object, so a shallow clone's Map would still point at the same live
+   * board objects.
+   */
+  snapshot(): BoardStoreSnapshot {
+    return {
+      _brand: "BoardStoreSnapshot",
+      boards: new Map(
+        Array.from(this.#boards, ([boardId, board]) => [boardId, structuredClone(board)]),
+      ),
+    };
+  }
+
+  /** Replaces this store's entire state with `snapshot`'s — see `TaskStore.restore()`'s doc comment. */
+  restore(snapshot: BoardStoreSnapshot): void {
+    this.#boards.clear();
+    for (const [boardId, board] of snapshot.boards) this.#boards.set(boardId, board);
   }
 }

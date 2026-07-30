@@ -176,6 +176,11 @@ export class SqliteTaskStore implements TaskStorePort {
     return row?.working_directory;
   }
 
+  remainingCapacity(): number {
+    const count = (this.#db.prepare("SELECT COUNT(*) AS c FROM tasks").get() as { c: number }).c;
+    return Math.max(0, this.#maxTasks - count);
+  }
+
   add(record: TaskRecord): void {
     const existing = this.#db
       .prepare("SELECT 1 FROM tasks WHERE task_id = ?")

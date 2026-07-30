@@ -3,6 +3,12 @@ import {
   agentCapabilitiesSchema,
   capabilityIdSchema,
   capabilityObservationSchema,
+  ceoApprovalSchema,
+  ceoPlanEventSchema,
+  ceoPlanSchema,
+  ceoPlanStatusSchema,
+  ceoPlanStepSchema,
+  ceoPlanVersionSchema,
   communicationBoardSchema,
   communicationMessageSchema,
   executionTrustSchema,
@@ -10,6 +16,26 @@ import {
   structuredFailureSchema,
   taskPrioritySchema,
   taskRequirementsSchema,
+} from "@hall-of-wisdom/protocol";
+
+export {
+  ceoApprovalSchema,
+  ceoPlanEventSchema,
+  ceoPlanSchema,
+  ceoPlanStatusSchema,
+  ceoPlanStepSchema,
+  ceoPlanVersionSchema,
+};
+export type {
+  CeoApproval,
+  CeoApprovalDecision,
+  CeoPlan,
+  CeoPlanActor,
+  CeoPlanEvent,
+  CeoPlanEventType,
+  CeoPlanStatus,
+  CeoPlanStep,
+  CeoPlanVersion,
 } from "@hall-of-wisdom/protocol";
 
 export {
@@ -425,3 +451,107 @@ export const cancelComparisonCandidateResponseSchema = z
 export type CancelComparisonCandidateResponse = z.infer<
   typeof cancelComparisonCandidateResponseSchema
 >;
+
+/**
+ * Phase 14 — the CEO Agent control plane. The `CeoPlan`/`CeoPlanVersion`/
+ * `CeoApproval`/`CeoPlanEvent` shapes themselves come straight from
+ * `@hall-of-wisdom/protocol` (re-exported above) — this section covers
+ * only Hall Core's own wire envelopes and the two shapes that exist
+ * purely server-side and have no protocol-package schema of their own:
+ * derived plan progress (`ceo-plan-progress.ts`) and a delegation link
+ * (`ceo-plan-store-port.ts`'s `DelegationLink`). Mirrors both field-for-
+ * field, following this file's established hand-mirroring convention.
+ */
+export const ceoPlanStepProgressStatusSchema = z.enum([
+  "waiting_for_dependencies",
+  "ready_to_start",
+  "running",
+  "completed",
+  "failed",
+  "cancelled",
+  "blocked",
+]);
+export type CeoPlanStepProgressStatus = z.infer<typeof ceoPlanStepProgressStatusSchema>;
+
+export const ceoPlanStepProgressSchema = z
+  .object({
+    stepId: z.string(),
+    childTaskId: z.string().optional(),
+    status: ceoPlanStepProgressStatusSchema,
+  })
+  .strict();
+export type CeoPlanStepProgress = z.infer<typeof ceoPlanStepProgressSchema>;
+
+export const ceoPlanProgressSummarySchema = z
+  .object({
+    totalSteps: z.number(),
+    completed: z.number(),
+    running: z.number(),
+    failed: z.number(),
+    cancelled: z.number(),
+    blocked: z.number(),
+    notStarted: z.number(),
+    steps: z.array(ceoPlanStepProgressSchema),
+  })
+  .strict();
+export type CeoPlanProgressSummary = z.infer<typeof ceoPlanProgressSummarySchema>;
+
+export const ceoDelegationLinkSchema = z
+  .object({
+    planId: z.string(),
+    planVersion: z.number(),
+    stepId: z.string(),
+    childTaskId: z.string(),
+    adapterId: z.string(),
+    delegatedAt: z.string(),
+  })
+  .strict();
+export type CeoDelegationLink = z.infer<typeof ceoDelegationLinkSchema>;
+
+export const createCeoPlanResponseSchema = z
+  .object({ plan: ceoPlanSchema, version: ceoPlanVersionSchema })
+  .strict();
+export type CreateCeoPlanResponse = z.infer<typeof createCeoPlanResponseSchema>;
+
+export const getCeoPlanResponseSchema = z
+  .object({
+    plan: ceoPlanSchema,
+    progress: ceoPlanProgressSummarySchema,
+    links: z.array(ceoDelegationLinkSchema),
+    /** Phase 14.1 — an opaque optimistic-concurrency token to echo back as `expectedMutationToken` on the next mutating call. Never the plan's internal `revision` integer, and never a `CeoPlanVersion`'s private `internalRevision` either. */
+    mutationToken: z.string(),
+  })
+  .strict();
+export type GetCeoPlanResponse = z.infer<typeof getCeoPlanResponseSchema>;
+
+export const listCeoPlansResponseSchema = z.object({ plans: z.array(ceoPlanSchema) }).strict();
+export type ListCeoPlansResponse = z.infer<typeof listCeoPlansResponseSchema>;
+
+export const listCeoPlanVersionsResponseSchema = z
+  .object({ versions: z.array(ceoPlanVersionSchema) })
+  .strict();
+export type ListCeoPlanVersionsResponse = z.infer<typeof listCeoPlanVersionsResponseSchema>;
+
+export const listCeoApprovalsResponseSchema = z
+  .object({ approvals: z.array(ceoApprovalSchema) })
+  .strict();
+export type ListCeoApprovalsResponse = z.infer<typeof listCeoApprovalsResponseSchema>;
+
+export const listCeoPlanEventsResponseSchema = z
+  .object({ events: z.array(ceoPlanEventSchema) })
+  .strict();
+export type ListCeoPlanEventsResponse = z.infer<typeof listCeoPlanEventsResponseSchema>;
+
+export const decideCeoPlanApprovalResponseSchema = z
+  .object({ plan: ceoPlanSchema, approval: ceoApprovalSchema })
+  .strict();
+export type DecideCeoPlanApprovalResponse = z.infer<typeof decideCeoPlanApprovalResponseSchema>;
+
+export const delegateCeoPlanResponseSchema = z
+  .object({
+    plan: ceoPlanSchema,
+    links: z.array(ceoDelegationLinkSchema),
+    childTasks: z.array(taskRecordSchema),
+  })
+  .strict();
+export type DelegateCeoPlanResponse = z.infer<typeof delegateCeoPlanResponseSchema>;

@@ -17,7 +17,8 @@
     "format": "prettier --check .",
     "format:write": "prettier --write .",
     "test": "pnpm -r run test",
-    "verify:process-recovery": "pnpm --filter @hall-of-wisdom/hall-core run build && pnpm --filter @hall-of-wisdom/hall-core run test:process"
+    "verify:process-recovery": "pnpm --filter @hall-of-wisdom/hall-core run build && pnpm --filter @hall-of-wisdom/hall-core run test:process",
+    "verify:package-entry": "pnpm -r run build && pnpm -r run verify:package-entry"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",

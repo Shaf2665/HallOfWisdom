@@ -217,5 +217,16 @@ export function defineTaskStoreContractTests(
         allowedExecutionTrust: ["isolated"],
       });
     });
+
+    // Phase 14 — the CEO plan delegation coordinator pre-checks this
+    // before creating any child task, so it must accurately reflect the
+    // store's real remaining headroom, including going to exactly 0 (not
+    // negative) once capacity is reached.
+    it("remainingCapacity() reflects add()s and never goes negative", () => {
+      const store = createStore();
+      const before = store.remainingCapacity();
+      store.add(makeRecord("task-1"));
+      expect(store.remainingCapacity()).toBe(before - 1);
+    });
   });
 }

@@ -24,6 +24,7 @@ import {
   type OwnershipFenceMonitorHandle,
 } from "./persistence/ownership-fence-monitor.js";
 import { runRestartRecovery, type RecoverySummary } from "./recovery/restart-recovery.js";
+import { reconcileAllPlanProgress } from "./ceo-plans/ceo-plan-progress-reconciliation.js";
 
 const EXIT_INVALID_INPUT = 2;
 const EXIT_INTERNAL_ERROR = 3;
@@ -226,6 +227,16 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     }
   }
 
+  // Phase 14.1 — idempotent backstop for any CEO plan progress
+  // transition missed while the process was down (e.g. every child of a
+  // delegated plan finished right before a crash, with no chance for the
+  // task-mutation hook to notify the synchronizer) — see
+  // `reconcileAllPlanProgress`'s doc comment. Runs once per boot, after
+  // restart recovery, in both durable and ephemeral mode: a harmless
+  // no-op in ephemeral mode, since a fresh in-memory start has no plans
+  // to reconcile.
+  reconcileAllPlanProgress(composition.ceoPlans.orchestrator);
+
   // Phase 13.2, kickoff §3/§10 — "health must not report ready" once this
   // instance has lost durable ownership. `readiness` is the same object
   // reference `runControlledShutdown` below flips to `false` as the very
@@ -246,6 +257,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     messageBus: composition.messageBus,
     registry: composition.registry,
     comparison: composition.comparison,
+    ceoPlanOrchestrator: composition.ceoPlans.orchestrator,
     webOrigin: cliOptions.webOrigin,
     limits: DEFAULT_LIMITS,
     storageMode: db !== undefined ? "durable" : "in-memory",

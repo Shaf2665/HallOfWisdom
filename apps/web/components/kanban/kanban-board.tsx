@@ -261,6 +261,14 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
     router.push(`/comparisons/${encodeURIComponent(created.comparisonId)}`);
   }
 
+  /** See `CEO_PLANS_ACTION`'s doc comment in `lib/kanban.ts` — pure client-side navigation, nothing to await first. */
+  const handleOpenCeoPlans = useCallback(
+    (taskId: string): void => {
+      router.push(`/ceo?parentTaskId=${encodeURIComponent(taskId)}`);
+    },
+    [router],
+  );
+
   function handleCreated(created: CreateTaskResponse): void {
     setAnnouncement(`${created.task.title} added to Backlog.`);
     void refresh();
@@ -366,7 +374,11 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
           onDragEnd={handleDragEnd}
           onDragCancel={handleDragCancel}
         >
-          <div className="flex gap-4 overflow-x-auto pb-2">
+          <div
+            role="region"
+            aria-label="Kanban workflow columns, scrollable horizontally"
+            className="relative flex gap-4 overflow-x-auto pb-2"
+          >
             {COLUMN_DEFINITIONS.map((column) => (
               <KanbanColumn
                 key={column.status}
@@ -384,6 +396,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
                 onOpenAssign={setAssigningRecord}
                 onOpenFindAgent={setFindingAgentRecord}
                 onOpenCompare={setComparingRecord}
+                onOpenCeoPlans={handleOpenCeoPlans}
                 onStart={handleStart}
                 onCancel={handleCancel}
                 onOpenDiscussion={handleOpenDiscussion}

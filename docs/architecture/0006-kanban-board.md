@@ -430,3 +430,72 @@ blocked, or assigned-not-started), cancellation goes through the manual transiti
 (`targetStatus: "cancelled"`), which completes synchronously and emits no event at all — there is no
 run to cancel. Both the Task Console's `TaskDetail` and the Kanban card make this choice the same
 way: `record.runId === undefined` routes to `/transition`; otherwise to `/cancel`.
+
+## CEO plans action (Phase 14)
+
+`lib/kanban.ts`'s `CEO_PLANS_ACTION` appears in a card's Actions menu for `backlog`, `ready`, and
+`assigned` tasks, navigating to `/ceo?parentTaskId=<id>` — it never itself creates a plan, assigns
+an adapter, or changes task status. `assigned` is included deliberately, not just `backlog`/
+`ready`: a task's `requirements` (what the CEO Agent's deterministic planner needs to recommend a
+step adapter) are only ever persisted through this board's own routing/assignment flow, which
+always transitions a task to `assigned` — omitting that status from the action list would make a
+real, adapter-recommended CEO plan unreachable through any genuine card-driven navigation. See
+[`0014-ceo-planning-approval-and-delegation.md`](0014-ceo-planning-approval-and-delegation.md) for
+the full CEO Agent design; child tasks a delegated plan creates land back on this same board,
+`assigned` and unstarted, using the existing "Start task" action unchanged.
+
+## Kanban mobile overflow containment (Phase 14.3)
+
+**The guarantee.** `/board` never produces `document`-level horizontal scroll, at any viewport
+width, however many cards accumulate across however many columns. The columns row
+(`KanbanBoard`'s `<div role="region" aria-label="Kanban workflow columns, scrollable
+horizontally">`) is the one intentionally horizontally-scrollable region — ten fixed-width
+(`w-72 shrink-0`) columns will always exceed a narrow viewport's width, so that row's own
+`overflow-x-auto` is deliberate and expected, not a defect. What must never happen is that
+scrollability leaking out to `document.documentElement`/`document.body` themselves.
+
+**Root cause.** The columns row had no `position: relative` of its own. A card's `sr-only`
+(visually-hidden, `position: absolute`) label is positioned relative to its nearest _positioned_
+ancestor; without one at the columns row, that ancestor search continued all the way up to the
+document. Chrome computes an absolutely-positioned element's un-scrolled _static position_ against
+its containing block's full, un-clipped width — so once enough cards existed for the columns row's
+true content width to exceed the viewport (which happens even with just a few cards at 390px), each
+`sr-only` label's static position pushed `document.documentElement`'s own scrollable-overflow region
+wider, even though the columns row's own _visible_ content was already correctly clipped by its own
+`overflow-x-auto`. Confirmed live via a diagnostic that walked every element in the DOM for the
+widest `position: fixed`/`absolute` `right` edge at the moment of overflow: it was always a
+`<dt class="sr-only">` inside a card, never a Kanban column `<section>` itself.
+
+**The fix.** One class: `relative` added to the columns row
+(`apps/web/components/kanban/kanban-board.tsx`). This gives every `sr-only` descendant a correctly
+bounded containing block (the columns row itself, which is already clipped and scrollable), so its
+static position can no longer leak past the row's own visible bounds into the document's scroll
+region. No column was removed, no content was hidden, and desktop layout is unchanged — this is a
+containing-block fix, not a clipping or truncation fix.
+
+**Content containment.** Independently of the containing-block fix, card content that could
+plausibly force its own ancestor wider (long titles, requirement text, adapter names, error
+messages) got `break-words` so long unbroken tokens wrap rather than pushing their container wider.
+Nothing is truncated or hidden — this only prevents a single very long word from acting like a
+fixed-width constraint.
+
+**Accessibility.** The columns row carries `role="region"` and an `aria-label` announcing that it
+scrolls horizontally, so assistive technology has an accessible name for the one region that
+intentionally scrolls. Every column remains keyboard-reachable via ordinary Tab order regardless of
+how far down the board it sits; a focused control is brought into view by the browser's native
+focus-scroll, never by widening the document itself (verified: focus-scrolling a control in a later
+column never increases `document.documentElement.scrollWidth`).
+
+**Verification.** `apps/e2e/tests/kanban-mobile-overflow.spec.ts` heavily populates the board (14+
+cards spread across multiple columns) at 390×844 and asserts zero `document`/`body`-level horizontal
+overflow throughout, confirms the columns row's own internal horizontal scroll still reaches a later
+column, confirms a card in a non-initial position is reachable via ordinary scrolling, and exercises
+Actions/CEO plans/`MoveMenu` and Escape-with-focus-restoration under that accumulated state. A
+second test at 1440×900 confirms the normal desktop layout (all ten column headings on one row) and
+that drag-and-drop remains usable via a real `page.mouse` sequence — no synthetic dispatch, no
+`force: true`. A third test proves ordinary Tab navigation reaches a card in a later column without
+a focus trap and without ever widening the page. `move-menu-accumulation.spec.ts` and
+`ceo-plans-focused.spec.ts` (test D) now also assert no horizontal overflow directly on `/board`
+itself, in addition to their own original scope — live regression coverage for this fix, since prior
+to Phase 14.3 those assertions were deliberately scoped away from `/board` because the underlying
+defect was still present and undiagnosed.

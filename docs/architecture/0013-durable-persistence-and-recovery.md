@@ -105,7 +105,13 @@ Pure SQLite plumbing, no domain knowledge:
   private/internal-only column (working directories, resolved source-repository paths, candidate
   worktree paths) lives in its own table, never as a column on a public-facing table — a structural
   guarantee, not a convention, since the repository queries that build a public `TaskRecord`/
-  `AgentComparisonRecord` never join against those tables at all.
+  `AgentComparisonRecord` never join against those tables at all. Migration 2 adds the durable
+  ownership fence (Phase 13.2, below); migration 3 adds the CEO plan control plane
+  (`ceo_plans`/`ceo_plan_versions`/`ceo_approvals`/`ceo_delegation_links`, Phase 14 — see
+  [`0014-ceo-planning-approval-and-delegation.md`](0014-ceo-planning-approval-and-delegation.md));
+  migration 4 adds `ceo_plans.last_progress_fingerprint` (nullable `TEXT`), the idempotency guard
+  behind Phase 14.1's event-driven progress synchronizer — see `0014`'s "Progress synchronization"
+  section.
 - **`migration-runner.ts`** — reads `schema_migrations`' recorded max version, applies whichever
   migrations are missing, one transaction per migration, recording the version row only on success.
   Fails closed (`UnsupportedSchemaVersionError`) if the database's recorded version exceeds the highest
@@ -454,6 +460,19 @@ that acquires ownership and stays alive, listening on stdin for commands
 instance (the actual `dist/server.js` production binary) legitimately take over after real
 `staleAfterMs` elapses, then command the _original, still-open_ connection to attempt a write. See
 "Testing" below for the full proof this enables.
+
+**`withTransaction` is reentrant — a nested call becomes a `SAVEPOINT`, not a second top-level
+transaction.** This is what lets Phase 14's delegation atomic unit span four stores whose
+individual repositories each already call `withTransaction` internally: the outer call opens the
+real `BEGIN IMMEDIATE`/fence-check/`COMMIT`, and every nested call inside it opens/releases a named
+`SAVEPOINT` instead, rolling back to that savepoint (not the whole transaction) on a nested
+failure the outer call recovers from. **(Phase 14.1)** added dedicated regression coverage for this
+specifically at multiple levels of nesting — `transaction.test.ts`, "nested calls": an inner
+`SAVEPOINT` that succeeds is still rolled back if the outer transaction later fails; an inner
+failure the outer call catches and continues past leaves no partial state from the inner attempt;
+ownership loss detected at the outer boundary fails every nested `SAVEPOINT` together, not just the
+outermost; no premature publication occurs from an inner `SAVEPOINT` alone; and four levels of
+nesting with a failure at the innermost level leaves zero partial state at any level.
 
 ## Startup and shutdown ordering — `server.ts`
 
@@ -819,5 +838,13 @@ original three). See "Testing," item 4, above for what each of the four tests in
 
 Phase 13 — Durable State Persistence and Restart Recovery — Phase 13.1 — Durable Browser Restart,
 Process-Test Reliability and Single-Instance Ownership — and Phase 13.2 — Durable Ownership Fencing
-and Full Comparison Restart Verification — are all complete. The next phase proposed (not started,
-not yet approved) is **Phase 14 — CEO Agent Planning, Delegation and Human Approval**.
+and Full Comparison Restart Verification — are all complete.
+
+Phase 14 — CEO Agent Planning, Approval-Gated Delegation and Plan Tracking — followed and reused
+this exact storage-port pattern for its own plan store (`SqliteCeoPlanStore` alongside
+`InMemoryCeoPlanStore`, both behind `CeoPlanStorePort`, both run against one shared contract test
+suite), added its own migration to this schema, and extended restart-recovery testing to cover a
+delegated plan's version/approval/delegation-link/event history surviving an unclean restart
+byte-identical. See
+[`0014-ceo-planning-approval-and-delegation.md`](0014-ceo-planning-approval-and-delegation.md) for
+the full design.

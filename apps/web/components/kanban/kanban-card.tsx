@@ -24,6 +24,7 @@ export function KanbanCard({
   onOpenAssign,
   onOpenFindAgent,
   onOpenCompare,
+  onOpenCeoPlans,
   onStart,
   onCancel,
   onOpenDiscussion,
@@ -48,6 +49,7 @@ export function KanbanCard({
   readonly onOpenAssign: (record: TaskRecord) => void;
   readonly onOpenFindAgent: (record: TaskRecord) => void;
   readonly onOpenCompare: (record: TaskRecord) => void;
+  readonly onOpenCeoPlans: (taskId: string) => void;
   readonly onStart: (taskId: string) => Promise<void>;
   readonly onCancel: (record: TaskRecord) => Promise<void>;
   readonly onOpenDiscussion: (taskId: string) => Promise<void>;
@@ -137,6 +139,15 @@ export function KanbanCard({
       // dialog.
       actionsButtonRef.current?.focus();
       onOpenCompare(record);
+      return;
+    }
+    if (action.kind === "ceo-plans") {
+      // Pure client-side navigation, like "discuss" — but synchronous and
+      // with no server round trip first (there is nothing to ensure
+      // exists; `/ceo` itself lists whatever plans already exist for this
+      // task and offers creating a new one). No refocus is needed since
+      // the page is about to navigate away entirely.
+      onOpenCeoPlans(task.taskId);
       return;
     }
     if (action.kind === "start") {
@@ -239,7 +250,7 @@ export function KanbanCard({
         <StatusBadge status={task.status} />
       </div>
 
-      <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-xs text-stone-500 dark:text-stone-400">
+      <dl className="grid grid-cols-2 gap-x-2 gap-y-0.5 break-words text-xs text-stone-500 dark:text-stone-400">
         <div>
           <dt className="sr-only">Project</dt>
           <dd>{task.projectId}</dd>
@@ -267,7 +278,9 @@ export function KanbanCard({
       </dl>
 
       {record.failure ? (
-        <p className="text-xs text-red-700 dark:text-red-400">Failure: {record.failure.code}</p>
+        <p className="break-words text-xs text-red-700 dark:text-red-400">
+          Failure: {record.failure.code}
+        </p>
       ) : null}
       {record.cancellationRequested ? (
         <p className="text-xs text-stone-600 dark:text-stone-300" role="status">
@@ -280,7 +293,7 @@ export function KanbanCard({
         </p>
       ) : null}
       {errorMessage ? (
-        <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+        <p role="alert" className="break-words text-xs text-red-600 dark:text-red-400">
           {errorMessage}
         </p>
       ) : null}

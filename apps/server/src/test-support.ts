@@ -21,6 +21,10 @@ import {
   createComparisonComposition,
   type ComparisonComposition,
 } from "./composition/comparison-composition-root.js";
+import {
+  createCeoPlanComposition,
+  type CeoPlanComposition,
+} from "./ceo-plans/ceo-plan-composition.js";
 
 /** JSON shape of a `TaskRecord` as it round-trips through an HTTP response body. */
 export interface TaskRecordJson {
@@ -83,6 +87,8 @@ export interface TestHarness {
   readonly messageBus: MessageBus;
   readonly limits: ServerLimits;
   readonly comparison?: ComparisonComposition | undefined;
+  /** Phase 14 — always composed (ephemeral, deterministic planner), matching every other Hall Core composition root. */
+  readonly ceoPlans: CeoPlanComposition;
   /** No-op unless `withComparisons` was set — removes the temp comparison-root directory this harness created. */
   cleanupComparisonRoot(): void;
 }
@@ -115,6 +121,14 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
   const generalBoard = boardStore.seedGeneralBoard(new Date().toISOString());
   messageStore.registerBoard(generalBoard.boardId);
 
+  const ceoPlans = createCeoPlanComposition({
+    registry,
+    taskStore,
+    boardStore,
+    messageStore,
+    messageBus,
+  });
+
   let comparison: ComparisonComposition | undefined;
   let comparisonRootDir: string | undefined;
   if (options.withComparisons) {
@@ -141,6 +155,7 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     messageBus,
     limits,
     comparison,
+    ceoPlans,
     cleanupComparisonRoot(): void {
       if (comparisonRootDir) fs.rmSync(comparisonRootDir, { recursive: true, force: true });
     },
@@ -162,6 +177,7 @@ export async function buildTestApp(options: TestHarnessOptions): Promise<{
     messageBus: harness.messageBus,
     registry: harness.registry,
     comparison: harness.comparison,
+    ceoPlanOrchestrator: harness.ceoPlans.orchestrator,
     webOrigin: options.webOrigin,
     limits: harness.limits,
     logger: options.logger ?? false,

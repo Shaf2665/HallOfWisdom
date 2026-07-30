@@ -252,17 +252,18 @@ describe("isCardLocked / canDrag", () => {
 });
 
 describe("availableActionsFor", () => {
-  it("backlog: Move to Ready, Move to Blocked, Cancel task, Open discussion", () => {
+  it("backlog: Move to Ready, Move to Blocked, Cancel task, CEO plans, Open discussion", () => {
     const actions = availableActionsFor(makeRecord({ status: "backlog" }));
     expect(actions.map((a) => a.label)).toEqual([
       "Move to Ready",
       "Move to Blocked",
       "Cancel task",
+      "CEO plans",
       "Open discussion",
     ]);
   });
 
-  it("ready: Move to Backlog, Assign agent, Find suitable agent, Compare agents, Move to Blocked, Cancel task, Open discussion", () => {
+  it("ready: Move to Backlog, Assign agent, Find suitable agent, Compare agents, Move to Blocked, Cancel task, CEO plans, Open discussion", () => {
     const actions = availableActionsFor(makeRecord({ status: "ready" }));
     expect(actions.map((a) => a.label)).toEqual([
       "Move to Backlog",
@@ -271,17 +272,19 @@ describe("availableActionsFor", () => {
       "Compare agents",
       "Move to Blocked",
       "Cancel task",
+      "CEO plans",
       "Open discussion",
     ]);
   });
 
-  it("assigned (not started): Start task, Return to Ready, Move to Blocked, Cancel task, Open discussion", () => {
+  it("assigned (not started): Start task, Return to Ready, Move to Blocked, Cancel task, CEO plans, Open discussion", () => {
     const actions = availableActionsFor(makeRecord({ status: "assigned" }, undefined));
     expect(actions.map((a) => a.label)).toEqual([
       "Start task",
       "Return to Ready",
       "Move to Blocked",
       "Cancel task",
+      "CEO plans",
       "Open discussion",
     ]);
   });

@@ -43,6 +43,7 @@ function renderCard(
     onOpenAssign: (record: TaskRecord) => void;
     onOpenFindAgent: (record: TaskRecord) => void;
     onOpenCompare: (record: TaskRecord) => void;
+    onOpenCeoPlans: (taskId: string) => void;
     onStart: (taskId: string) => Promise<void>;
     onCancel: (record: TaskRecord) => Promise<void>;
     onOpenDiscussion: (taskId: string) => Promise<void>;
@@ -54,6 +55,7 @@ function renderCard(
   const onOpenAssign = overrides.onOpenAssign ?? vi.fn<(record: TaskRecord) => void>();
   const onOpenFindAgent = overrides.onOpenFindAgent ?? vi.fn<(record: TaskRecord) => void>();
   const onOpenCompare = overrides.onOpenCompare ?? vi.fn<(record: TaskRecord) => void>();
+  const onOpenCeoPlans = overrides.onOpenCeoPlans ?? vi.fn<(taskId: string) => void>();
   const onStart =
     overrides.onStart ?? vi.fn<(taskId: string) => Promise<void>>().mockResolvedValue(undefined);
   const onCancel =
@@ -76,6 +78,7 @@ function renderCard(
           onOpenAssign={onOpenAssign}
           onOpenFindAgent={onOpenFindAgent}
           onOpenCompare={onOpenCompare}
+          onOpenCeoPlans={onOpenCeoPlans}
           onStart={onStart}
           onCancel={onCancel}
           onOpenDiscussion={onOpenDiscussion}
@@ -90,6 +93,7 @@ function renderCard(
     onOpenAssign,
     onOpenFindAgent,
     onOpenCompare,
+    onOpenCeoPlans,
     onStart,
     onCancel,
     onOpenDiscussion,
@@ -129,6 +133,7 @@ describe("KanbanCard", () => {
             onOpenAssign={vi.fn()}
             onOpenFindAgent={vi.fn()}
             onOpenCompare={vi.fn()}
+            onOpenCeoPlans={vi.fn()}
             onStart={vi.fn()}
             onCancel={vi.fn()}
             onOpenDiscussion={vi.fn()}
@@ -153,6 +158,7 @@ describe("KanbanCard", () => {
             onOpenAssign={vi.fn()}
             onOpenFindAgent={vi.fn()}
             onOpenCompare={vi.fn()}
+            onOpenCeoPlans={vi.fn()}
             onStart={vi.fn()}
             onCancel={vi.fn()}
             onOpenDiscussion={vi.fn()}

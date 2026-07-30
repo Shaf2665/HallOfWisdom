@@ -25,3 +25,17 @@ export const DURABLE_RESTART_WEB_PORT = 3095;
  */
 export const DUAL_FIXTURE_DURABLE_RESTART_HALL_CORE_PORT = 4396;
 export const DUAL_FIXTURE_DURABLE_RESTART_WEB_PORT = 3096;
+
+/**
+ * Phase 14.1 — the CEO plan editing/delegation durable restart spec
+ * (`ceo-plans-durable-restart.spec.ts`) spawns the real production
+ * `dist/server.js` binary and a dedicated Hall Web dev server, on yet
+ * another pair of dedicated ports, for the same reason the two pairs above
+ * each use their own: it needs to stop and restart Hall Core mid-test
+ * while Hall Web and the browser stay open. `workers: 1` in
+ * `playwright.config.ts` means these three durable-restart specs never run
+ * concurrently, so the ports only need to be distinct, not exclusively
+ * reserved at every instant.
+ */
+export const CEO_PLANS_DURABLE_RESTART_HALL_CORE_PORT = 4397;
+export const CEO_PLANS_DURABLE_RESTART_WEB_PORT = 3097;

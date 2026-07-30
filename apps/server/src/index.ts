@@ -138,3 +138,23 @@ export type {
   CoreStoresComposition,
   CoreStoresCompositionOptions,
 } from "./composition/mock-agent-composition-root.js";
+
+// Phase 14 — the CEO plan control plane, exported so the E2E fixture
+// composition can wire it in identically to production (see
+// `ceo-plan-composition.ts`'s own doc comment for why this is the one
+// function every composition root calls, never a parallel copy).
+export { createCeoPlanComposition } from "./ceo-plans/ceo-plan-composition.js";
+export type {
+  CeoPlanComposition,
+  CeoPlanCompositionOptions,
+} from "./ceo-plans/ceo-plan-composition.js";
+export { CeoPlanOrchestrator } from "./ceo-plans/ceo-plan-orchestrator.js";
+export type { CeoPlanOrchestratorOptions } from "./ceo-plans/ceo-plan-orchestrator.js";
+
+// Phase 14.1 — the startup reconciliation pass, exported for the same
+// reason as the CEO plan composition above: the E2E fixture composition
+// must wire it in identically to production, never a parallel
+// reimplementation. (`wrapTaskStoreWithMutationHook` itself needs no
+// export — `createCoreStoresComposition`'s new `onTaskMutated` option
+// applies it internally; every composition root just passes a callback.)
+export { reconcileAllPlanProgress } from "./ceo-plans/ceo-plan-progress-reconciliation.js";

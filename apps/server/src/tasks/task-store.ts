@@ -20,6 +20,14 @@ export interface TaskStoreOptions {
   readonly maxTasks: number;
 }
 
+/** Opaque to every caller except `TaskStore` itself — see `snapshot()`'s doc comment. */
+export interface TaskStoreSnapshot {
+  readonly _brand: "TaskStoreSnapshot";
+  readonly records: ReadonlyMap<string, TaskRecord>;
+  readonly revisions: ReadonlyMap<string, number>;
+  readonly workingDirectories: ReadonlyMap<string, string>;
+}
+
 /**
  * In-memory task storage — the ephemeral implementation of `TaskStorePort`
  * (Phase 13's durable sibling is `SqliteTaskStore`). `get`/`list` always
@@ -95,6 +103,10 @@ export class TaskStore implements TaskStorePort {
     }
     this.#records.set(record.task.taskId, record);
     this.#revisions.set(record.task.taskId, 0);
+  }
+
+  remainingCapacity(): number {
+    return Math.max(0, this.#maxTasks - this.#records.size);
   }
 
   /**
@@ -337,6 +349,50 @@ export class TaskStore implements TaskStorePort {
   clearRunId(taskId: string): void {
     this.#mustGetLive(taskId).runId = undefined;
     this.#bumpRevision(taskId);
+  }
+
+  /**
+   * Phase 14.1 — the ephemeral-mode analogue of `withTransaction`'s
+   * durable-mode SAVEPOINT, used by `createEphemeralAtomicUnit` to give
+   * in-memory CEO plan delegation genuine all-or-nothing semantics. This
+   * is a deep clone (`structuredClone` per record), NOT a shallow `Map`
+   * copy: several mutating methods above (`assignIfEligible`, `setRunId`,
+   * `setCompleted`, ...) mutate an already-stored `TaskRecord`'s fields
+   * in place rather than replacing the whole record object (this is a
+   * deliberate, carefully-documented choice — see e.g.
+   * `assignIfEligible`'s own doc comment on why its no-`await`-gap CAS
+   * mutates the live record directly). A shallow clone's Map would still
+   * point at those same live objects, so a later in-place mutation would
+   * silently corrupt the "snapshot." `#revisions`/`#workingDirectories`
+   * hold only primitives, so a shallow clone is correct for those.
+   */
+  snapshot(): TaskStoreSnapshot {
+    return {
+      _brand: "TaskStoreSnapshot",
+      records: new Map(
+        Array.from(this.#records, ([taskId, record]) => [taskId, structuredClone(record)]),
+      ),
+      revisions: new Map(this.#revisions),
+      workingDirectories: new Map(this.#workingDirectories),
+    };
+  }
+
+  /**
+   * Replaces this store's entire state with `snapshot`'s. The snapshot's
+   * records were already deep-cloned at `snapshot()` time and nothing
+   * else holds a reference to them, so they can be adopted directly here
+   * without cloning again. Fields are `readonly` `Map`s, so this clears
+   * and repopulates each in place rather than reassigning them.
+   */
+  restore(snapshot: TaskStoreSnapshot): void {
+    this.#records.clear();
+    for (const [taskId, record] of snapshot.records) this.#records.set(taskId, record);
+    this.#revisions.clear();
+    for (const [taskId, revision] of snapshot.revisions) this.#revisions.set(taskId, revision);
+    this.#workingDirectories.clear();
+    for (const [taskId, workingDirectory] of snapshot.workingDirectories) {
+      this.#workingDirectories.set(taskId, workingDirectory);
+    }
   }
 
   #mustGetLive(taskId: string): TaskRecord {

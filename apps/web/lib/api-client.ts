@@ -5,15 +5,25 @@ import {
   agentComparisonRecordSchema,
   cancelComparisonCandidateResponseSchema,
   cancelTaskResponseSchema,
+  ceoPlanSchema,
+  ceoPlanVersionSchema,
   communicationBoardSchema,
   communicationMessageSchema,
+  createCeoPlanResponseSchema,
   createTaskResponseSchema,
+  decideCeoPlanApprovalResponseSchema,
+  delegateCeoPlanResponseSchema,
   ensureBoardResponseSchema,
   errorResponseSchema,
+  getCeoPlanResponseSchema,
   healthResponseSchema,
   listAdaptersResponseSchema,
   listBoardMessagesResponseSchema,
   listBoardsResponseSchema,
+  listCeoApprovalsResponseSchema,
+  listCeoPlanEventsResponseSchema,
+  listCeoPlansResponseSchema,
+  listCeoPlanVersionsResponseSchema,
   listComparisonsResponseSchema,
   listTasksResponseSchema,
   routeAndAssignResponseSchema,
@@ -23,13 +33,22 @@ import {
   type AgentComparisonRecord,
   type CancelComparisonCandidateResponse,
   type CancelTaskResponse,
+  type CeoPlan,
   type CommunicationBoard,
   type CommunicationMessage,
+  type CreateCeoPlanResponse,
   type CreateTaskResponse,
+  type DecideCeoPlanApprovalResponse,
+  type DelegateCeoPlanResponse,
   type EnsureBoardResponse,
+  type GetCeoPlanResponse,
   type HealthResponse,
   type ListBoardMessagesResponse,
   type ListBoardsResponse,
+  type ListCeoApprovalsResponse,
+  type ListCeoPlanEventsResponse,
+  type ListCeoPlansResponse,
+  type ListCeoPlanVersionsResponse,
   type ListComparisonsResponse,
   type RouteAndAssignResponse,
   type RoutingAnalysisResponse,
@@ -584,6 +603,231 @@ export function deleteComparison(
     `${baseUrl}/api/v1/comparisons/${encodeURIComponent(comparisonId)}`,
     { method: "DELETE" },
     agentComparisonRecordSchema,
+    options,
+  );
+}
+
+/**
+ * Phase 14 — the CEO Agent control plane. Every mutating function below
+ * does exactly one thing, matching the server route it calls one-to-one
+ * (`routes/ceo-plans.ts`): `createCeoPlan` only ever generates a draft
+ * (never a child task, never an adapter assignment), `approveCeoPlan`
+ * only ever records a decision (never starts anything), and
+ * `delegateCeoPlan` is the one function that creates child tasks — always
+ * left unstarted. See `docs/architecture/0014-ceo-planning-approval-and-delegation.md`.
+ */
+export interface CreateCeoPlanRequestBody {
+  readonly planningInstructions?: string;
+}
+
+export function createCeoPlan(
+  baseUrl: string,
+  taskId: string,
+  body: CreateCeoPlanRequestBody = {},
+  options: RequestOptions = {},
+): Promise<CreateCeoPlanResponse> {
+  return request(
+    `${baseUrl}/api/v1/tasks/${encodeURIComponent(taskId)}/ceo-plans`,
+    { method: "POST", body },
+    createCeoPlanResponseSchema,
+    options,
+  );
+}
+
+export function listCeoPlans(
+  baseUrl: string,
+  options: RequestOptions = {},
+): Promise<ListCeoPlansResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans`,
+    { method: "GET" },
+    listCeoPlansResponseSchema,
+    options,
+  );
+}
+
+export function getCeoPlan(
+  baseUrl: string,
+  planId: string,
+  options: RequestOptions = {},
+): Promise<GetCeoPlanResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}`,
+    { method: "GET" },
+    getCeoPlanResponseSchema,
+    options,
+  );
+}
+
+export function listCeoPlanVersions(
+  baseUrl: string,
+  planId: string,
+  options: RequestOptions = {},
+): Promise<ListCeoPlanVersionsResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/versions`,
+    { method: "GET" },
+    listCeoPlanVersionsResponseSchema,
+    options,
+  );
+}
+
+export function getCeoPlanVersion(
+  baseUrl: string,
+  planId: string,
+  version: number,
+  options: RequestOptions = {},
+): Promise<z.infer<typeof ceoPlanVersionSchema>> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/versions/${String(version)}`,
+    { method: "GET" },
+    ceoPlanVersionSchema,
+    options,
+  );
+}
+
+export function listCeoApprovals(
+  baseUrl: string,
+  planId: string,
+  options: RequestOptions = {},
+): Promise<ListCeoApprovalsResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/approvals`,
+    { method: "GET" },
+    listCeoApprovalsResponseSchema,
+    options,
+  );
+}
+
+export function listCeoPlanEvents(
+  baseUrl: string,
+  planId: string,
+  afterSequence?: number,
+  options: RequestOptions = {},
+): Promise<ListCeoPlanEventsResponse> {
+  const query = afterSequence === undefined ? "" : `?afterSequence=${String(afterSequence)}`;
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/events${query}`,
+    { method: "GET" },
+    listCeoPlanEventsResponseSchema,
+    options,
+  );
+}
+
+export interface CeoPlanStepEditInput {
+  readonly id: string;
+  readonly position: number;
+  readonly title: string;
+  readonly objective: string;
+  readonly boundedInstructions: string;
+  readonly acceptanceCriteria: readonly string[];
+  readonly dependencies: readonly string[];
+  readonly requirements?: TaskRequirements;
+  readonly selectedAdapterId?: string;
+}
+
+export interface CreateCeoPlanVersionRequestBody {
+  readonly expectedMutationToken: string;
+  readonly objective: string;
+  readonly summary: string;
+  readonly assumptions: readonly string[];
+  readonly constraints: readonly string[];
+  readonly steps: readonly CeoPlanStepEditInput[];
+}
+
+/** Revises a draft/rejected plan into a new immutable version — never mutates the previous one. Any prior approval is invalidated server-side. */
+export function createCeoPlanVersion(
+  baseUrl: string,
+  planId: string,
+  body: CreateCeoPlanVersionRequestBody,
+  options: RequestOptions = {},
+): Promise<CreateCeoPlanResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/versions`,
+    { method: "POST", body },
+    createCeoPlanResponseSchema,
+    options,
+  );
+}
+
+/** Submits the active draft/rejected version for human approval. Creates no child task, starts nothing. */
+export function submitCeoPlan(
+  baseUrl: string,
+  planId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<CeoPlan> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/submit`,
+    { method: "POST", body: { expectedMutationToken } },
+    ceoPlanSchema,
+    options,
+  );
+}
+
+export interface DecideCeoPlanApprovalRequestBody {
+  readonly expectedMutationToken: string;
+  readonly planVersion: number;
+  readonly contentHash: string;
+  readonly operatorNote?: string;
+}
+
+/** Records an explicit human approval, bound to the exact version and content hash the operator reviewed. Never starts an adapter. */
+export function approveCeoPlan(
+  baseUrl: string,
+  planId: string,
+  body: DecideCeoPlanApprovalRequestBody,
+  options: RequestOptions = {},
+): Promise<DecideCeoPlanApprovalResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/approve`,
+    { method: "POST", body },
+    decideCeoPlanApprovalResponseSchema,
+    options,
+  );
+}
+
+/** Records an explicit human rejection. The plan may later be revised into a new draft version via `createCeoPlanVersion`. */
+export function rejectCeoPlan(
+  baseUrl: string,
+  planId: string,
+  body: DecideCeoPlanApprovalRequestBody,
+  options: RequestOptions = {},
+): Promise<DecideCeoPlanApprovalResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/reject`,
+    { method: "POST", body },
+    decideCeoPlanApprovalResponseSchema,
+    options,
+  );
+}
+
+/** Creates and assigns one child task per approved plan step. Every child task is left unstarted — starting remains a separate, explicit operator action on the Kanban board. */
+export function delegateCeoPlan(
+  baseUrl: string,
+  planId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<DelegateCeoPlanResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/delegate`,
+    { method: "POST", body: { expectedMutationToken } },
+    delegateCeoPlanResponseSchema,
+    options,
+  );
+}
+
+/** Cancels a plan before delegation. Does not exist to cancel already-delegated child tasks — those are cancelled individually, on the Kanban board. */
+export function cancelCeoPlan(
+  baseUrl: string,
+  planId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<CeoPlan> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/cancel`,
+    { method: "POST", body: { expectedMutationToken } },
+    ceoPlanSchema,
     options,
   );
 }

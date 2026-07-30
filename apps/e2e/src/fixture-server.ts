@@ -7,6 +7,8 @@ import {
   createHallCoreApp,
   createComparisonComposition,
   createCoreStoresComposition,
+  createCeoPlanComposition,
+  reconcileAllPlanProgress,
   resolveDataDir,
   openDurableStorage,
   startOwnershipFenceMonitor,
@@ -15,6 +17,7 @@ import {
   DEFAULT_LIMITS,
   LOCAL_ONLY_HOST,
   DATABASE_BUSY_TIMEOUT_MS,
+  type CeoPlanOrchestrator,
   type ComparisonComposition,
   type HallDatabase,
   type OwnershipFenceMonitorHandle,
@@ -190,6 +193,12 @@ async function main(): Promise<void> {
     });
   }
 
+  // Phase 14.1 — identical wiring to production's
+  // `createMockAgentServerComposition`: the hook needs a callback at
+  // `taskStore` construction time, but `CeoPlanOrchestrator` does not
+  // exist until `ceoPlans` is built below — see that function's own
+  // comment for why the ref must be captured this way.
+  const ceoOrchestratorRef: { current: CeoPlanOrchestrator | undefined } = { current: undefined };
   const stores = createCoreStoresComposition({
     registry,
     workspaceRoot,
@@ -198,7 +207,33 @@ async function main(): Promise<void> {
       console.error(`[e2e fixture server] task ${taskId} execution failed:`, error);
     },
     db,
+    onTaskMutated: (taskId) => {
+      ceoOrchestratorRef.current?.onChildTaskMutated(taskId);
+    },
   });
+
+  // Phase 14 — identical to production's `createMockAgentServerComposition`
+  // (see `ceo-plan-composition.ts`'s doc comment): reuses this same
+  // `stores.taskStore`/`stores.boardStore`/`stores.messageStore` and, in
+  // durable mode, the same `db` — so a CEO plan delegated through this
+  // fixture composition exercises the real fenced, atomic delegation
+  // path end to end, never a parallel reimplementation of it.
+  const ceoPlans = createCeoPlanComposition({
+    registry,
+    taskStore: stores.taskStore,
+    boardStore: stores.boardStore,
+    messageStore: stores.messageStore,
+    messageBus: stores.messageBus,
+    db,
+  });
+  ceoOrchestratorRef.current = ceoPlans.orchestrator;
+  // Phase 14.1 — idempotent backstop for the (rare, fixture-only) case of
+  // a plan whose children finished progress-hook-invisibly before this
+  // composition was built — see `reconcileAllPlanProgress`'s doc
+  // comment. This fixture composition does not run the full
+  // `runRestartRecovery` pass (see the rehydration comment below), so
+  // this is the closest equivalent it has.
+  reconcileAllPlanProgress(ceoPlans.orchestrator);
 
   const comparison: ComparisonComposition = createComparisonComposition({
     registry,
@@ -250,6 +285,7 @@ async function main(): Promise<void> {
     messageBus: stores.messageBus,
     registry,
     comparison,
+    ceoPlanOrchestrator: ceoPlans.orchestrator,
     webOrigin,
     limits,
     storageMode: durable ? "durable" : "in-memory",

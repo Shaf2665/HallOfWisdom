@@ -53,8 +53,57 @@ interface OwnershipRow {
  * fencing," for why a displaced instance is allowed to keep serving
  * (harmlessly stale) reads.
  */
+/**
+ * Phase 14 — nesting depth per open connection, tracked outside
+ * `HallDatabase` itself so its public surface stays exactly what Phase 13
+ * shipped. A depth of 0 means "no open transaction on this connection";
+ * `withTransaction` calls at depth 0 behave byte-for-byte as they always
+ * have. This exists because the CEO plan delegation coordinator
+ * (`ceo-plans/ceo-plan-orchestrator.ts`) must write across three existing
+ * stores (task creation, plan/delegation-link/event records, the board
+ * audit message) as one atomic, fenced unit — and every one of those
+ * stores' own public methods already opens its own `withTransaction`.
+ * SQLite has no nested `BEGIN`, so a call made while a transaction is
+ * already open on this connection participates in it via `SAVEPOINT`
+ * instead of starting a new one.
+ */
+const transactionDepth = new WeakMap<HallDatabase, number>();
+
+function withNestedTransaction<T>(db: HallDatabase, depth: number, fn: () => T): T {
+  const savepoint = `sp_${String(depth)}`;
+  db.exec(`SAVEPOINT ${savepoint};`);
+  transactionDepth.set(db, depth + 1);
+  try {
+    const result = fn();
+    db.exec(`RELEASE SAVEPOINT ${savepoint};`);
+    return result;
+  } catch (error) {
+    try {
+      db.exec(`ROLLBACK TO SAVEPOINT ${savepoint};`);
+      db.exec(`RELEASE SAVEPOINT ${savepoint};`);
+    } catch {
+      // The outermost transaction's own catch below has already rolled
+      // everything back (e.g. the connection lost its write lock) — the
+      // original `error` is what matters and is always rethrown regardless.
+    }
+    throw error;
+  } finally {
+    transactionDepth.set(db, depth);
+  }
+}
+
 export function withTransaction<T>(db: HallDatabase, fn: () => T): T {
+  const depth = transactionDepth.get(db) ?? 0;
+  if (depth > 0) {
+    // Already inside an outer `withTransaction` on this same connection —
+    // the fence was already verified once when that outer transaction
+    // opened, and cannot change mid-transaction (SQLite already holds the
+    // write lock), so it is deliberately not re-checked here.
+    return withNestedTransaction(db, depth, fn);
+  }
+
   db.exec("BEGIN IMMEDIATE;");
+  transactionDepth.set(db, 1);
   try {
     const fence = db.ownershipFence;
     if (fence !== undefined) {
@@ -78,5 +127,7 @@ export function withTransaction<T>(db: HallDatabase, fn: () => T): T {
       // rethrown below regardless.
     }
     throw error;
+  } finally {
+    transactionDepth.set(db, 0);
   }
 }

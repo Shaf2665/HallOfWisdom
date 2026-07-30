@@ -3,11 +3,10 @@
 import { forwardRef, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { CardAction } from "../../lib/kanban";
+import { computeMenuPosition, type MenuPosition } from "./move-menu-position";
 
-interface MenuPosition {
-  readonly top: number;
-  readonly right: number;
-}
+/** Off-screen placeholder used only for the one-frame measurement pass before the real position is known — see the `useLayoutEffect` below. Never visible: paired with `visibility: hidden`. */
+const MEASURING_POSITION: MenuPosition = { top: -9999, left: -9999 };
 
 /**
  * A small, native-button-based action disclosure — not a `<select>`,
@@ -37,10 +36,30 @@ interface MenuPosition {
  * lay out or clip anything). Keyboard users were never affected (Tab
  * still reaches a clipped-but-present element), which is exactly why this
  * escaped every prior review. Escaping via a portal removes the popover
- * from that ancestor's clipping box entirely; the menu closes on any
- * scroll or resize while open rather than trying to track a moving
- * target, which is simpler and sufficient here (nothing else keeps a
- * disclosure open across a scroll).
+ * from that ancestor's clipping box entirely.
+ *
+ * Positioning (Phase 14.2): `computeMenuPosition` (a pure, unit-tested
+ * function — see `move-menu-position.ts`) flips the popover above the
+ * trigger when there isn't room below, and clamps both axes to stay
+ * within the viewport with a small margin, so a card accumulated far down
+ * a very long column never renders its popover off-screen. The menu
+ * mounts once at an off-screen `MEASURING_POSITION` (paired with
+ * `visibility: hidden`) so its real rendered size can be measured via
+ * `getBoundingClientRect()` before computing where it actually belongs —
+ * a single, pre-paint `useLayoutEffect` pass, so there's no visible
+ * flash at the wrong spot. Position recomputes (not just closes) on
+ * scroll/resize while open, tracking the trigger instead of abandoning
+ * the disclosure — a deliberate change from the original "close on any
+ * scroll" behavior, which this phase found could itself trigger a
+ * runaway page scroll: focusing the first menu item for keyboard users
+ * (see below) makes the browser try to scroll a `position: fixed`
+ * element into view, which does nothing useful for a viewport-relative
+ * element but could scroll the *page* by thousands of pixels on a long
+ * board, leaving the popover's own computed position stale relative to
+ * the trigger's new on-screen location. `{ preventScroll: true }` on that
+ * focus call (below) stops the browser from doing this at all — the menu
+ * is already correctly positioned within the viewport by the time
+ * anything is focused, so there is nothing to scroll to.
  */
 export const MoveMenu = forwardRef<
   HTMLButtonElement,
@@ -52,34 +71,45 @@ export const MoveMenu = forwardRef<
   }
 >(function MoveMenu({ actions, onAction, disabled = false, label = "Actions" }, forwardedRef) {
   const [open, setOpen] = useState(false);
-  const [position, setPosition] = useState<MenuPosition | null>(null);
+  const [position, setPosition] = useState<MenuPosition>(MEASURING_POSITION);
+  const [measured, setMeasured] = useState(false);
   const internalRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
 
+  const recalculate = (): void => {
+    if (!internalRef.current || !menuRef.current) return;
+    const triggerRect = internalRef.current.getBoundingClientRect();
+    const menuRect = menuRef.current.getBoundingClientRect();
+    setPosition(
+      computeMenuPosition(
+        triggerRect,
+        { width: menuRect.width, height: menuRect.height },
+        { width: window.innerWidth, height: window.innerHeight },
+      ),
+    );
+  };
+
+  // Mounts the portal at `MEASURING_POSITION` (off-screen, hidden) first,
+  // then measures the trigger and the menu's own rendered size in this
+  // same pre-paint pass to compute the real position — see the class doc
+  // comment. `measured` resets to `false` on every open so a reopen at a
+  // possibly-different trigger location always remeasures rather than
+  // reusing a stale position.
   useLayoutEffect(() => {
-    if (!open || !internalRef.current) return;
-    const rect = internalRef.current.getBoundingClientRect();
-    setPosition({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+    if (!open) {
+      setPosition(MEASURING_POSITION);
+      setMeasured(false);
+      return;
+    }
+    recalculate();
+    setMeasured(true);
   }, [open]);
 
-  // Portaling the popover to `document.body` (see the class doc comment)
-  // moves it out of DOM order relative to the trigger, which breaks plain
-  // sequential Tab navigation into it: without this, Tab from the trigger
-  // would land on whatever follows it in `document.body` order (typically
-  // the next card), not the first menu item, making the menu unreachable
-  // by keyboard. Keyed on `position` (not `open`): the portal only mounts
-  // once `position` is set by the `useLayoutEffect` above, one render
-  // after `open` itself flips to `true` — an effect keyed on `open` alone
-  // would fire on that first, portal-less render and find no menu button
-  // to focus, then never fire again on the second render since `open`
-  // hasn't changed between the two. A fresh `{ top, right }` object is set
-  // on every open (even reopening at the same position), so its reference
-  // changes each time and this effect reliably re-fires per open.
   useEffect(() => {
-    if (!open || !position) return;
-    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-  }, [open, position]);
+    if (!open || !measured) return;
+    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+  }, [open, measured]);
 
   useEffect(() => {
     if (!open) return;
@@ -95,20 +125,19 @@ export const MoveMenu = forwardRef<
       if (menuRef.current?.contains(target)) return;
       setOpen(false);
     }
-    function handleScrollOrResize(): void {
-      setOpen(false);
-    }
+    // Tracks the trigger instead of closing — see the class doc comment
+    // for why "close on any scroll" was replaced. `capture: true` because
+    // scroll events on descendant elements (e.g. a Kanban column's own
+    // `<ul>`) do not bubble to `window` otherwise.
     document.addEventListener("keydown", handleKeyDown);
     document.addEventListener("mousedown", handlePointerDown);
-    // `capture: true` because scroll events on descendant elements (e.g. a
-    // Kanban column's own `<ul>`) do not bubble to `window` otherwise.
-    window.addEventListener("scroll", handleScrollOrResize, true);
-    window.addEventListener("resize", handleScrollOrResize);
+    window.addEventListener("scroll", recalculate, true);
+    window.addEventListener("resize", recalculate);
     return () => {
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("mousedown", handlePointerDown);
-      window.removeEventListener("scroll", handleScrollOrResize, true);
-      window.removeEventListener("resize", handleScrollOrResize);
+      window.removeEventListener("scroll", recalculate, true);
+      window.removeEventListener("resize", recalculate);
     };
   }, [open]);
 
@@ -133,12 +162,16 @@ export const MoveMenu = forwardRef<
       >
         {label}
       </button>
-      {open && position
+      {open
         ? createPortal(
             <div
               ref={menuRef}
               id={menuId}
-              style={{ top: position.top, right: position.right }}
+              style={{
+                top: position.top,
+                left: position.left,
+                visibility: measured ? "visible" : "hidden",
+              }}
               className="fixed z-50 flex min-w-[10rem] flex-col gap-0.5 rounded border border-stone-300 bg-white p-1 shadow-lg dark:border-stone-700 dark:bg-stone-900"
             >
               {actions.map((action) => (

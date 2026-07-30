@@ -519,4 +519,51 @@ describe("TaskStore", () => {
       expect(store.getWorkingDirectory("task-2")).toBe("repo-b");
     });
   });
+
+  describe("snapshot/restore (Phase 14.1 — ephemeral atomic delegation)", () => {
+    it("restore() undoes a newly-added task", () => {
+      const store = new TaskStore({ maxTasks: 100 });
+      store.add(
+        makeRecord("task-1", { task: makeTask("task-1", { status: "backlog" }), runId: undefined }),
+      );
+      const snap = store.snapshot();
+
+      store.add(
+        makeRecord("task-2", { task: makeTask("task-2", { status: "backlog" }), runId: undefined }),
+      );
+
+      store.restore(snap);
+
+      expect(() => store.get("task-2")).toThrow(TaskNotFoundError);
+      expect(store.list()).toHaveLength(1);
+    });
+
+    it("restore() reverts in-place field mutations on a pre-existing record — the regression case a shallow Map clone would miss", () => {
+      const store = new TaskStore({ maxTasks: 100 });
+      store.add(
+        makeRecord("task-1", { task: makeTask("task-1", { status: "backlog" }), runId: undefined }),
+      );
+      const snap = store.snapshot();
+
+      store.updateStatus("task-1", "ready");
+      store.setRunId("task-1", "run-after-snapshot");
+
+      store.restore(snap);
+
+      const restored = store.get("task-1");
+      expect(restored.task.status).toBe("backlog");
+      expect(restored.runId).toBeUndefined();
+      expect(store.getRevision("task-1")).toBe(0);
+    });
+
+    it("restore() is a no-op-safe full replace when nothing was added before the snapshot", () => {
+      const store = new TaskStore({ maxTasks: 100 });
+      const snap = store.snapshot();
+      store.add(
+        makeRecord("task-1", { task: makeTask("task-1", { status: "backlog" }), runId: undefined }),
+      );
+      store.restore(snap);
+      expect(store.list()).toHaveLength(0);
+    });
+  });
 });

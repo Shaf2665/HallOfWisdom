@@ -6,19 +6,34 @@ export const communicationBoardKindSchema = z.enum(["general", "task"]);
 export type CommunicationBoardKind = z.infer<typeof communicationBoardKindSchema>;
 
 /**
- * Phase 8 supports exactly one author shape: a human operator typing
- * locally. `kind` is a literal (not a free-form string) so a future
+ * Phase 8 shipped with exactly one author shape (`"human"`) and a doc
+ * comment anticipating this: "`kind` is a literal ... so a future
  * agent-authored message type can be added as a new union member later
- * without silently being accepted as `"human"` today. The browser never
- * supplies this — Hall Core always constructs it server-side (see
- * `docs/architecture/0007-communication-boards.md`, "Server-owned author").
+ * without silently being accepted as `"human"` today." Phase 14 is that
+ * addition — the CEO Agent posts bounded audit summaries (plan created,
+ * submitted, approved, rejected, delegated, completed/failed) to a task's
+ * board, and those messages must never be mistaken for something a human
+ * operator typed. `"system"` is deliberately generic (not `"ceo_agent"`)
+ * so any future non-human, non-adapter-run message source can reuse it
+ * rather than the union growing one literal per feature. The browser
+ * never supplies either kind — Hall Core always constructs the author
+ * server-side (see `docs/architecture/0007-communication-boards.md`,
+ * "Server-owned author").
  */
-export const communicationAuthorSchema = z
-  .object({
-    kind: z.literal("human"),
-    displayName: boundedNonBlankString(100),
-  })
-  .strict();
+export const communicationAuthorSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("human"),
+      displayName: boundedNonBlankString(100),
+    })
+    .strict(),
+  z
+    .object({
+      kind: z.literal("system"),
+      displayName: boundedNonBlankString(100),
+    })
+    .strict(),
+]);
 export type CommunicationAuthor = z.infer<typeof communicationAuthorSchema>;
 
 const communicationBoardSharedFields = {

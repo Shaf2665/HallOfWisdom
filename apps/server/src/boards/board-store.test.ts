@@ -216,4 +216,32 @@ describe("BoardStore", () => {
     expect(updated.title).toBe(seeded.title);
     expect(updated.createdAt).toBe(seeded.createdAt);
   });
+
+  describe("snapshot/restore (Phase 14.1 — ephemeral atomic delegation)", () => {
+    it("restore() undoes a newly-created board", () => {
+      const { taskStore, boardStore } = newHarness();
+      taskStore.add(makeRecord("task-1"));
+      const snap = boardStore.snapshot();
+
+      boardStore.ensureTaskBoard("task-1", "2026-07-15T12:00:00.000Z");
+
+      boardStore.restore(snap);
+
+      expect(boardStore.has(taskBoardId("task-1"))).toBe(false);
+    });
+
+    it("restore() reverts in-place field mutations from recordMessageAppended — the regression case a shallow Map clone would miss", () => {
+      const { boardStore } = newHarness();
+      const seeded = boardStore.seedGeneralBoard("2026-07-15T12:00:00.000Z");
+      const snap = boardStore.snapshot();
+
+      boardStore.recordMessageAppended(GENERAL_BOARD_ID, 5, "2026-07-15T12:05:00.000Z");
+
+      boardStore.restore(snap);
+
+      const restored = boardStore.get(GENERAL_BOARD_ID);
+      expect(restored.messageCount).toBe(0);
+      expect(restored.updatedAt).toBe(seeded.updatedAt);
+    });
+  });
 });

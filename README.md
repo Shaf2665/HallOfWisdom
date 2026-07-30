@@ -73,6 +73,37 @@ can be genuinely restarted and continued, both candidates started via real UI cl
 [`docs/architecture/0013-durable-persistence-and-recovery.md`](docs/architecture/0013-durable-persistence-and-recovery.md)
 for the full design.
 
+**Phase 14 — CEO Agent Planning, Approval-Gated Delegation and Plan Tracking.** A "CEO Agent" turns
+one parent task into a reviewable, multi-step plan — but only ever a plan. Generating a plan
+(`POST .../ceo-plans`) creates nothing; approving a plan starts nothing; only an explicit,
+separate "delegate" action creates child tasks, and every child task it creates is left unstarted,
+exactly like every other task-creation path in this codebase. The only planner wired into
+production is deterministic — a rule-and-template generator with no model call and no network
+call, which never invents a file name, command, or acceptance criterion beyond what the parent
+task's own description states, and recommends no adapter at all for a task that was never routed.
+An approval is bound to the exact plan version and content hash the operator reviewed (a
+SHA-256 content hash, re-verified on every decision) — a concurrent edit invalidates a pending
+approval rather than silently being approved instead. The new `/ceo` pages and a Kanban card's
+"CEO plans" action (available on `backlog`/`ready`/`assigned` tasks) drive the whole flow: create,
+submit, approve or reject, and delegate, each dialog gated by an unchecked confirmation checkbox.
+
+**Phase 14.1 — Plan Revision, Atomic Delegation and Browser Workflow Hardening.** Closes seven
+contract gaps review found in Phase 14. Every mutating route now requires an opaque, HMAC-signed
+**mutation token** instead of the plan's raw internal revision integer — a client can never learn
+or forge a meaningful value, and a stale token fails exactly like a forged one. A `draft`,
+`rejected`, `awaiting_approval`, or `approved` plan can now be edited into a new version through a
+dedicated web form (never `delegated` — those stay immutable), with a per-step adapter-override
+selector that shows live eligibility from the same routing analysis the "Find suitable agent"
+dialog already uses; a saved override is re-validated server-side at save time, not only at
+delegation time. Delegation is now genuinely all-or-nothing in ephemeral (in-memory) mode too, via
+a snapshot/restore coordinator proven identical to durable mode's transaction rollback by a shared
+fault-injection test suite. Plan progress now pushes a real `ceo.plan.progress_changed` event the
+moment a delegated child task's status changes, driven by a task-store mutation hook and an
+idempotent, fingerprinted synchronizer — replacing Phase 14's old read-triggered lazy sync. See
+[`docs/architecture/0014-ceo-planning-approval-and-delegation.md`](docs/architecture/0014-ceo-planning-approval-and-delegation.md)
+for the full design, including the remaining disclosed gaps (no automatic replanning or cascading
+cancellation on a failed step; no live in-browser multi-agent execution demonstration).
+
 Eight packages now exist:
 `@hall-of-wisdom/protocol` (the wire contract), `@hall-of-wisdom/agent-adapter-sdk`
 (the adapter contract), `@hall-of-wisdom/mock-agent` (the first, deterministic adapter),
@@ -622,6 +653,65 @@ trusted-local-allowed ranking (isolated ranked ahead of trusted-local), keyboard
 console cleanliness. After a run, confirm ports 3000/4310 are free again — Playwright's own teardown
 does this automatically; if a run is interrupted, stop any lingering `node` process manually.
 
+**Phase 14 — CEO Agent planning workflow** (`tests/ceo-plans.spec.ts`, also included in the same
+`e2e` run above, against the shared fixture pair): create → route/assign → create a draft CEO plan
+→ submit → approve (confirming approval alone starts nothing) → delegate (confirming exactly three
+unstarted, correctly-linked child tasks, each still exposing its own manual "Start task" action,
+and no bulk "start all" control anywhere), plus a reject flow. Does not cover starting a delegated
+child task in-browser — the same repo-wide fixture-adapter `startTask()`-always-rejects constraint
+above applies — see
+[`docs/architecture/0014-ceo-planning-approval-and-delegation.md`](docs/architecture/0014-ceo-planning-approval-and-delegation.md)
+for what covers that instead.
+
+**Phase 14.1 — CEO plan editing, durable restart, and focused workflow coverage.**
+`tests/ceo-plans-durable-restart.spec.ts` is landed. It mirrors `durable-restart.spec.ts`'s own
+dedicated-real-binary pattern (its own ports, its own `--data-dir`, the same
+`requireDurableRestartBuildArtifacts()`-style guard) and drives a single long-running scenario:
+editing a plan into a second version through the new web form (interacting with the per-step
+adapter selector, though not persisting an override — Mock Agent is the only `simulated`-trust
+adapter this scenario's routing profile makes eligible), approving only that version, delegating
+it, a graceful Hall Core restart against the same `--data-dir` (checked via the `/system` page's
+proven Online/Offline text), and confirming the plan's version/approval/delegation bookkeeping
+survives — the active version, its Activity log, and its approval history, since the UI never
+exposes a dedicated view of a superseded version's own content — no duplicate events appear on
+reload, and no internal identifier (path, content hash, revision, mutation-token internals) is ever
+visible in the rendered DOM. `tests/ceo-plans-focused.spec.ts` is landed too: five smaller, targeted
+scenarios — reject → edit → resubmit → approve; keyboard-only dialog interaction; duplicate-delegation
+(fired twice in quick succession, asserted exactly once across five consecutive runs); a 390×844
+mobile viewport; and a 1440×900 desktop pass asserting zero console errors, hydration warnings, or
+CORS failures across the full workflow. Both specs use the registered Mock Agent adapter
+exclusively.
+
+**Phase 14.2 — `MoveMenu` viewport-aware positioning and full-suite stabilization.** A full-suite
+E2E run could fail `ceo-plans.spec.ts` with a popover click timeout once enough cards accumulated
+on the shared fixture board — a genuine `MoveMenu` (`apps/web/components/kanban/move-menu.tsx`)
+positioning defect, not test-state leakage (confirmed by direct investigation; see
+[`docs/architecture/0014-ceo-planning-approval-and-delegation.md`](docs/architecture/0014-ceo-planning-approval-and-delegation.md),
+"MoveMenu viewport-aware positioning (Phase 14.2)," for the full root-cause writeup). `MoveMenu` now
+flips above the trigger and clamps to the viewport on both axes via a small, pure, unit-tested
+positioning function (`move-menu-position.ts`), and no longer triggers an unwanted page scroll when
+auto-focusing the first menu item for keyboard users. `tests/move-menu-accumulation.spec.ts` is a
+new dedicated regression: it builds its own batch of cards, then opens the menu via a real pointer
+click and, separately, real keyboard input (no DOM-dispatch bypass) at both 390×844 and 1440×900,
+asserting the popover's own bounding box stays fully inside the viewport. `ceo-plans-focused.spec.ts`'s
+interaction helper was simplified in the same pass — the bounded-retry-plus-DOM-dispatch-fallback
+workaround it needed before this fix is gone; every interaction is now a plain `locator.click()`.
+
+**Phase 14.3 — Kanban mobile overflow containment.** `/board` could develop `document`-level
+horizontal scroll at narrow viewports once enough cards accumulated — root-caused to the columns
+row missing its own `position: relative` containing block, letting an `sr-only` label's un-scrolled
+static position leak past the row's own (already-correct) `overflow-x-auto` clipping into the
+document's own scrollable-overflow region (see
+[`docs/architecture/0006-kanban-board.md`](docs/architecture/0006-kanban-board.md), "Kanban mobile
+overflow containment (Phase 14.3)," for the full root-cause writeup). Fixed with one class
+(`relative` on the columns row); `tests/kanban-mobile-overflow.spec.ts` is a new dedicated
+regression covering heavy multi-column accumulation at 390×844 (document/body overflow, internal
+scroll reachability, MoveMenu/CEO plans still reachable), the normal desktop layout and drag-and-drop
+at 1440×900, and keyboard-only reachability into a later column without a focus trap or page
+widening. `move-menu-accumulation.spec.ts` and `ceo-plans-focused.spec.ts` now also assert no
+horizontal overflow directly on `/board` itself, previously scoped away from it while this defect
+was still undiagnosed.
+
 **Phase 13.1 — genuine durable browser restart** (`tests/durable-restart.spec.ts`, included in the
 same `e2e` run above): spawns its own dedicated, real `dist/server.js` Hall Core binary and its own
 dedicated real Hall Web dev server — on their own ports (4395/3095), entirely separate from the
@@ -960,6 +1050,35 @@ repository and may be dirty. See
 for the full design and its explicit restriction list (no auto-parallel execution, no AI judge, no
 automatic winner, no merge/commit/push).
 
+## CEO Agent plans (Phase 14, Phase 14.1)
+
+No startup flag needed — always available. On any backlog, ready, or assigned task's Kanban card,
+open **Actions → CEO plans**, then **Ask CEO to plan** to generate a draft three-step
+(investigate/implement/verify) plan from the task's own title, description, and (if the task has
+been routed and assigned first) capability requirements — a task never routed still gets a valid
+plan, just one where no step has a recommended adapter yet (see **Edit plan…** below to set one
+directly, without routing the parent task first). Review the plan, **Submit for approval**, then
+**Approve…** (bound to the exact version and content you reviewed — editing the plan first
+invalidates a pending approval) or **Reject…**. Approval alone starts nothing. **Delegate…**
+creates one real, unstarted child task per step, correctly linked by dependency — starting each one
+is still the same explicit, per-task action every other adapter run in this codebase requires;
+there is no bulk "start all."
+
+**Edit plan…** (Phase 14.1) is available whenever a plan's status is draft, rejected,
+awaiting_approval, or approved (never delegated or a terminal status) — it always saves as a new
+version, never mutates the version you're viewing. This is also how a rejected plan gets back to
+draft: there is no direct resubmit button, only edit-then-resubmit. Each step's own editor embeds
+an agent selector that shows the same eligibility analysis the "Find suitable agent" dialog uses,
+scoped to that one step — pick an adapter directly here, or leave it unset to use whatever the
+planner recommends once the parent task is routed. Every mutating action in this feature (submit,
+approve, reject, delegate, cancel, save-as-new-version) is bound to an opaque **mutation token**
+the page fetches for you — you never see or type one; it just means a stale browser tab gets a
+clear "re-fetch and try again" error instead of silently clobbering someone else's concurrent edit.
+See
+[`docs/architecture/0014-ceo-planning-approval-and-delegation.md`](docs/architecture/0014-ceo-planning-approval-and-delegation.md)
+for the full design, including the remaining disclosed gaps (no automatic replanning if a step
+fails; no live in-browser multi-agent execution demonstration).
+
 ---
 
 **The remaining steps walk through assigning and starting a real Codex task — only reachable with
@@ -1112,6 +1231,7 @@ pnpm format
 pnpm test
 pnpm build
 pnpm verify:process-recovery
+pnpm verify:package-entry
 ```
 
 `typecheck`/`test`/`build` run recursively across all nine packages (including `apps/web`'s own
@@ -1130,6 +1250,11 @@ window — Phase 13.2 added a fourth: a frozen, not crashed, former owner is pro
 after a real takeover). See
 [`docs/architecture/0013-durable-persistence-and-recovery.md`](docs/architecture/0013-durable-persistence-and-recovery.md),
 "Process-level verification," for what it proves and why it's a separate command.
+
+`pnpm verify:package-entry` (root, added in Phase 14.1) is a thin orchestrator: it rebuilds every
+workspace package and then runs each publishable package's own `verify:package-entry` script — the
+same seven `pnpm --filter ... run verify:package-entry` commands shown near the top of this README
+— in one pass, without having to invoke each one by hand.
 
 ## Repository Layout (current)
 

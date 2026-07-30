@@ -55,4 +55,14 @@ export interface TaskStorePort {
   clearAssignment(taskId: string): void;
   setRunId(taskId: string, runId: string): void;
   clearRunId(taskId: string): void;
+  /**
+   * How many more tasks `add()` can accept before `TaskCapacityReachedError`.
+   * Phase 14 — the CEO plan delegation coordinator (`ceo-plan-orchestrator.ts`)
+   * checks this before creating any child task, so a plan whose step count
+   * would exceed the server's configured capacity fails delegation with a
+   * bounded, safe reason and creates zero child tasks, rather than
+   * partially delegating in ephemeral mode (which has no database
+   * transaction to roll back a mid-loop `add()` failure).
+   */
+  remainingCapacity(): number;
 }

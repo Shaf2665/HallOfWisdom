@@ -224,7 +224,8 @@ export type CardAction =
   | { readonly kind: "start"; readonly label: string }
   | { readonly kind: "cancel"; readonly label: string }
   | { readonly kind: "discuss"; readonly label: string }
-  | { readonly kind: "compare"; readonly label: "Compare agents" };
+  | { readonly kind: "compare"; readonly label: "Compare agents" }
+  | { readonly kind: "ceo-plans"; readonly label: "CEO plans" };
 
 const DISCUSS_ACTION: CardAction = { kind: "discuss", label: "Open discussion" };
 /**
@@ -240,6 +241,18 @@ const DISCUSS_ACTION: CardAction = { kind: "discuss", label: "Open discussion" }
  * comparison would run alongside redundantly.
  */
 const COMPARE_ACTION: CardAction = { kind: "compare", label: "Compare agents" };
+
+/**
+ * Phase 14 — navigates to `/ceo?parentTaskId=...`, which both lists any
+ * existing CEO plans for this task and offers "Ask CEO to plan" to create
+ * a new one (see `components/ceo/ceo-plans-list.tsx`). Offered in the
+ * same planning-stage statuses as `COMPARE_ACTION`, for the same
+ * reasoning: a plan makes most sense before the task has committed to a
+ * single real assignment/run. Deliberately not offered from every status
+ * the way `DISCUSS_ACTION` is — CEO plans are a pre-execution planning
+ * tool, not a general-purpose audit trail entry point.
+ */
+const CEO_PLANS_ACTION: CardAction = { kind: "ceo-plans", label: "CEO plans" };
 
 /**
  * The exact action set for each card state, matching the Kanban spec's
@@ -272,6 +285,7 @@ export function availableActionsFor(record: TaskRecord): readonly CardAction[] {
         { kind: "move", targetStatus: "ready", label: "Move to Ready" },
         { kind: "move", targetStatus: "blocked", label: "Move to Blocked" },
         { kind: "cancel", label: "Cancel task" },
+        CEO_PLANS_ACTION,
         DISCUSS_ACTION,
       ];
     case "ready":
@@ -282,6 +296,7 @@ export function availableActionsFor(record: TaskRecord): readonly CardAction[] {
         COMPARE_ACTION,
         { kind: "move", targetStatus: "blocked", label: "Move to Blocked" },
         { kind: "cancel", label: "Cancel task" },
+        CEO_PLANS_ACTION,
         DISCUSS_ACTION,
       ];
     case "assigned":
@@ -290,6 +305,14 @@ export function availableActionsFor(record: TaskRecord): readonly CardAction[] {
         { kind: "move", targetStatus: "ready", label: "Return to Ready" },
         { kind: "move", targetStatus: "blocked", label: "Move to Blocked" },
         { kind: "cancel", label: "Cancel task" },
+        // Offered here too, not just backlog/ready: `task.requirements`
+        // — what the deterministic CEO planner needs to ever recommend a
+        // step adapter — is only persisted through routing/assignment in
+        // this UI (the plain backlog-creation form has no requirements
+        // field), which always transitions a task out of backlog/ready.
+        // Excluding `assigned` would make a real, adapter-recommended CEO
+        // plan unreachable through genuine UI-only navigation.
+        CEO_PLANS_ACTION,
         DISCUSS_ACTION,
       ];
     case "blocked":

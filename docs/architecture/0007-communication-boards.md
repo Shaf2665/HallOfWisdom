@@ -44,6 +44,12 @@ same "cannot reach the browser/cannot be forged by construction, not by discipli
 7.2 used for the internal task-revision counter (`0006-kanban-board.md`): nothing needed to
 remember to strip a client-supplied author, because there was never a field to strip.
 
+**(Phase 14.1) Re-verified with a dedicated forged-author test suite** — see
+[`0014-ceo-planning-approval-and-delegation.md`](0014-ceo-planning-approval-and-delegation.md),
+"Security review performed this phase": a POST attempting `author.kind: "system"`, or attempting
+to claim a system-looking display name via a `human`-kind override, both 400 and store nothing;
+confirms the protection is shape-absence, not a runtime denylist.
+
 ## Hall Core stores
 
 `BoardStore`, `MessageStore`, and `MessageBus` (`apps/server/src/boards/`) mirror the shape of
@@ -221,12 +227,23 @@ either surface never increasing the board count past one for that task.
 
 ## Why this is not the agent-communication channel
 
-Communication Boards carry only human-authored messages (`author.kind` is always `"human"`, and the
-schema has no other variant). Nothing here is a channel any coding agent writes to, no message can
-trigger work, mention an agent, or invoke an approval or review workflow, and no CEO Agent exists
-yet to participate. Building a human discussion surface first, cleanly separated from the
-not-yet-built agent-communication surface, is what keeps Phase 8 from having to guess at that
-future design's shape.
+Communication Boards originally carried only human-authored messages (`author.kind` was always
+`"human"`, and the schema had no other variant). Nothing here is a channel any coding agent writes
+to — no message can trigger work, mention an agent, or invoke an approval or review workflow.
+Building a human discussion surface first, cleanly separated from the not-yet-built
+agent-communication surface, is what kept Phase 8 from having to guess at that future design's
+shape.
+
+**Phase 14 added the anticipated second author kind, `"system"`.** The CEO Agent posts bounded,
+server-constructed audit summaries (plan created, submitted, approved, rejected, delegated,
+completed/failed) to a task's own board using `author: { kind: "system", displayName: "CEO Agent" }`
+— never `"human"`, so these messages can never be mistaken for something an operator typed.
+`"system"` is deliberately generic, not `"ceo_agent"`, so any future non-human, non-adapter-run
+message source can reuse the same literal rather than the union growing one member per feature.
+This remains purely an audit trail, not a two-way channel: nothing posted this way can be replied
+to by the CEO Agent, and the browser still can never supply either author kind directly — see
+"Server-owned author" below and
+[`0014-ceo-planning-approval-and-delegation.md`](0014-ceo-planning-approval-and-delegation.md).
 
 ## Why editing, deletion, and richer interactions remain deferred
 

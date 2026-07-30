@@ -127,10 +127,13 @@ export interface SpawnDurableHallCoreOptions {
   readonly dataDir: string;
   readonly comparisonRoot?: string | undefined;
   readonly port?: number;
+  /** Defaults to `DURABLE_RESTART_WEB_PORT` — `durable-restart.spec.ts`'s own port — so existing callers are unaffected. A caller spawning Hall Web on a different dedicated port (e.g. `ceo-plans-durable-restart.spec.ts`) must pass its own port here, or the CORS-approved web origin won't match the browser's actual origin and every fetch will be silently rejected. */
+  readonly webPort?: number;
 }
 
 export function spawnDurableHallCore(options: SpawnDurableHallCoreOptions): SpawnedHallCore {
   const port = options.port ?? DURABLE_RESTART_HALL_CORE_PORT;
+  const webPort = options.webPort ?? DURABLE_RESTART_WEB_PORT;
   const args = [
     "--workspace-root",
     options.workspaceRoot,
@@ -141,7 +144,7 @@ export function spawnDurableHallCore(options: SpawnDurableHallCoreOptions): Spaw
     "--mock-scenario",
     "success",
     "--web-origin",
-    `http://127.0.0.1:${String(DURABLE_RESTART_WEB_PORT)}`,
+    `http://127.0.0.1:${String(webPort)}`,
   ];
   if (options.comparisonRoot !== undefined) {
     args.push("--comparison-root", options.comparisonRoot);
