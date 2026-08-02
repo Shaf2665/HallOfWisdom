@@ -150,6 +150,37 @@ export interface ClaimAttemptResult {
   readonly stepExecution: CeoPlanStepExecution;
 }
 
+export interface ClaimAbandonedRetryIntentInput {
+  readonly intentId: string;
+  readonly runId: string;
+  readonly planStepId: string;
+  readonly childTaskId: string;
+  readonly abandonedAttemptId: string;
+  readonly now: string;
+}
+
+export interface AbandonedRetryIntentRecord {
+  readonly id: string;
+  readonly runId: string;
+  readonly planStepId: string;
+  readonly childTaskId: string;
+  readonly abandonedAttemptId: string;
+  readonly requestedAt: string;
+  readonly replacementAttemptId: string | undefined;
+  readonly replacementClaimedAt: string | undefined;
+}
+
+export interface ClaimAbandonedRetryIntentResult {
+  readonly intent: AbandonedRetryIntentRecord;
+  readonly created: boolean;
+}
+
+export interface LinkAbandonedRetryIntentReplacementInput {
+  readonly intentId: string;
+  readonly replacementAttemptId: string;
+  readonly now: string;
+}
+
 export interface CeoPlanRunStorePort {
   configureRun(input: ConfigureRunInput): CeoPlanRun;
   startRun(input: RunLifecycleInput): CeoPlanRun;
@@ -204,8 +235,34 @@ export interface CeoPlanRunStorePort {
   claimAttempt(input: ClaimAttemptInput): ClaimAttemptResult;
   updateAttempt(input: UpdateAttemptInput): CeoPlanStepAttempt;
   getAttempt(attemptId: string): CeoPlanStepAttempt;
+  /**
+   * Deterministic order is part of the port contract:
+   * - step-specific calls return `attemptNumber ASC`;
+   * - run-wide calls return `planStepId ASC, attemptNumber ASC`.
+   *
+   * Callers may use the final item from a step-specific result as the
+   * latest attempt; no caller may depend on database/default insertion
+   * order.
+   */
   listAttempts(runId: string, planStepId?: string): readonly CeoPlanStepAttempt[];
   getActiveAttempt(runId: string, planStepId: string): CeoPlanStepAttempt | undefined;
+
+  /**
+   * Durable, idempotent proof that a human operator requested recovery of
+   * one exact abandoned attempt. This is intentionally separate from Board
+   * messages and from inferred task/step state: restart reconciliation may
+   * continue abandoned retry work only when this row exists.
+   */
+  claimAbandonedRetryIntent(input: ClaimAbandonedRetryIntentInput): ClaimAbandonedRetryIntentResult;
+  findAbandonedRetryIntent(
+    runId: string,
+    planStepId: string,
+    abandonedAttemptId: string,
+  ): AbandonedRetryIntentRecord | undefined;
+  listAbandonedRetryIntents(): readonly AbandonedRetryIntentRecord[];
+  linkAbandonedRetryIntentReplacement(
+    input: LinkAbandonedRetryIntentReplacementInput,
+  ): AbandonedRetryIntentRecord;
 
   getCircuitState(runId: string): CircuitStateSnapshot;
   recordCircuitOutcome(input: RecordCircuitFailureInput): void;

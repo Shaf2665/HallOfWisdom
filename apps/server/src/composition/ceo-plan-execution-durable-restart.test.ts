@@ -255,6 +255,7 @@ describe("CEO plan execution durable restart via the real composition root (Phas
     const executionRecoverySummary = await runCeoPlanExecutionRecovery({
       planRunStore: second.composition.ceoExecution.planRunStore,
       signalStore: second.composition.ceoExecution.signalStore,
+      taskStore: second.composition.taskStore,
       scheduler: second.composition.ceoExecution.scheduler,
       planStore: second.composition.ceoPlans.planStore,
       postBoardAudit: second.composition.ceoExecution.postBoardAudit,
@@ -319,6 +320,7 @@ describe("CEO plan execution durable restart via the real composition root (Phas
     const executionRecoverySummary = await runCeoPlanExecutionRecovery({
       planRunStore: second.composition.ceoExecution.planRunStore,
       signalStore: second.composition.ceoExecution.signalStore,
+      taskStore: second.composition.taskStore,
       scheduler: second.composition.ceoExecution.scheduler,
       planStore: second.composition.ceoPlans.planStore,
       postBoardAudit: (planId, text) => {
@@ -361,6 +363,7 @@ describe("CEO plan execution durable restart via the real composition root (Phas
     const repeatSummary = await runCeoPlanExecutionRecovery({
       planRunStore: second.composition.ceoExecution.planRunStore,
       signalStore: second.composition.ceoExecution.signalStore,
+      taskStore: second.composition.taskStore,
       scheduler: second.composition.ceoExecution.scheduler,
       planStore: second.composition.ceoPlans.planStore,
       postBoardAudit: (planId, text) => {
@@ -432,6 +435,7 @@ describe("CEO plan execution durable restart via the real composition root (Phas
     await runCeoPlanExecutionRecovery({
       planRunStore: second.composition.ceoExecution.planRunStore,
       signalStore: second.composition.ceoExecution.signalStore,
+      taskStore: second.composition.taskStore,
       scheduler: second.composition.ceoExecution.scheduler,
       planStore: second.composition.ceoPlans.planStore,
       postBoardAudit: second.composition.ceoExecution.postBoardAudit,
@@ -585,6 +589,7 @@ describe("CEO plan execution durable restart via the real composition root (Phas
     const executionRecoverySummary = await runCeoPlanExecutionRecovery({
       planRunStore: second.composition.ceoExecution.planRunStore,
       signalStore: second.composition.ceoExecution.signalStore,
+      taskStore: second.composition.taskStore,
       scheduler: second.composition.ceoExecution.scheduler,
       planStore: second.composition.ceoPlans.planStore,
       postBoardAudit: second.composition.ceoExecution.postBoardAudit,
@@ -672,6 +677,7 @@ describe("CEO plan execution durable restart via the real composition root (Phas
     const executionRecoverySummary = await runCeoPlanExecutionRecovery({
       planRunStore: second.composition.ceoExecution.planRunStore,
       signalStore: second.composition.ceoExecution.signalStore,
+      taskStore: second.composition.taskStore,
       scheduler: second.composition.ceoExecution.scheduler,
       planStore: second.composition.ceoPlans.planStore,
       postBoardAudit: (planId, text) => {
@@ -712,6 +718,7 @@ describe("CEO plan execution durable restart via the real composition root (Phas
     const repeatSummary = await runCeoPlanExecutionRecovery({
       planRunStore: second.composition.ceoExecution.planRunStore,
       signalStore: second.composition.ceoExecution.signalStore,
+      taskStore: second.composition.taskStore,
       scheduler: second.composition.ceoExecution.scheduler,
       planStore: second.composition.ceoPlans.planStore,
       postBoardAudit: (planId, text) => {

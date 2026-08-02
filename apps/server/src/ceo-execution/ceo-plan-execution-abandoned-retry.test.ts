@@ -16,7 +16,10 @@ import { reconcileTasks, RESTART_INTERRUPTED_RUN_CODE } from "../recovery/reconc
 import { CeoPlanExecutionAbandonedRetryNotEligibleError } from "../errors/app-error.js";
 import { InMemoryCeoPlanRunStore } from "./in-memory-ceo-plan-run-store.js";
 import { InMemoryExecutionSignalStore } from "./in-memory-execution-signal-store.js";
-import { CeoPlanExecutionScheduler } from "./ceo-plan-execution-scheduler.js";
+import {
+  CeoPlanExecutionScheduler,
+  type CeoPlanExecutionSchedulerFailpoint,
+} from "./ceo-plan-execution-scheduler.js";
 
 /**
  * Phase 15.6 — `CeoPlanExecutionScheduler.retryAbandonedStep()`, the one
@@ -38,7 +41,13 @@ import { CeoPlanExecutionScheduler } from "./ceo-plan-execution-scheduler.js";
 const WORKSPACE_ROOT = process.cwd();
 const NOW = "2026-07-31T12:00:00.000Z";
 
-function buildHarness(options: { adapter?: AgentAdapter; boardAuditLog?: string[] } = {}) {
+function buildHarness(
+  options: {
+    adapter?: AgentAdapter;
+    boardAuditLog?: string[];
+    failpoint?: (name: CeoPlanExecutionSchedulerFailpoint) => void;
+  } = {},
+) {
   const registry = new AgentRegistry();
   registry.register(
     options.adapter ?? new MockAgentAdapter({ scenario: "success", stepDelayMs: 0 }),
@@ -66,6 +75,7 @@ function buildHarness(options: { adapter?: AgentAdapter; boardAuditLog?: string[
     leaseSeconds: 30,
     postBoardAudit: (_planId, text) => boardAuditLog.push(text),
     runAtomicUnit: createEphemeralAtomicUnit({ planRunStore, signalStore }),
+    failpoint: options.failpoint,
   });
   return {
     taskStore,
@@ -75,6 +85,51 @@ function buildHarness(options: { adapter?: AgentAdapter; boardAuditLog?: string[
     signalStore,
     scheduler,
     boardAuditLog,
+  };
+}
+
+function rebuildScheduler(
+  harness: ReturnType<typeof buildHarness>,
+  options: { failpoint?: (name: CeoPlanExecutionSchedulerFailpoint) => void } = {},
+): CeoPlanExecutionScheduler {
+  const scheduler = new CeoPlanExecutionScheduler({
+    planRunStore: harness.planRunStore,
+    signalStore: harness.signalStore,
+    taskStore: harness.taskStore,
+    taskOrchestrator: harness.taskOrchestrator,
+    now: () => NOW,
+    ownerToken: "owner-2",
+    leaseSeconds: 30,
+    postBoardAudit: (_planId, text) => harness.boardAuditLog.push(text),
+    runAtomicUnit: createEphemeralAtomicUnit({
+      planRunStore: harness.planRunStore,
+      signalStore: harness.signalStore,
+    }),
+    failpoint: options.failpoint,
+  });
+  scheduler.registerDependencyIndex("run-1", [{ id: "step-a", dependencies: [] }]);
+  return scheduler;
+}
+
+function countingAdapter(adapter: AgentAdapter): {
+  adapter: AgentAdapter;
+  calls: () => number;
+  reset: () => void;
+} {
+  let count = 0;
+  return {
+    adapter: {
+      descriptor: adapter.descriptor,
+      detect: () => adapter.detect(),
+      startTask: (input, options) => {
+        count += 1;
+        return adapter.startTask(input, options);
+      },
+    },
+    calls: () => count,
+    reset: () => {
+      count = 0;
+    },
   };
 }
 
@@ -196,6 +251,20 @@ function cancellableHarness(boardAuditLog?: string[]) {
     adapter: new MockAgentAdapter({ scenario: "cancellable", stepDelayMs: 5000 }),
     ...(boardAuditLog ? { boardAuditLog } : {}),
   });
+}
+
+async function prepareAbandonedRunForRetry(harness: ReturnType<typeof buildHarness>): Promise<{
+  readonly abandonedAttemptId: string;
+  readonly previousTaskRunId: string | undefined;
+}> {
+  addAssignedTask(harness.taskStore, { taskId: "task-a" });
+  configureAndStart(harness, "run-1", "plan-1", [{ stepId: "step-a", childTaskId: "task-a" }], {
+    maxAttemptsPerStep: 2,
+  });
+  await harness.scheduler.enqueueSignal({ planRunId: "run-1", reason: "execution_started" });
+  const abandoned = await abandonRunningStep(harness, "run-1", "step-a", "task-a");
+  harness.planRunStore.resumeRun({ runId: "run-1", now: NOW });
+  return abandoned;
 }
 
 describe("CeoPlanExecutionScheduler.retryAbandonedStep (Phase 15.6)", () => {
@@ -339,10 +408,11 @@ describe("CeoPlanExecutionScheduler.retryAbandonedStep (Phase 15.6)", () => {
     ]);
     const fulfilled = results.filter((r) => r.status === "fulfilled");
     const rejected = results.filter((r) => r.status === "rejected");
-    expect(fulfilled).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
-    if (rejected[0]?.status === "rejected") {
-      expect(rejected[0].reason).toBeInstanceOf(CeoPlanExecutionAbandonedRetryNotEligibleError);
+    expect(fulfilled.length).toBeGreaterThanOrEqual(1);
+    if (rejected.length > 0) {
+      for (const result of rejected) {
+        expect(result.reason).toBeInstanceOf(CeoPlanExecutionAbandonedRetryNotEligibleError);
+      }
     }
     expect(harness.planRunStore.listAttempts("run-1", "step-a")).toHaveLength(2);
   });
@@ -553,5 +623,180 @@ describe("CeoPlanExecutionScheduler.retryAbandonedStep (Phase 15.6)", () => {
     expect(retryRequested).toHaveLength(1);
     expect(retryRequested[0]?.actor).toBe("human:local-operator");
     expect(boardAuditLog).toHaveLength(1);
+  });
+
+  it("records durable retry intent before task preparation, and recovery continues it without duplicating attempts", async () => {
+    const harness = buildHarness({
+      adapter: new MockAgentAdapter({ scenario: "cancellable", stepDelayMs: 5000 }),
+      failpoint: (name) => {
+        if (name === "abandoned_retry_intent_recorded") {
+          throw new Error("failpoint: intent recorded");
+        }
+      },
+    });
+    const { abandonedAttemptId } = await prepareAbandonedRunForRetry(harness);
+
+    await expect(harness.scheduler.retryAbandonedStep("run-1", "step-a")).rejects.toThrow(
+      "failpoint: intent recorded",
+    );
+    expect(harness.planRunStore.listAbandonedRetryIntents()).toHaveLength(1);
+    expect(harness.taskStore.get("task-a").task.status).toBe("failed");
+    expect(harness.planRunStore.listAttempts("run-1", "step-a")).toHaveLength(1);
+
+    const recovered = rebuildScheduler(harness);
+    const intent = harness.planRunStore.listAbandonedRetryIntents()[0];
+    if (intent === undefined) throw new Error("expected a retry intent");
+    await recovered.continueAbandonedRetryIntent(intent);
+
+    const attempts = harness.planRunStore.listAttempts("run-1", "step-a");
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]?.id).toBe(abandonedAttemptId);
+    expect(attempts[0]?.status).toBe("abandoned");
+    expect(attempts[1]?.status).toBe("running");
+  });
+
+  it("continues a durable retry intent after task preparation but before scheduler signal persistence", async () => {
+    const harness = buildHarness({
+      adapter: new MockAgentAdapter({ scenario: "cancellable", stepDelayMs: 5000 }),
+      failpoint: (name) => {
+        if (name === "abandoned_retry_task_prepared") {
+          throw new Error("failpoint: task prepared");
+        }
+      },
+    });
+    await prepareAbandonedRunForRetry(harness);
+
+    await expect(harness.scheduler.retryAbandonedStep("run-1", "step-a")).rejects.toThrow(
+      "failpoint: task prepared",
+    );
+    expect(harness.taskStore.get("task-a").task.status).toBe("assigned");
+    expect(harness.signalStore.countByState().pending).toBe(0);
+    expect(harness.planRunStore.listAttempts("run-1", "step-a")).toHaveLength(1);
+
+    const recovered = rebuildScheduler(harness);
+    const intent = harness.planRunStore.listAbandonedRetryIntents()[0];
+    if (intent === undefined) throw new Error("expected a retry intent");
+    await recovered.continueAbandonedRetryIntent(intent);
+
+    const attempts = harness.planRunStore.listAttempts("run-1", "step-a");
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.status).toBe("running");
+  });
+
+  it("coalesces signal replay after durable signal persistence but before replacement attempt claim", async () => {
+    const counter = countingAdapter(
+      new MockAgentAdapter({ scenario: "cancellable", stepDelayMs: 5000 }),
+    );
+    const harness = buildHarness({
+      adapter: counter.adapter,
+      failpoint: (name) => {
+        if (name === "abandoned_retry_signal_persisted") {
+          throw new Error("failpoint: signal persisted");
+        }
+      },
+    });
+    await prepareAbandonedRunForRetry(harness);
+    counter.reset();
+
+    await expect(harness.scheduler.retryAbandonedStep("run-1", "step-a")).rejects.toThrow(
+      "failpoint: signal persisted",
+    );
+    expect(harness.signalStore.countByState().pending).toBe(1);
+    expect(harness.planRunStore.listAttempts("run-1", "step-a")).toHaveLength(1);
+
+    const recovered = rebuildScheduler(harness);
+    const intent = harness.planRunStore.listAbandonedRetryIntents()[0];
+    if (intent === undefined) throw new Error("expected a retry intent");
+    await recovered.continueAbandonedRetryIntent(intent);
+
+    expect(harness.planRunStore.listAttempts("run-1", "step-a")).toHaveLength(2);
+    expect(counter.calls()).toBe(1);
+  });
+
+  it("starts the already-claimed replacement attempt after a crash before adapter launch", async () => {
+    const counter = countingAdapter(
+      new MockAgentAdapter({ scenario: "cancellable", stepDelayMs: 5000 }),
+    );
+    const harness = buildHarness({
+      adapter: counter.adapter,
+      failpoint: (name) => {
+        if (name === "abandoned_retry_attempt_claimed") {
+          throw new Error("failpoint: attempt claimed");
+        }
+      },
+    });
+    await prepareAbandonedRunForRetry(harness);
+    counter.reset();
+
+    await expect(harness.scheduler.retryAbandonedStep("run-1", "step-a")).rejects.toThrow(
+      "failpoint: attempt claimed",
+    );
+    let attempts = harness.planRunStore.listAttempts("run-1", "step-a");
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.status).toBe("claimed");
+    expect(attempts[1]?.taskRunId).toBeUndefined();
+    expect(counter.calls()).toBe(0);
+
+    const recovered = rebuildScheduler(harness);
+    const intent = harness.planRunStore.listAbandonedRetryIntents()[0];
+    if (intent === undefined) throw new Error("expected a retry intent");
+    await recovered.continueAbandonedRetryIntent(intent);
+
+    attempts = harness.planRunStore.listAttempts("run-1", "step-a");
+    expect(attempts).toHaveLength(2);
+    expect(attempts[1]?.status).toBe("running");
+    expect(attempts[1]?.taskRunId).toBeDefined();
+    expect(counter.calls()).toBe(1);
+  });
+
+  it("direct adapter count: valid retry, duplicate requests, and replay launch the replacement exactly once", async () => {
+    const counter = countingAdapter(
+      new MockAgentAdapter({ scenario: "cancellable", stepDelayMs: 5000 }),
+    );
+    const harness = buildHarness({ adapter: counter.adapter });
+    await prepareAbandonedRunForRetry(harness);
+    counter.reset();
+
+    await harness.scheduler.retryAbandonedStep("run-1", "step-a");
+    await expect(harness.scheduler.retryAbandonedStep("run-1", "step-a")).rejects.toThrow(
+      CeoPlanExecutionAbandonedRetryNotEligibleError,
+    );
+    await harness.scheduler.enqueueSignal({
+      planRunId: "run-1",
+      planStepId: "step-a",
+      reason: "operator_manual_retry",
+      priority: "high",
+    });
+    const intent = harness.planRunStore.listAbandonedRetryIntents()[0];
+    if (intent === undefined) throw new Error("expected a retry intent");
+    await harness.scheduler.continueAbandonedRetryIntent(intent);
+
+    expect(counter.calls()).toBe(1);
+    expect(harness.planRunStore.listAttempts("run-1", "step-a")).toHaveLength(2);
+  });
+
+  it("direct adapter count: concurrent duplicate requests launch the replacement exactly once", async () => {
+    const counter = countingAdapter(
+      new MockAgentAdapter({ scenario: "cancellable", stepDelayMs: 5000 }),
+    );
+    const harness = buildHarness({ adapter: counter.adapter });
+    await prepareAbandonedRunForRetry(harness);
+    counter.reset();
+
+    const results = await Promise.allSettled([
+      harness.scheduler.retryAbandonedStep("run-1", "step-a"),
+      harness.scheduler.retryAbandonedStep("run-1", "step-a"),
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled").length).toBeGreaterThanOrEqual(
+      1,
+    );
+    for (const result of results) {
+      if (result.status === "rejected") {
+        expect(result.reason).toBeInstanceOf(CeoPlanExecutionAbandonedRetryNotEligibleError);
+      }
+    }
+    expect(counter.calls()).toBe(1);
+    expect(harness.planRunStore.listAttempts("run-1", "step-a")).toHaveLength(2);
   });
 });

@@ -163,6 +163,7 @@ describe("runCeoPlanExecutionRecovery", () => {
     const summary = await runCeoPlanExecutionRecovery({
       planRunStore: harness.planRunStore,
       signalStore: harness.signalStore,
+      taskStore: harness.taskStore,
       scheduler: harness.scheduler,
       planStore: harness.planStore,
       postBoardAudit: (_planId, text) => harness.boardAuditLog.push(text),
@@ -240,6 +241,7 @@ describe("runCeoPlanExecutionRecovery", () => {
     await runCeoPlanExecutionRecovery({
       planRunStore: harness.planRunStore,
       signalStore: harness.signalStore,
+      taskStore: harness.taskStore,
       scheduler: harness.scheduler,
       planStore: harness.planStore,
       postBoardAudit: (_planId, text) => harness.boardAuditLog.push(text),
@@ -285,6 +287,7 @@ describe("runCeoPlanExecutionRecovery", () => {
     const recoveryInput = {
       planRunStore: harness.planRunStore,
       signalStore: harness.signalStore,
+      taskStore: harness.taskStore,
       scheduler: harness.scheduler,
       planStore: harness.planStore,
       postBoardAudit: (_planId: string, text: string) => harness.boardAuditLog.push(text),
@@ -316,6 +319,7 @@ describe("runCeoPlanExecutionRecovery", () => {
     const summary = await runCeoPlanExecutionRecovery({
       planRunStore: harness.planRunStore,
       signalStore: harness.signalStore,
+      taskStore: harness.taskStore,
       scheduler: harness.scheduler,
       planStore: harness.planStore,
       postBoardAudit: (_planId, text) => harness.boardAuditLog.push(text),
@@ -350,6 +354,7 @@ describe("runCeoPlanExecutionRecovery", () => {
     const summary = await runCeoPlanExecutionRecovery({
       planRunStore: harness.planRunStore,
       signalStore: harness.signalStore,
+      taskStore: harness.taskStore,
       scheduler: harness.scheduler,
       planStore: harness.planStore,
       postBoardAudit: (_planId, text) => harness.boardAuditLog.push(text),
@@ -378,6 +383,7 @@ describe("runCeoPlanExecutionRecovery", () => {
     const summary = await runCeoPlanExecutionRecovery({
       planRunStore: harness.planRunStore,
       signalStore: harness.signalStore,
+      taskStore: harness.taskStore,
       scheduler: harness.scheduler,
       planStore: harness.planStore,
       postBoardAudit: (_planId, text) => harness.boardAuditLog.push(text),
@@ -389,5 +395,140 @@ describe("runCeoPlanExecutionRecovery", () => {
     expect(summary.runsScanned).toBe(0);
     expect(harness.planRunStore.getRun("run-1").status).toBe("paused");
     expect(harness.boardAuditLog).toHaveLength(0);
+  });
+
+  it("continues an unlaunched replacement attempt only when a durable abandoned-retry intent exists", async () => {
+    const harness = buildHarness();
+    addAssignedTask(harness.taskStore, "task-1");
+    createPlanAndRun(harness, {
+      planId: "plan-1",
+      runId: "run-1",
+      taskId: "task-1",
+      stepId: "step-1",
+      policy: { ...DEFAULT_CEO_PLAN_EXECUTION_POLICY, maxAttemptsPerStep: 2 },
+    });
+    harness.planRunStore.startRun({ runId: "run-1", now: NOW });
+    harness.planRunStore.createAttempt({
+      attemptId: "attempt-1",
+      runId: "run-1",
+      planStepId: "step-1",
+      childTaskId: "task-1",
+      attemptNumber: 1,
+      triggerReason: "execution_started",
+      schedulerSignalId: "signal-1",
+      leaseGeneration: 0,
+      ownerToken: "owner-1",
+      now: NOW,
+    });
+    harness.planRunStore.updateAttempt({ attemptId: "attempt-1", status: "abandoned", now: NOW });
+    const { intent } = harness.planRunStore.claimAbandonedRetryIntent({
+      intentId: "intent-1",
+      runId: "run-1",
+      planStepId: "step-1",
+      childTaskId: "task-1",
+      abandonedAttemptId: "attempt-1",
+      now: NOW,
+    });
+    const { attempt: replacement } = harness.planRunStore.claimAttempt({
+      attemptId: "attempt-2",
+      runId: "run-1",
+      planStepId: "step-1",
+      childTaskId: "task-1",
+      attemptNumber: 2,
+      triggerReason: "operator_manual_retry",
+      schedulerSignalId: "signal-2",
+      leaseGeneration: 1,
+      ownerToken: "owner-1",
+      now: NOW,
+      readinessReason: "ready",
+      dependencySummary: {
+        totalDependencies: 0,
+        completedDependencies: 0,
+        failedDependencies: 0,
+        cancelledDependencies: 0,
+      },
+    });
+    harness.planRunStore.linkAbandonedRetryIntentReplacement({
+      intentId: intent.id,
+      replacementAttemptId: replacement.id,
+      now: NOW,
+    });
+
+    const summary = await runCeoPlanExecutionRecovery({
+      planRunStore: harness.planRunStore,
+      signalStore: harness.signalStore,
+      taskStore: harness.taskStore,
+      scheduler: harness.scheduler,
+      planStore: harness.planStore,
+      postBoardAudit: (_planId, text) => harness.boardAuditLog.push(text),
+      previousShutdown: "unclean",
+      now: NOW,
+      runAtomicUnit: harness.runAtomicUnit,
+    });
+
+    expect(summary.abandonedRetryIntentsContinued).toBe(1);
+    expect(summary.attemptsAbandoned).toBe(0);
+    const attempts = harness.planRunStore.listAttempts("run-1", "step-1");
+    expect(attempts).toHaveLength(2);
+    expect(attempts[0]?.status).toBe("abandoned");
+    expect(attempts[1]?.id).toBe("attempt-2");
+    expect(attempts[1]?.taskRunId).toBeDefined();
+    expect(harness.taskStore.get("task-1").runId).toBeDefined();
+  });
+
+  it("fails closed for legacy ambiguous partial retry state with no durable operator intent", async () => {
+    const harness = buildHarness();
+    addAssignedTask(harness.taskStore, "task-1");
+    createPlanAndRun(harness, {
+      planId: "plan-1",
+      runId: "run-1",
+      taskId: "task-1",
+      stepId: "step-1",
+      policy: { ...DEFAULT_CEO_PLAN_EXECUTION_POLICY, maxAttemptsPerStep: 2 },
+    });
+    harness.planRunStore.startRun({ runId: "run-1", now: NOW });
+    harness.planRunStore.createAttempt({
+      attemptId: "attempt-1",
+      runId: "run-1",
+      planStepId: "step-1",
+      childTaskId: "task-1",
+      attemptNumber: 1,
+      triggerReason: "execution_started",
+      schedulerSignalId: "signal-1",
+      leaseGeneration: 0,
+      ownerToken: "owner-1",
+      now: NOW,
+    });
+    harness.planRunStore.updateAttempt({ attemptId: "attempt-1", status: "abandoned", now: NOW });
+    harness.planRunStore.upsertStepExecution({
+      runId: "run-1",
+      planStepId: "step-1",
+      status: "awaiting_intervention",
+      readinessReason: "operator_intervention",
+      dependencySummary: {
+        totalDependencies: 0,
+        completedDependencies: 0,
+        failedDependencies: 0,
+        cancelledDependencies: 0,
+      },
+    });
+
+    const summary = await runCeoPlanExecutionRecovery({
+      planRunStore: harness.planRunStore,
+      signalStore: harness.signalStore,
+      taskStore: harness.taskStore,
+      scheduler: harness.scheduler,
+      planStore: harness.planStore,
+      postBoardAudit: (_planId, text) => harness.boardAuditLog.push(text),
+      previousShutdown: "unclean",
+      now: NOW,
+      runAtomicUnit: harness.runAtomicUnit,
+    });
+
+    expect(summary.abandonedRetryIntentsContinued).toBe(0);
+    expect(harness.planRunStore.listAbandonedRetryIntents()).toHaveLength(0);
+    expect(harness.planRunStore.listAttempts("run-1", "step-1")).toHaveLength(1);
+    expect(harness.signalStore.countByState().pending).toBe(0);
+    expect(harness.taskStore.get("task-1").task.status).toBe("assigned");
   });
 });

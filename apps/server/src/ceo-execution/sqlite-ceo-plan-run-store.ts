@@ -26,14 +26,18 @@ import {
   CeoPlanStepAttemptConflictError,
 } from "../errors/app-error.js";
 import type {
+  AbandonedRetryIntentRecord,
   AppendExecutionEventInput,
   CeoPlanRunStorePort,
+  ClaimAbandonedRetryIntentInput,
+  ClaimAbandonedRetryIntentResult,
   CircuitStateSnapshot,
   ClaimAttemptInput,
   ClaimAttemptResult,
   ConfigureRunInput,
   CreateAttemptInput,
   InterventionRecord,
+  LinkAbandonedRetryIntentReplacementInput,
   RecordCircuitFailureInput,
   RecordInterventionInput,
   RecoveryPauseInput,
@@ -107,6 +111,17 @@ interface CircuitRow {
   consecutive_same_code_failures: number;
   last_failure_code: string | null;
   no_progress_attempts: number;
+}
+
+interface AbandonedRetryIntentRow {
+  intent_id: string;
+  run_id: string;
+  plan_step_id: string;
+  child_task_id: string;
+  abandoned_attempt_id: string;
+  requested_at: string;
+  replacement_attempt_id: string | null;
+  replacement_claimed_at: string | null;
 }
 
 function runRowToRun(row: RunRow): CeoPlanRun {
@@ -186,6 +201,19 @@ function attemptRowToAttempt(row: AttemptRow): CeoPlanStepAttempt {
     ...(row.started_at !== null ? { startedAt: row.started_at } : {}),
     ...(row.finished_at !== null ? { finishedAt: row.finished_at } : {}),
     leaseGeneration: row.lease_generation,
+  };
+}
+
+function abandonedRetryIntentRowToRecord(row: AbandonedRetryIntentRow): AbandonedRetryIntentRecord {
+  return {
+    id: row.intent_id,
+    runId: row.run_id,
+    planStepId: row.plan_step_id,
+    childTaskId: row.child_task_id,
+    abandonedAttemptId: row.abandoned_attempt_id,
+    requestedAt: row.requested_at,
+    replacementAttemptId: row.replacement_attempt_id ?? undefined,
+    replacementClaimedAt: row.replacement_claimed_at ?? undefined,
   };
 }
 
@@ -550,9 +578,15 @@ export class SqliteCeoPlanRunStore implements CeoPlanRunStorePort {
 
   listAttempts(runId: string, planStepId?: string): readonly CeoPlanStepAttempt[] {
     const rows = (planStepId === undefined
-      ? this.#db.prepare("SELECT * FROM ceo_plan_step_attempts WHERE run_id = ?").all(runId)
+      ? this.#db
+          .prepare(
+            "SELECT * FROM ceo_plan_step_attempts WHERE run_id = ? ORDER BY plan_step_id ASC, attempt_number ASC",
+          )
+          .all(runId)
       : this.#db
-          .prepare("SELECT * FROM ceo_plan_step_attempts WHERE run_id = ? AND plan_step_id = ?")
+          .prepare(
+            "SELECT * FROM ceo_plan_step_attempts WHERE run_id = ? AND plan_step_id = ? ORDER BY attempt_number ASC",
+          )
           .all(runId, planStepId)) as unknown as AttemptRow[];
     return rows.map(attemptRowToAttempt);
   }
@@ -566,6 +600,88 @@ export class SqliteCeoPlanRunStore implements CeoPlanRunStorePort {
       )
       .get(runId, planStepId, ...ATTEMPT_TERMINAL);
     return row === undefined ? undefined : attemptRowToAttempt(row as unknown as AttemptRow);
+  }
+
+  claimAbandonedRetryIntent(
+    input: ClaimAbandonedRetryIntentInput,
+  ): ClaimAbandonedRetryIntentResult {
+    return withTransaction(this.#db, () => {
+      const existing = this.findAbandonedRetryIntent(
+        input.runId,
+        input.planStepId,
+        input.abandonedAttemptId,
+      );
+      if (existing !== undefined) return { intent: existing, created: false };
+      this.#db
+        .prepare(
+          `INSERT INTO ceo_plan_abandoned_retry_intents (
+            intent_id, run_id, plan_step_id, child_task_id, abandoned_attempt_id,
+            actor, requested_at
+          ) VALUES (?, ?, ?, ?, ?, 'human:local-operator', ?)`,
+        )
+        .run(
+          input.intentId,
+          input.runId,
+          input.planStepId,
+          input.childTaskId,
+          input.abandonedAttemptId,
+          input.now,
+        );
+      const created = this.findAbandonedRetryIntent(
+        input.runId,
+        input.planStepId,
+        input.abandonedAttemptId,
+      );
+      if (created === undefined) throw new CeoPlanRunNotFoundError(input.intentId);
+      return { intent: created, created: true };
+    });
+  }
+
+  findAbandonedRetryIntent(
+    runId: string,
+    planStepId: string,
+    abandonedAttemptId: string,
+  ): AbandonedRetryIntentRecord | undefined {
+    const row = this.#db
+      .prepare(
+        `SELECT * FROM ceo_plan_abandoned_retry_intents
+         WHERE run_id = ? AND plan_step_id = ? AND abandoned_attempt_id = ?`,
+      )
+      .get(runId, planStepId, abandonedAttemptId) as unknown as AbandonedRetryIntentRow | undefined;
+    return row === undefined ? undefined : abandonedRetryIntentRowToRecord(row);
+  }
+
+  listAbandonedRetryIntents(): readonly AbandonedRetryIntentRecord[] {
+    const rows = this.#db
+      .prepare(
+        `SELECT * FROM ceo_plan_abandoned_retry_intents
+         ORDER BY run_id ASC, plan_step_id ASC, requested_at ASC`,
+      )
+      .all() as unknown as AbandonedRetryIntentRow[];
+    return rows.map(abandonedRetryIntentRowToRecord);
+  }
+
+  linkAbandonedRetryIntentReplacement(
+    input: LinkAbandonedRetryIntentReplacementInput,
+  ): AbandonedRetryIntentRecord {
+    return withTransaction(this.#db, () => {
+      const existing = this.#db
+        .prepare("SELECT * FROM ceo_plan_abandoned_retry_intents WHERE intent_id = ?")
+        .get(input.intentId) as unknown as AbandonedRetryIntentRow | undefined;
+      if (existing === undefined) throw new CeoPlanRunNotFoundError(input.intentId);
+      this.#db
+        .prepare(
+          `UPDATE ceo_plan_abandoned_retry_intents SET
+            replacement_attempt_id = COALESCE(replacement_attempt_id, ?),
+            replacement_claimed_at = COALESCE(replacement_claimed_at, ?)
+           WHERE intent_id = ?`,
+        )
+        .run(input.replacementAttemptId, input.now, input.intentId);
+      const updated = this.#db
+        .prepare("SELECT * FROM ceo_plan_abandoned_retry_intents WHERE intent_id = ?")
+        .get(input.intentId) as unknown as AbandonedRetryIntentRow;
+      return abandonedRetryIntentRowToRecord(updated);
+    });
   }
 
   getCircuitState(runId: string): CircuitStateSnapshot {

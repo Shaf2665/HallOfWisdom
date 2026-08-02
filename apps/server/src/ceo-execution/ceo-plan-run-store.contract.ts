@@ -190,6 +190,59 @@ export function runCeoPlanRunStoreContractTests(
       expect(a2.attemptNumber).toBe(2);
     });
 
+    it("listAttempts returns deterministic per-step and run-wide ordering", () => {
+      const store = buildStore();
+      store.configureRun(configureInput());
+      store.startRun({ runId: "run-1", now: NOW });
+      store.createAttempt({
+        attemptId: "a-1",
+        runId: "run-1",
+        planStepId: "step-a",
+        childTaskId: "task-a",
+        attemptNumber: 1,
+        triggerReason: "execution_started",
+        schedulerSignalId: "sig-a-1",
+        leaseGeneration: 0,
+        ownerToken: "owner-1",
+        now: NOW,
+      });
+      store.createAttempt({
+        attemptId: "b-1",
+        runId: "run-1",
+        planStepId: "step-b",
+        childTaskId: "task-b",
+        attemptNumber: 1,
+        triggerReason: "execution_started",
+        schedulerSignalId: "sig-b-1",
+        leaseGeneration: 0,
+        ownerToken: "owner-1",
+        now: NOW,
+      });
+      store.updateAttempt({ attemptId: "a-1", status: "failed", now: LATER });
+      store.createAttempt({
+        attemptId: "a-2",
+        runId: "run-1",
+        planStepId: "step-a",
+        childTaskId: "task-a",
+        attemptNumber: 2,
+        triggerReason: "operator_manual_retry",
+        schedulerSignalId: "sig-a-2",
+        leaseGeneration: 0,
+        ownerToken: "owner-1",
+        now: LATER,
+      });
+
+      expect(store.listAttempts("run-1", "step-a").map((attempt) => attempt.id)).toEqual([
+        "a-1",
+        "a-2",
+      ]);
+      expect(store.listAttempts("run-1").map((attempt) => attempt.id)).toEqual([
+        "a-1",
+        "a-2",
+        "b-1",
+      ]);
+    });
+
     it("rejects a second non-terminal attempt for the same step — at most one active attempt", () => {
       const store = buildStore();
       store.configureRun(configureInput());
@@ -353,6 +406,72 @@ export function runCeoPlanRunStoreContractTests(
       expect(store.claimBoardAuditOnce("run-1", "execution_started", NOW)).toBe(true);
       expect(store.claimBoardAuditOnce("run-1", "execution_started", LATER)).toBe(false);
       expect(store.claimBoardAuditOnce("run-1", "execution_paused", LATER)).toBe(true);
+    });
+
+    it("abandoned retry intents are durable-idempotent for one exact abandoned attempt and link to one replacement attempt", () => {
+      const store = buildStore();
+      store.configureRun(configureInput());
+      store.startRun({ runId: "run-1", now: NOW });
+      store.createAttempt({
+        attemptId: "a-1",
+        runId: "run-1",
+        planStepId: "step-a",
+        childTaskId: "task-a",
+        attemptNumber: 1,
+        triggerReason: "execution_started",
+        schedulerSignalId: "sig-a-1",
+        leaseGeneration: 0,
+        ownerToken: "owner-1",
+        now: NOW,
+      });
+      store.updateAttempt({ attemptId: "a-1", status: "abandoned", now: LATER });
+
+      const first = store.claimAbandonedRetryIntent({
+        intentId: "intent-1",
+        runId: "run-1",
+        planStepId: "step-a",
+        childTaskId: "task-a",
+        abandonedAttemptId: "a-1",
+        now: NOW,
+      });
+      const duplicate = store.claimAbandonedRetryIntent({
+        intentId: "intent-duplicate",
+        runId: "run-1",
+        planStepId: "step-a",
+        childTaskId: "task-a",
+        abandonedAttemptId: "a-1",
+        now: LATER,
+      });
+
+      expect(first.created).toBe(true);
+      expect(duplicate.created).toBe(false);
+      expect(duplicate.intent.id).toBe("intent-1");
+      store.createAttempt({
+        attemptId: "a-2",
+        runId: "run-1",
+        planStepId: "step-a",
+        childTaskId: "task-a",
+        attemptNumber: 2,
+        triggerReason: "operator_manual_retry",
+        schedulerSignalId: "sig-a-2",
+        leaseGeneration: 0,
+        ownerToken: "owner-1",
+        now: LATER,
+      });
+      const linked = store.linkAbandonedRetryIntentReplacement({
+        intentId: "intent-1",
+        replacementAttemptId: "a-2",
+        now: LATER,
+      });
+      const relinked = store.linkAbandonedRetryIntentReplacement({
+        intentId: "intent-1",
+        replacementAttemptId: "a-3",
+        now: "2026-07-31T12:10:00.000Z",
+      });
+
+      expect(linked.replacementAttemptId).toBe("a-2");
+      expect(relinked.replacementAttemptId).toBe("a-2");
+      expect(store.listAbandonedRetryIntents()).toEqual([relinked]);
     });
   });
 }

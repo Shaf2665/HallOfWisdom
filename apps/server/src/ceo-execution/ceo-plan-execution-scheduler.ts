@@ -19,7 +19,7 @@ import {
   CeoPlanStepAttemptConflictError,
   TaskStateConflictError,
 } from "../errors/app-error.js";
-import type { CeoPlanRunStorePort } from "./ceo-plan-run-store-port.js";
+import type { AbandonedRetryIntentRecord, CeoPlanRunStorePort } from "./ceo-plan-run-store-port.js";
 import type { ClaimedSignal, ExecutionSignalStorePort } from "./execution-signal-store-port.js";
 import {
   buildDependencyIndex,
@@ -39,6 +39,12 @@ const SCHEDULER_ACTOR = "system:ceo-scheduler" as const;
 const DEFAULT_ADAPTER_CAPACITY = 1;
 /** Safety cap on how many signals one `enqueueSignal` call will drain synchronously — prevents an unbounded loop if a bug ever produced runaway self-requeuing. */
 const MAX_DRAIN_ITERATIONS = 50;
+
+export type CeoPlanExecutionSchedulerFailpoint =
+  | "abandoned_retry_intent_recorded"
+  | "abandoned_retry_task_prepared"
+  | "abandoned_retry_signal_persisted"
+  | "abandoned_retry_attempt_claimed";
 
 export interface SchedulerDeps {
   readonly planRunStore: CeoPlanRunStorePort;
@@ -79,6 +85,7 @@ export interface SchedulerDeps {
    */
   readonly scheduleWake?: ((callback: () => void, delayMs: number) => unknown) | undefined;
   readonly cancelWake?: ((handle: unknown) => void) | undefined;
+  readonly failpoint?: ((name: CeoPlanExecutionSchedulerFailpoint) => void) | undefined;
 }
 
 export interface EmergencyStopOutcome {
@@ -163,6 +170,7 @@ export class CeoPlanExecutionScheduler {
   readonly #capacityWaitAdapter = new Map<string, string>();
   readonly #scheduleWake: (callback: () => void, delayMs: number) => unknown;
   readonly #cancelWake: (handle: unknown) => void;
+  readonly #failpoint: ((name: CeoPlanExecutionSchedulerFailpoint) => void) | undefined;
   /** Handle for the single currently-armed retry-due wake timer, or `undefined` if none is armed (idle — no pending signal anywhere). */
   #wakeTimerHandle: unknown;
   /** The `availableAt` the currently-armed timer targets — lets `#rearmWakeTimer` skip redundant re-arming when nothing earlier has appeared. */
@@ -186,6 +194,7 @@ export class CeoPlanExecutionScheduler {
       ((handle) => {
         clearTimeout(handle as NodeJS.Timeout);
       });
+    this.#failpoint = deps.failpoint;
   }
 
   /**
@@ -624,22 +633,17 @@ export class CeoPlanExecutionScheduler {
    * cancellation only ever follows from its parent task's own
    * cancellation, which reconciliation already reflects into run status).
    *
-   * On success: calls `TaskOrchestrator.prepareRetry()` (the same atomic,
-   * revision-CAS commit `#prepareTaskRetryIfEligible` already uses —
-   * "no competing recovery has already succeeded" is enforced by THIS
-   * commit, not by any read above it), appends exactly one
+   * On success: first records a durable retry intent tied to the exact
+   * abandoned attempt, then appends a best-effort
    * `ceo.execution.retry_requested` event attributed to
    * `"human:local-operator"` (never the scheduler's own
    * `system:ceo-scheduler` actor — this action was explicitly requested by
-   * a person, and the audit trail should say so), then hands off to the
-   * ordinary `enqueueSignal({reason: "operator_manual_retry"})` path —
-   * the task record is now genuinely `"assigned"`, so `#tryAdvanceStep`'s
-   * normal claim-then-`TaskOrchestrator.startTask()` tail runs exactly as
-   * it would for any other step, re-running current adapter detection,
-   * capability/execution-trust eligibility, and the revision/assignment
-   * CAS, and creating exactly one new attempt with exactly one new
-   * task-run ID. Never bypasses `startTask()`; never duplicates its
-   * claim/launch logic.
+   * a person, and the audit trail should say so). Later crash boundaries
+   * can be safely continued from that durable intent: task preparation,
+   * signal persistence, replacement-attempt claim/linking, and adapter
+   * launch are all idempotent or bounded by existing attempt uniqueness and
+   * task revision checks. Never bypasses `startTask()`; never broadens
+   * ordinary retry eligibility for non-abandoned attempts.
    *
    * Throws `CeoPlanExecutionAbandonedRetryNotEligibleError` (409, a
    * bounded safe reason, never raw error text) for every rejection case —
@@ -656,7 +660,6 @@ export class CeoPlanExecutionScheduler {
         "step does not belong to this run",
       );
     }
-    // 2. Run currently running — i.e. the operator already resumed it.
     if (run.status !== "running") {
       throw new CeoPlanExecutionAbandonedRetryNotEligibleError(
         runId,
@@ -664,8 +667,19 @@ export class CeoPlanExecutionScheduler {
         "run is not running (resume the run first)",
       );
     }
-    // 15. Step not completed/cancelled — must be exactly the status
-    // unclean-restart recovery left it in.
+    const attempts = this.#planRunStore.listAttempts(run.id, planStepId);
+    const latestAttempt = attempts[attempts.length - 1];
+    const existingIntent = this.#findRecoverableAbandonedRetryIntent(run.id, planStepId);
+    if (existingIntent !== undefined) {
+      const continued = await this.continueAbandonedRetryIntent(existingIntent);
+      if (continued) return;
+      throw new CeoPlanExecutionAbandonedRetryNotEligibleError(
+        runId,
+        planStepId,
+        "durable retry intent cannot be continued",
+      );
+    }
+
     if (step.status !== "awaiting_intervention") {
       throw new CeoPlanExecutionAbandonedRetryNotEligibleError(
         runId,
@@ -685,14 +699,6 @@ export class CeoPlanExecutionScheduler {
       );
     }
 
-    // 6, 7, 11. The latest attempt exists and is genuinely "abandoned" —
-    // the ONE status `ceo-plan-execution-recovery.ts`'s unclean-restart
-    // branch ever sets, so this check alone already proves "resulted from
-    // unclean-restart recovery" structurally; the failure-code check below
-    // is a second, independent confirmation across the task/attempt
-    // boundary, not redundant with this one.
-    const attempts = this.#planRunStore.listAttempts(run.id, planStepId);
-    const latestAttempt = attempts[attempts.length - 1];
     if (latestAttempt?.status !== "abandoned") {
       throw new CeoPlanExecutionAbandonedRetryNotEligibleError(
         runId,
@@ -775,61 +781,180 @@ export class CeoPlanExecutionScheduler {
       );
     }
 
-    try {
-      // 16. No competing recovery has already succeeded — enforced by
-      // this call's own revision-checked atomic commit, the true
-      // authority; every check above ran with no `await` since, so
-      // nothing above can itself be the source of a race.
-      this.#taskOrchestrator.prepareRetry(taskRecord.task.taskId);
-    } catch (error) {
-      if (error instanceof TaskStateConflictError) {
-        throw new CeoPlanExecutionAbandonedRetryNotEligibleError(
-          runId,
-          planStepId,
-          "a competing recovery already succeeded",
-        );
-      }
-      throw error;
-    }
-
-    // Attributed to the explicit operator, never `SCHEDULER_ACTOR` — every
-    // other event this class emits is a mechanical consequence of a
-    // signal; this one exists only because a person clicked "Retry step".
-    const event = this.#planRunStore.appendEvent({
+    const { intent, created } = this.#planRunStore.claimAbandonedRetryIntent({
+      intentId: randomUUID(),
       runId: run.id,
-      type: "ceo.execution.retry_requested",
-      actor: "human:local-operator",
-      payload: {
-        planStepId,
-        previousTaskRunId: latestAttempt.taskRunId ?? "",
-      },
+      planStepId,
+      childTaskId: step.childTaskId,
+      abandonedAttemptId: latestAttempt.id,
       now: this.#now(),
     });
-    this.#eventBus?.publish(run.id, event);
-    // Dedup-gated exactly like every other Board summary this class posts
-    // (`#postAuditOnce`/`claimBoardAuditOnce`) — keyed by the SPECIFIC
-    // abandoned attempt being recovered, so a genuinely duplicate or
-    // concurrent "Retry step" request (only one of which can ever win the
-    // `prepareRetry()` race above) can never post twice. Boards are
-    // ephemeral/in-memory (see `docs/architecture/0007-...md`); this is a
-    // best-effort operator notification, never the authoritative
-    // cross-restart dedup source — that is the durable execution-event
-    // log this method already writes to above.
-    this.#postAuditOnce(
-      run.planId,
-      run.id,
-      `abandoned_retry_${latestAttempt.id}`,
-      "An operator explicitly retried a step that was abandoned by an unclean Hall Core restart. A new attempt has been prepared.",
-    );
 
-    // Hands off to the ordinary claim-then-launch path — see this
-    // method's own doc comment for why no claim/launch logic is
-    // duplicated here.
-    await this.enqueueSignal({
-      planRunId: run.id,
-      planStepId,
+    if (created) {
+      const event = this.#planRunStore.appendEvent({
+        runId: run.id,
+        type: "ceo.execution.retry_requested",
+        actor: "human:local-operator",
+        payload: {
+          planStepId,
+          abandonedAttemptId: latestAttempt.id,
+          retryIntentId: intent.id,
+          previousTaskRunId: latestAttempt.taskRunId ?? "",
+        },
+        now: this.#now(),
+      });
+      this.#eventBus?.publish(run.id, event);
+      this.#postAuditOnce(
+        run.planId,
+        run.id,
+        `abandoned_retry_${latestAttempt.id}`,
+        "An operator explicitly retried a step that was abandoned by an unclean Hall Core restart. A new attempt has been requested.",
+      );
+    }
+    this.#failpoint?.("abandoned_retry_intent_recorded");
+
+    const continued = await this.continueAbandonedRetryIntent(intent);
+    if (!continued) {
+      throw new CeoPlanExecutionAbandonedRetryNotEligibleError(
+        runId,
+        planStepId,
+        "durable retry intent cannot be continued",
+      );
+    }
+  }
+
+  async continueAbandonedRetryIntent(intent: AbandonedRetryIntentRecord): Promise<boolean> {
+    const run = this.#planRunStore.findRun(intent.runId);
+    if (run?.status !== "running" || run.executionMode !== "autonomous") return false;
+    if (!this.#dependencyIndexes.has(run.id)) return false;
+    let step: CeoPlanStepExecution;
+    try {
+      step = this.#planRunStore.getStepExecution(intent.runId, intent.planStepId);
+    } catch {
+      return false;
+    }
+    if (step.childTaskId !== intent.childTaskId) return false;
+    const abandonedAttempt = this.#planRunStore.getAttempt(intent.abandonedAttemptId);
+    if (
+      abandonedAttempt.planRunId !== intent.runId ||
+      abandonedAttempt.planStepId !== intent.planStepId ||
+      abandonedAttempt.childTaskId !== intent.childTaskId ||
+      abandonedAttempt.status !== "abandoned"
+    ) {
+      return false;
+    }
+
+    if (intent.replacementAttemptId !== undefined) {
+      const replacement = this.#planRunStore.getAttempt(intent.replacementAttemptId);
+      if (
+        replacement.planRunId !== intent.runId ||
+        replacement.planStepId !== intent.planStepId ||
+        replacement.childTaskId !== intent.childTaskId
+      ) {
+        return false;
+      }
+      if (replacement.status !== "claimed" || replacement.taskRunId !== undefined) return false;
+      const taskRecord = this.#taskStore.get(intent.childTaskId);
+      if (taskRecord.task.status !== "assigned" || taskRecord.runId !== undefined) return false;
+      await this.#launchClaimedAttempt(run, step, replacement);
+      return true;
+    }
+
+    let taskRecord = this.#taskStore.get(intent.childTaskId);
+    if (
+      taskRecord.task.status === "failed" &&
+      taskRecord.failure?.code === RESTART_INTERRUPTED_RUN_CODE &&
+      taskRecord.terminalEventType !== undefined
+    ) {
+      try {
+        taskRecord = this.#taskOrchestrator.prepareRetry(intent.childTaskId);
+      } catch (error) {
+        if (error instanceof TaskStateConflictError) return false;
+        throw error;
+      }
+      this.#failpoint?.("abandoned_retry_task_prepared");
+    }
+
+    if (
+      taskRecord.task.status !== "assigned" ||
+      taskRecord.runId !== undefined ||
+      taskRecord.adapterId === undefined
+    ) {
+      return false;
+    }
+
+    this.#enqueueSignalSync({
+      planRunId: intent.runId,
+      planStepId: intent.planStepId,
       reason: "operator_manual_retry",
+      priority: "high",
     });
+    this.#failpoint?.("abandoned_retry_signal_persisted");
+    await this.#drain();
+    return true;
+  }
+
+  #findRecoverableAbandonedRetryIntent(
+    runId: string,
+    planStepId: string,
+  ): AbandonedRetryIntentRecord | undefined {
+    const attempts = this.#planRunStore.listAttempts(runId, planStepId);
+    const intents = this.#planRunStore
+      .listAbandonedRetryIntents()
+      .filter((intent) => intent.runId === runId && intent.planStepId === planStepId)
+      .sort((a, b) => (a.requestedAt < b.requestedAt ? 1 : a.requestedAt > b.requestedAt ? -1 : 0));
+    for (const intent of intents) {
+      const abandoned = attempts.find((attempt) => attempt.id === intent.abandonedAttemptId);
+      if (abandoned?.status !== "abandoned") continue;
+      if (intent.replacementAttemptId === undefined) return intent;
+      const replacement = attempts.find((attempt) => attempt.id === intent.replacementAttemptId);
+      if (
+        replacement?.status === "claimed" &&
+        replacement.taskRunId === undefined &&
+        this.#taskStore.get(intent.childTaskId).runId === undefined
+      ) {
+        return intent;
+      }
+    }
+    return undefined;
+  }
+
+  async #launchClaimedAttempt(
+    run: CeoPlanRun,
+    step: CeoPlanStepExecution,
+    attempt: CeoPlanStepAttempt,
+  ): Promise<void> {
+    try {
+      const started = await this.#taskOrchestrator.startTask(step.childTaskId);
+      this.#planRunStore.updateAttempt({
+        attemptId: attempt.id,
+        status: "running",
+        now: this.#now(),
+        taskRunId: started.runId,
+        startedAt: this.#now(),
+      });
+      this.#planRunStore.upsertStepExecution({
+        runId: run.id,
+        planStepId: step.planStepId,
+        status: "running",
+        readinessReason: "ready",
+        dependencySummary: step.dependencySummary,
+        startedAt: this.#now(),
+      });
+      this.#appendEvent(run.id, "ceo.execution.step_started", {
+        planStepId: step.planStepId,
+        attemptNumber: attempt.attemptNumber,
+      });
+    } catch (error) {
+      this.#handleStartFailure(
+        run,
+        step.planStepId,
+        attempt.id,
+        attempt.attemptNumber,
+        step.dependencySummary,
+        error,
+      );
+    }
   }
 
   async #tryAdvanceStep(
@@ -967,6 +1092,10 @@ export class CeoPlanExecutionScheduler {
     const now = this.#now();
     const attemptId = randomUUID();
     let attempt: CeoPlanStepAttempt;
+    const abandonedRetryIntent =
+      triggerReason === "operator_manual_retry"
+        ? this.#findRecoverableAbandonedRetryIntent(run.id, stepId)
+        : undefined;
     try {
       // Wrapped in the same atomic-unit mechanism as every other
       // multi-write span here (see `SchedulerDeps.runAtomicUnit`'s doc
@@ -981,8 +1110,8 @@ export class CeoPlanExecutionScheduler {
       // test, which injects exactly that failure and proves both writes
       // roll back together — this is the "disclosed in-memory cross-store
       // atomicity gap" kickoff §8 asked to close, and it is closed.
-      ({ attempt } = this.#runAtomicUnit(() =>
-        this.#planRunStore.claimAttempt({
+      ({ attempt } = this.#runAtomicUnit(() => {
+        const claimed = this.#planRunStore.claimAttempt({
           attemptId,
           runId: run.id,
           planStepId: stepId,
@@ -995,13 +1124,24 @@ export class CeoPlanExecutionScheduler {
           now,
           readinessReason: "ready",
           dependencySummary: readiness.summary,
-        }),
-      ));
+        });
+        if (abandonedRetryIntent !== undefined) {
+          this.#planRunStore.linkAbandonedRetryIntentReplacement({
+            intentId: abandonedRetryIntent.id,
+            replacementAttemptId: claimed.attempt.id,
+            now,
+          });
+        }
+        return claimed;
+      }));
     } catch (error) {
       if (error instanceof CeoPlanStepAttemptConflictError) return;
       throw error;
     }
     this.#appendEvent(run.id, "ceo.execution.step_claimed", { planStepId: stepId, attemptNumber });
+    if (abandonedRetryIntent !== undefined) {
+      this.#failpoint?.("abandoned_retry_attempt_claimed");
+    }
 
     try {
       const started = await this.#taskOrchestrator.startTask(step.childTaskId);
