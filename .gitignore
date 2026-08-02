@@ -43,3 +43,5 @@ Thumbs.db
 
 # Playwright MCP tool's local snapshot/console dump artifacts
 .playwright-mcp/
+
+.claude/scheduled_tasks.lock
