@@ -83,7 +83,9 @@ one active worktree per Hall agent run id.
 Phase 16.1 creates worktrees using the functional equivalent of:
 
 ```text
-git worktree add --detach <generated-worktree-path> <resolved-base-commit>
+git -c core.fsmonitor=false worktree add --detach --no-checkout <generated-worktree-path> <resolved-base-commit>
+git -c core.fsmonitor=false config --name-only --get-regexp '^filter\..*\.'
+git -c core.fsmonitor=false -c core.hooksPath=<hall-owned-empty-hooks-dir> checkout --detach --force <resolved-base-commit>
 ```
 
 No branch is created, moved, or published. The manager verifies after creation that:
@@ -92,6 +94,30 @@ No branch is created, moved, or published. The manager verifies after creation t
 - worktree `HEAD` equals the recorded base commit;
 - `HEAD` is detached;
 - the requested source subdirectory maps to an equivalent directory inside the worktree.
+
+The first step intentionally uses `--no-checkout`. This creates Git's worktree metadata and the
+empty worktree directory without populating repository files, so repository-controlled checkout
+programs have not yet had a chance to run. Only after the durable `creating` record exists and the
+new worktree path is canonicalized does Hall inspect effective Git configuration from inside that
+worktree. Inspecting from the final path matters because conditional Git configuration may depend
+on the worktree location.
+
+If the effective configuration contains `filter.*.clean`, `filter.*.smudge`, or
+`filter.*.process`, Hall fails closed with `GIT_CHECKOUT_FILTER_UNSUPPORTED`, records
+`creation_failed`, and does not run checkout. The configured filter command text is not copied into
+the public-safe failure summary. A Git config exit code of 1 with empty output is treated as no
+matching filters; other config-query failures are bounded Git failures.
+
+Checkout runs only with a Hall-controlled empty hooks directory under the validated Hall-owned root:
+`core.hooksPath=<hall-owned-empty-hooks-dir>`. The hooks directory is created from fixed internal
+names, canonicalized, verified to be inside the Hall-owned root and outside the source repository,
+rejected if it is a symlink or junction, and verified empty before checkout. Hall does not trust or
+execute repository-provided checkout hooks as part of worktree preparation.
+
+Hall also passes `core.fsmonitor=false` as a command-line Git configuration override for
+manager-controlled Git invocations. This suppresses repository or user configuration that would ask
+Git to invoke an external filesystem-monitor command while Hall is resolving status, listing
+worktrees, inspecting config, checking out, or cleaning up.
 
 ## Clean-source requirement
 
@@ -121,10 +147,16 @@ For example, a source directory of `apps/server` maps to `<worktree>/apps/server
 ## Owned-root containment
 
 The manager requires an explicitly configured Hall-owned worktree root. It must be absolute,
-created/canonicalized before use, outside the source repository, and not an ancestor of the source
-repository. Containment uses canonical paths and `path.relative` semantics rather than string
-prefix checks, protecting against traversal, prefix-confusion siblings, case variation on
-case-insensitive platforms, and symlink/junction escape where the filesystem exposes it.
+non-empty, not a filesystem root, outside the source repository, and not an ancestor of the source
+repository.
+
+Owned-root validation preflights the raw configured path before any directory is created. Hall
+normalizes the raw absolute path lexically, canonicalizes the nearest existing ancestor, resolves
+the intended owned-root location from that canonical ancestor, and proves mutual non-containment
+with the canonical source repository. This catches traversal, prefix-confusion, case variation on
+case-insensitive platforms, and existing parent symlink/junction redirects before `mkdir` can
+mutate the source checkout. Only after the preflight passes does Hall create the owned root,
+canonicalize the created directory, and repeat the mutual non-containment checks.
 
 Worktree directory names are generated from bounded safe identifiers. They are never derived from
 task titles, task descriptions, branch names, agent messages, or repository names.
@@ -140,30 +172,45 @@ Git environment variables that can redirect repository state, including `GIT_DIR
 `GIT_TERMINAL_PROMPT=0` prevents interactive authentication prompts. Phase 16.1 does not run remote
 Git operations, clone, fetch, pull, push, merge, rebase, reset, clean, or submodule update.
 
-Repository hooks and checkout filters are not trusted as Hall control flow. Phase 16.1 accepts only
-an already-approved local repository and does not initialize or update submodules.
+Repository hooks, clean filters, smudge filters, process filters, and external filesystem-monitor
+commands are not trusted as Hall control flow. The worktree is first prepared without checkout,
+then filters are detected from effective configuration before any repository files are populated,
+then checkout runs with an empty Hall-owned hooks path and filesystem-monitor suppression.
+Phase 16.1 accepts only an already-approved local repository and does not initialize or update
+submodules.
 
 ## Cleanup behavior
 
-Cleanup is explicit and accepts a worktree id, never a raw path. The manager loads the durable
-record, revalidates the configured owned root, revalidates the recorded path, confirms the path
-matches the worktree id, transitions to `cleanup_pending`, and runs:
+Cleanup is explicit and accepts a worktree id, never a raw path. The manager loads the exact durable
+record, revalidates the configured owned root, reconstructs the only valid worktree path from the
+canonical owned root plus the fixed `wt_` prefix and persisted worktree id, and requires the stored
+path to match that expected path using platform-aware equality.
+
+If the path exists, Hall inspects it with `lstat`, rejects symlink or junction replacement, resolves
+it with `realpath`, requires the canonical target to equal the expected canonical worktree path, and
+requires it to remain inside the canonical Hall-owned root. The same target validation is repeated
+immediately before invoking Git removal. A safety-precondition failure occurs before a valid `ready`
+record transitions to `cleanup_pending`.
+
+Only after those checks pass does cleanup run:
 
 ```text
-git worktree remove --force <recorded-worktree-path>
+git -c core.fsmonitor=false worktree remove --force <manager-constructed-worktree-path>
 ```
 
 On success the record becomes `cleaned`. If both the path and Git registration are already absent,
 cleanup marks the record `cleaned` idempotently. On Git failure the record becomes
 `cleanup_failed`. There is no broad recursive filesystem deletion fallback and no `git clean`.
-Automatic stale cleanup belongs to Phase 16.5.
+Hall does not delete symlink/junction targets. Automatic stale cleanup belongs to Phase 16.5.
 
 ## Crash boundaries
 
 Phase 16.1 persists `creating` before invoking `git worktree add`. A crash after Git creates the
-worktree but before `ready` is recorded leaves a durable `creating` record with the intended path,
-source repository, and base commit. Startup reconciliation is intentionally deferred to Phase 16.5;
-this phase only preserves enough evidence for that future reconciler to fail closed.
+no-checkout worktree but before filter inspection, checkout, or `ready` recording leaves a durable
+`creating` record with the intended path, source repository, and base commit. A fail-closed filter
+rejection leaves a durable `creation_failed` record and an unpopulated worktree that requires
+explicit cleanup. Startup reconciliation is intentionally deferred to Phase 16.5; this phase only
+preserves enough evidence for that future reconciler to fail closed.
 
 If Git fails during creation, the record transitions to `creation_failed` with bounded safe failure
 fields. If cleanup fails, the record transitions to `cleanup_failed`.

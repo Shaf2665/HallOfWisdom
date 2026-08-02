@@ -13,13 +13,14 @@ import {
   assertGitSuccess,
   type GitCommandRunner,
   type GitCommandRunnerInput,
+  type GitCommandResult,
 } from "./git-command-runner.js";
 import {
   assertContainedPath,
   assertSafePathToken,
   canonicalizeExistingDirectory,
   canonicalizeOwnedRoot,
-  isPathContained,
+  samePath,
 } from "./path-safety.js";
 
 export interface AgentWorktreeManagerOptions {
@@ -110,7 +111,7 @@ export class AgentWorktreeManager {
 
     try {
       await this.#runGit(
-        ["worktree", "add", "--detach", intendedWorktreePath, baseCommit],
+        ["worktree", "add", "--detach", "--no-checkout", intendedWorktreePath, baseCommit],
         sourceRepositoryRoot,
         "GIT_WORKTREE_ADD_FAILED",
         input.signal,
@@ -128,6 +129,14 @@ export class AgentWorktreeManager {
         description: "created worktree",
       });
       await this.#assertWorktreeRegistered(sourceRepositoryRoot, actualWorktreePath, input.signal);
+      await this.#assertNoExternalCheckoutFilters(actualWorktreePath, input.signal);
+      const hooksDirectory = canonicalizeEmptyHooksDirectory(ownedRoot);
+      await this.#runGit(
+        ["-c", `core.hooksPath=${hooksDirectory}`, "checkout", "--detach", "--force", baseCommit],
+        actualWorktreePath,
+        "GIT_WORKTREE_CHECKOUT_FAILED",
+        input.signal,
+      );
       const actualHead = await this.#resolveHeadCommit(actualWorktreePath, input.signal);
       if (actualHead.toLowerCase() !== baseCommit.toLowerCase()) {
         throw new AgentWorktreeGitOperationError(
@@ -166,15 +175,7 @@ export class AgentWorktreeManager {
       rawOwnedRoot: this.#ownedRoot,
       canonicalSourceRepositoryRoot: initial.canonicalSourceRepositoryRoot,
     });
-    assertContainedPath({
-      rootPath: ownedRoot,
-      candidatePath: initial.canonicalWorktreePath,
-      description: "recorded worktree path",
-    });
-    const expectedPath = path.join(ownedRoot, `wt_${initial.worktreeId}`);
-    if (!samePath(expectedPath, initial.canonicalWorktreePath)) {
-      throw new AgentWorktreePathError("recorded worktree path does not match its worktree id.");
-    }
+    this.#validateCleanupTarget(initial, ownedRoot);
 
     const pending =
       initial.status === "cleanup_pending"
@@ -185,13 +186,13 @@ export class AgentWorktreeManager {
             now: this.#now(),
           });
 
-    const pathExists = fs.existsSync(pending.canonicalWorktreePath);
+    const checked = this.#validateCleanupTarget(pending, ownedRoot);
     const registered = await this.#isWorktreeRegistered(
       pending.canonicalSourceRepositoryRoot,
-      pending.canonicalWorktreePath,
+      checked.expectedPath,
       signal,
     );
-    if (!pathExists && !registered) {
+    if (!checked.pathExists && !registered) {
       return this.#store.markCleaned({
         worktreeId,
         expectedRevision: pending.revision,
@@ -200,8 +201,9 @@ export class AgentWorktreeManager {
     }
 
     try {
+      const beforeRemoval = this.#validateCleanupTarget(pending, ownedRoot);
       await this.#runGit(
-        ["worktree", "remove", "--force", pending.canonicalWorktreePath],
+        ["worktree", "remove", "--force", beforeRemoval.expectedPath],
         pending.canonicalSourceRepositoryRoot,
         "GIT_WORKTREE_REMOVE_FAILED",
         signal,
@@ -222,6 +224,57 @@ export class AgentWorktreeManager {
       });
       throw failure;
     }
+  }
+
+  #validateCleanupTarget(
+    record: AgentWorktreeRecord,
+    ownedRoot: string,
+  ): { readonly expectedPath: string; readonly pathExists: boolean } {
+    assertSafePathToken(record.worktreeId, "worktree id");
+    const expectedDirectoryName = `wt_${record.worktreeId}`;
+    assertSafePathToken(expectedDirectoryName, "worktree directory name");
+    const expectedPath = path.join(ownedRoot, expectedDirectoryName);
+    assertContainedPath({
+      rootPath: ownedRoot,
+      candidatePath: expectedPath,
+      description: "expected worktree path",
+    });
+    if (!samePath(expectedPath, record.canonicalWorktreePath)) {
+      throw new AgentWorktreePathError("recorded worktree path does not match its worktree id.");
+    }
+    let stats: fs.Stats;
+    try {
+      stats = fs.lstatSync(expectedPath);
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return { expectedPath, pathExists: false };
+      }
+      throw new AgentWorktreePathError("recorded worktree path could not be inspected.");
+    }
+    if (stats.isSymbolicLink()) {
+      throw new AgentWorktreePathError(
+        "recorded worktree path must not be a symbolic link or junction.",
+      );
+    }
+    if (!stats.isDirectory()) {
+      throw new AgentWorktreePathError("recorded worktree path must be a directory.");
+    }
+
+    let canonicalTarget: string;
+    try {
+      canonicalTarget = fs.realpathSync.native(expectedPath);
+    } catch {
+      throw new AgentWorktreePathError("recorded worktree path could not be canonicalized.");
+    }
+    if (!samePath(canonicalTarget, expectedPath)) {
+      throw new AgentWorktreePathError("recorded worktree path resolved outside its safe target.");
+    }
+    assertContainedPath({
+      rootPath: ownedRoot,
+      candidatePath: canonicalTarget,
+      description: "recorded worktree path",
+    });
+    return { expectedPath, pathExists: true };
   }
 
   async #resolveRepositoryRoot(cwd: string, signal: AbortSignal | undefined): Promise<string> {
@@ -263,6 +316,33 @@ export class AgentWorktreeManager {
     }
   }
 
+  async #assertNoExternalCheckoutFilters(
+    worktreePath: string,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    const result = await this.#runGitResult(
+      ["config", "--name-only", "--get-regexp", "^filter\\..*\\."],
+      worktreePath,
+      signal,
+    );
+    if (result.exitCode === 1 && result.stdout.trim() === "" && result.stderr.trim() === "") {
+      return;
+    }
+    if (result.exitCode !== 0 || result.timedOut || result.spawnError !== undefined) {
+      assertGitSuccess(result, "GIT_FILTER_CONFIG_INSPECTION_FAILED");
+    }
+    const unsupportedFilterKeys = result.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /\.(clean|smudge|process)$/i.test(line));
+    if (unsupportedFilterKeys.length > 0) {
+      throw new AgentWorktreeGitOperationError(
+        "GIT_CHECKOUT_FILTER_UNSUPPORTED",
+        "Git checkout filters are not supported for agent worktrees.",
+      );
+    }
+  }
+
   async #assertWorktreeRegistered(
     sourceRepositoryRoot: string,
     worktreePath: string,
@@ -295,12 +375,11 @@ export class AgentWorktreeManager {
   }
 
   async #assertDetachedHead(worktreePath: string, signal: AbortSignal | undefined): Promise<void> {
-    const result = await this.#gitRunner.run({
-      args: ["symbolic-ref", "-q", "--short", "HEAD"],
-      cwd: worktreePath,
-      timeoutMs: this.#gitTimeoutMs,
+    const result = await this.#runGitResult(
+      ["symbolic-ref", "-q", "--short", "HEAD"],
+      worktreePath,
       signal,
-    });
+    );
     if (result.exitCode === 0 && result.stdout.trim().length > 0) {
       throw new AgentWorktreeGitOperationError(
         "GIT_WORKTREE_NOT_DETACHED",
@@ -308,6 +387,9 @@ export class AgentWorktreeManager {
       );
     }
     if (result.timedOut || result.spawnError !== undefined) {
+      assertGitSuccess(result, "GIT_WORKTREE_DETACH_CHECK_FAILED");
+    }
+    if (result.exitCode !== 0 && result.exitCode !== 1) {
       assertGitSuccess(result, "GIT_WORKTREE_DETACH_CHECK_FAILED");
     }
   }
@@ -329,13 +411,21 @@ export class AgentWorktreeManager {
     safeFailureCode: string,
     signal: AbortSignal | undefined,
   ): Promise<string> {
-    const result = await this.#gitRunner.run({
-      args,
+    const result = await this.#runGitResult(args, cwd, signal);
+    return assertGitSuccess(result, safeFailureCode);
+  }
+
+  #runGitResult(
+    args: GitCommandRunnerInput["args"],
+    cwd: string,
+    signal: AbortSignal | undefined,
+  ): Promise<GitCommandResult> {
+    return this.#gitRunner.run({
+      args: withManagerGitConfig(args),
       cwd,
       timeoutMs: this.#gitTimeoutMs,
       signal,
     });
-    return assertGitSuccess(result, safeFailureCode);
   }
 
   #generateWorktreeId(): string {
@@ -343,6 +433,63 @@ export class AgentWorktreeManager {
     assertSafePathToken(raw, "worktree id");
     return raw;
   }
+}
+
+function withManagerGitConfig(args: GitCommandRunnerInput["args"]): readonly string[] {
+  return ["-c", "core.fsmonitor=false", ...args];
+}
+
+function canonicalizeEmptyHooksDirectory(ownedRoot: string): string {
+  const hooksDirectory = path.join(ownedRoot, "_hall_empty_hooks");
+  assertContainedPath({
+    rootPath: ownedRoot,
+    candidatePath: hooksDirectory,
+    description: "Hall-controlled hooks directory",
+  });
+  let stats: fs.Stats;
+  try {
+    stats = fs.lstatSync(hooksDirectory);
+  } catch (error) {
+    if (!isNotFoundError(error)) {
+      throw new AgentWorktreePathError("Hall-controlled hooks directory could not be inspected.");
+    }
+    fs.mkdirSync(hooksDirectory);
+    try {
+      stats = fs.lstatSync(hooksDirectory);
+    } catch {
+      throw new AgentWorktreePathError("Hall-controlled hooks directory could not be inspected.");
+    }
+  }
+  if (stats.isSymbolicLink()) {
+    throw new AgentWorktreePathError(
+      "Hall-controlled hooks directory must not be a symbolic link or junction.",
+    );
+  }
+  if (!stats.isDirectory()) {
+    throw new AgentWorktreePathError("Hall-controlled hooks directory must be a directory.");
+  }
+  const canonicalHooksDirectory = canonicalizeExistingDirectory(
+    hooksDirectory,
+    "Hall-controlled hooks directory",
+  );
+  assertContainedPath({
+    rootPath: ownedRoot,
+    candidatePath: canonicalHooksDirectory,
+    description: "Hall-controlled hooks directory",
+  });
+  if (fs.readdirSync(canonicalHooksDirectory).length > 0) {
+    throw new AgentWorktreePathError("Hall-controlled hooks directory must be empty.");
+  }
+  return canonicalHooksDirectory;
+}
+
+function isNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { readonly code?: unknown }).code === "ENOENT"
+  );
 }
 
 function toStoredRelativePath(relativePath: string): string {
@@ -367,8 +514,4 @@ function toWorktreeFailure(error: unknown): AgentWorktreeGitOperationError {
     "AGENT_WORKTREE_UNEXPECTED_FAILURE",
     boundSafeSummary(error instanceof Error ? error.message : "Unexpected worktree failure."),
   );
-}
-
-function samePath(a: string, b: string): boolean {
-  return isPathContained(a, b) && isPathContained(b, a);
 }

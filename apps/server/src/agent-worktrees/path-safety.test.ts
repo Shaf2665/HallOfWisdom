@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -54,11 +55,25 @@ describe("agent worktree path safety", () => {
     expect(owned).toContain("Owned Worktrees");
   });
 
-  it("rejects an owned root inside the source repository", () => {
+  it("rejects an owned root inside the source repository before creating it", () => {
+    const source = createGitRepository("hall-source-");
+    const statusBefore = gitStatus(source);
+    const proposed = path.join(source, ".hall-worktrees");
+    expect(() =>
+      canonicalizeOwnedRoot({
+        rawOwnedRoot: proposed,
+        canonicalSourceRepositoryRoot: source,
+      }),
+    ).toThrow(AgentWorktreePathError);
+    expect(fs.existsSync(proposed)).toBe(false);
+    expect(gitStatus(source)).toEqual(statusBefore);
+  });
+
+  it("rejects an owned root equal to the source repository", () => {
     const source = tempRoot("hall-source-");
     expect(() =>
       canonicalizeOwnedRoot({
-        rawOwnedRoot: path.join(source, "agent-worktrees"),
+        rawOwnedRoot: source,
         canonicalSourceRepositoryRoot: source,
       }),
     ).toThrow(AgentWorktreePathError);
@@ -104,6 +119,38 @@ describe("agent worktree path safety", () => {
     expect(isPathContained(root, sibling)).toBe(false);
   });
 
+  it("allows a prefix-confusion sibling owned root", () => {
+    const base = tempRoot("hall-prefix-confusion-");
+    fs.mkdirSync(path.join(base, "repo"), { recursive: true });
+    const source = fs.realpathSync.native(path.join(base, "repo"));
+    const owned = canonicalizeOwnedRoot({
+      rawOwnedRoot: path.join(base, "repo-other"),
+      canonicalSourceRepositoryRoot: source,
+    });
+    expect(owned).toBe(fs.realpathSync.native(path.join(base, "repo-other")));
+  });
+
+  it("rejects an existing owned-root parent symlink that would redirect creation into source", () => {
+    const base = tempRoot("hall-owned-parent-link-");
+    fs.mkdirSync(path.join(base, "source"), { recursive: true });
+    const source = fs.realpathSync.native(path.join(base, "source"));
+    const link = path.join(base, "linked-parent");
+    try {
+      fs.symlinkSync(source, link, "junction");
+    } catch {
+      return undefined;
+    }
+    const proposed = path.join(link, "would-be-owned");
+
+    expect(() =>
+      canonicalizeOwnedRoot({
+        rawOwnedRoot: proposed,
+        canonicalSourceRepositoryRoot: source,
+      }),
+    ).toThrow(AgentWorktreePathError);
+    expect(fs.existsSync(path.join(source, "would-be-owned"))).toBe(false);
+  });
+
   it("uses case-insensitive containment on Windows-style paths", () => {
     if (process.platform === "win32" || process.platform === "darwin") {
       expect(isPathContained("C:\\Projects\\Repo", "c:\\projects\\repo\\apps")).toBe(true);
@@ -112,3 +159,32 @@ describe("agent worktree path safety", () => {
     }
   });
 });
+
+function createGitRepository(prefix: string): string {
+  const repo = tempRoot(prefix);
+  git(["init", "-b", "main"], repo);
+  git(["config", "user.name", "Hall Test"], repo);
+  git(["config", "user.email", "hall-test@example.invalid"], repo);
+  fs.writeFileSync(path.join(repo, "README.md"), "hello\n");
+  git(["add", "README.md"], repo);
+  git(["commit", "-m", "initial"], repo);
+  return repo;
+}
+
+function git(args: readonly string[], cwd: string): string {
+  return execFileSync("git", [...args], {
+    cwd,
+    encoding: "utf8",
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0", NO_COLOR: "1" },
+  }).trim();
+}
+
+function gitStatus(repo: string): {
+  readonly head: string;
+  readonly status: string;
+} {
+  return {
+    head: git(["rev-parse", "--verify", "HEAD^{commit}"], repo),
+    status: git(["status", "--porcelain=v1", "--untracked-files=all"], repo),
+  };
+}

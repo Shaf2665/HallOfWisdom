@@ -54,22 +54,20 @@ export function canonicalizeExistingDirectory(rawPath: string, label: string): s
 }
 
 export function canonicalizeOwnedRoot(input: CanonicalOwnedRootInput): string {
-  const rawOwnedRoot = input.rawOwnedRoot;
-  if (rawOwnedRoot.trim().length === 0) {
-    throw new AgentWorktreePathError("Hall-owned worktree root must not be empty.");
-  }
-  if (rawOwnedRoot.includes("\0")) {
-    throw new AgentWorktreePathError("Hall-owned worktree root must not contain NUL characters.");
-  }
-  if (!path.isAbsolute(rawOwnedRoot)) {
-    throw new AgentWorktreePathError("Hall-owned worktree root must be absolute.");
-  }
-  const normalized = path.resolve(rawOwnedRoot);
-  if (path.parse(normalized).root === normalized) {
-    throw new AgentWorktreePathError("Hall-owned worktree root must not be a filesystem root.");
-  }
-  fs.mkdirSync(normalized, { recursive: true });
-  const canonicalOwnedRoot = canonicalizeExistingDirectory(normalized, "Hall-owned worktree root");
+  const normalized = normalizeAbsoluteNonRootPath(input.rawOwnedRoot, "Hall-owned worktree root");
+  const intendedOwnedRoot = canonicalizeIntendedPath(normalized, "Hall-owned worktree root");
+  assertMutualNonContainment({
+    a: intendedOwnedRoot,
+    aLabel: "Hall-owned worktree root",
+    b: input.canonicalSourceRepositoryRoot,
+    bLabel: "source repository",
+  });
+
+  fs.mkdirSync(intendedOwnedRoot, { recursive: true });
+  const canonicalOwnedRoot = canonicalizeExistingDirectory(
+    intendedOwnedRoot,
+    "Hall-owned worktree root",
+  );
   assertMutualNonContainment({
     a: canonicalOwnedRoot,
     aLabel: "Hall-owned worktree root",
@@ -90,6 +88,60 @@ export function isPathContained(rootPath: string, candidatePath: string): boolea
     caseSensitive: defaultCaseSensitivity(),
     path,
   });
+}
+
+export function samePath(a: string, b: string): boolean {
+  return isPathContained(a, b) && isPathContained(b, a);
+}
+
+function normalizeAbsoluteNonRootPath(rawPath: string, label: string): string {
+  if (rawPath.trim().length === 0) {
+    throw new AgentWorktreePathError(`${label} must not be empty.`);
+  }
+  if (rawPath.includes("\0")) {
+    throw new AgentWorktreePathError(`${label} must not contain NUL characters.`);
+  }
+  if (!path.isAbsolute(rawPath)) {
+    throw new AgentWorktreePathError(`${label} must be absolute.`);
+  }
+  const normalized = path.resolve(rawPath);
+  if (path.parse(normalized).root === normalized) {
+    throw new AgentWorktreePathError(`${label} must not be a filesystem root.`);
+  }
+  return normalized;
+}
+
+function canonicalizeIntendedPath(normalizedPath: string, label: string): string {
+  const parsed = path.parse(normalizedPath);
+  let cursor = normalizedPath;
+  const missingSegments: string[] = [];
+
+  while (!fs.existsSync(cursor)) {
+    const parent = path.dirname(cursor);
+    if (parent === cursor || cursor === parsed.root) {
+      throw new AgentWorktreePathError(`${label} must have an existing parent directory.`);
+    }
+    missingSegments.unshift(path.basename(cursor));
+    cursor = parent;
+  }
+
+  let stats: fs.Stats;
+  try {
+    stats = fs.statSync(cursor);
+  } catch {
+    throw new AgentWorktreePathError(`${label} parent must exist.`);
+  }
+  if (!stats.isDirectory()) {
+    throw new AgentWorktreePathError(`${label} parent must be a directory.`);
+  }
+
+  let canonicalAncestor: string;
+  try {
+    canonicalAncestor = fs.realpathSync.native(cursor);
+  } catch {
+    throw new AgentWorktreePathError(`${label} parent must be canonicalizable.`);
+  }
+  return path.resolve(canonicalAncestor, ...missingSegments);
 }
 
 function assertMutualNonContainment(input: {
