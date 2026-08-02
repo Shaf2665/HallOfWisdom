@@ -253,6 +253,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
   await runCeoPlanExecutionRecovery({
     planRunStore: composition.ceoExecution.planRunStore,
     signalStore: composition.ceoExecution.signalStore,
+    taskStore: composition.taskStore,
     scheduler: composition.ceoExecution.scheduler,
     planStore: composition.ceoPlans.planStore,
     postBoardAudit: composition.ceoExecution.postBoardAudit,

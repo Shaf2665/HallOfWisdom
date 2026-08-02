@@ -332,6 +332,7 @@ async function main(): Promise<void> {
   await runCeoPlanExecutionRecovery({
     planRunStore: ceoExecution.planRunStore,
     signalStore: ceoExecution.signalStore,
+    taskStore: stores.taskStore,
     scheduler: ceoExecution.scheduler,
     planStore: ceoPlans.planStore,
     postBoardAudit: ceoExecution.postBoardAudit,

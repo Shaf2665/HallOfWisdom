@@ -493,6 +493,38 @@ const MIGRATION_5: Migration = {
   },
 };
 
+/**
+ * Migration 6 — Phase 15.1 hardening: durable, idempotent operator intent
+ * for abandoned-step retry. This table is the authoritative restart-proof
+ * evidence that a human explicitly requested retry of one exact abandoned
+ * attempt; Board messages and inferred task state are not authoritative.
+ */
+const MIGRATION_6: Migration = {
+  version: 6,
+  description: "Phase 15.1: durable abandoned CEO step retry intents.",
+  up(db) {
+    db.exec(`
+      CREATE TABLE ceo_plan_abandoned_retry_intents (
+        intent_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES ceo_plan_runs(run_id) ON DELETE CASCADE,
+        plan_step_id TEXT NOT NULL,
+        child_task_id TEXT NOT NULL,
+        abandoned_attempt_id TEXT NOT NULL REFERENCES ceo_plan_step_attempts(attempt_id),
+        actor TEXT NOT NULL CHECK (actor = 'human:local-operator'),
+        requested_at TEXT NOT NULL,
+        replacement_attempt_id TEXT REFERENCES ceo_plan_step_attempts(attempt_id),
+        replacement_claimed_at TEXT,
+        UNIQUE (run_id, plan_step_id, abandoned_attempt_id)
+      );
+      CREATE INDEX idx_ceo_plan_abandoned_retry_intents_run
+        ON ceo_plan_abandoned_retry_intents (run_id, plan_step_id);
+      CREATE UNIQUE INDEX idx_ceo_plan_abandoned_retry_intents_replacement
+        ON ceo_plan_abandoned_retry_intents (replacement_attempt_id)
+        WHERE replacement_attempt_id IS NOT NULL;
+    `);
+  },
+};
+
 /** Ordered by `version`, ascending — `migration-runner.ts` applies whichever ones a given database hasn't recorded yet, one transaction each. */
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -500,6 +532,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_3,
   MIGRATION_4,
   MIGRATION_5,
+  MIGRATION_6,
 ];
 
 export const HIGHEST_KNOWN_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

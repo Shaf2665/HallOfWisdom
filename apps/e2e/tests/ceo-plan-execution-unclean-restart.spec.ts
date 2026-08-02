@@ -183,6 +183,7 @@ function stepStatus(page: Page, stepTitlePattern: RegExp) {
 interface RunDetailAttempt {
   readonly id: string;
   readonly planStepId: string;
+  readonly attemptNumber: number;
   readonly status: string;
   readonly taskRunId?: string;
 }
@@ -694,7 +695,7 @@ test.describe("CEO plan execution — unclean browser restart (Phase 15.5 / 15.6
       await openActionsMenu(cardFor(page, parentTitle));
       await page.getByRole("button", { name: "Open discussion" }).click();
       const retryAuditMessage =
-        "An operator explicitly retried a step that was abandoned by an unclean Hall Core restart. A new attempt has been prepared.";
+        "An operator explicitly retried a step that was abandoned by an unclean Hall Core restart. A new attempt has been requested.";
       await expect(page.getByText(retryAuditMessage)).toBeVisible();
       const retryAuditMessageCount = await page.getByText(retryAuditMessage).count();
       expect(retryAuditMessageCount).toBe(1);
@@ -736,7 +737,51 @@ test.describe("CEO plan execution — unclean browser restart (Phase 15.5 / 15.6
       expect(beforeCleanup.run.status).toBe("completed");
       expect(beforeCleanup.stepExecutions.every((s) => s.status === "completed")).toBe(true);
 
-      // --- Step 28: no raw stderr, absolute path, process ID, owner
+      // --- Step 28: Boot 3 — restart Hall Core again after the
+      // replacement attempt has reached a stable terminal state. This
+      // proves restart reconciliation preserves the abandoned attempt and
+      // the replacement attempt, keeps ordering deterministic, creates no
+      // attempt 3, and does not relaunch the adapter after terminal state.
+      // The fixture launch counter is process-local, so this real-process
+      // assertion uses durable attempt rows and task-run IDs. ---
+      await hallCore.gracefulStop();
+      hallCoreExpectedDown = true;
+      hallCore = await spawnFixtureHallCoreRetrying(
+        {
+          workspaceRoot,
+          dataDir,
+          comparisonRoot,
+          port: UNCLEAN_RESTART_EXECUTION_HALL_CORE_PORT,
+          webPort: UNCLEAN_RESTART_EXECUTION_WEB_PORT,
+        },
+        30_000,
+      );
+      hallCoreExpectedDown = false;
+      await page.goto(planUrl);
+      await expect(executionSection.getByText("Live", { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+
+      const afterThirdBoot = await fetchRunDetail(page, apiBase, planId);
+      expect(afterThirdBoot.run.status).toBe("completed");
+      expect(afterThirdBoot.stepExecutions.every((s) => s.status === "completed")).toBe(true);
+      const investigateAttemptsAfterThirdBoot = afterThirdBoot.attempts.filter(
+        (a) => a.planStepId === investigateStepId,
+      );
+      expect(investigateAttemptsAfterThirdBoot.map((attempt) => attempt.attemptNumber)).toEqual([
+        1, 2,
+      ]);
+      expect(investigateAttemptsAfterThirdBoot).toHaveLength(2);
+      expect(investigateAttemptsAfterThirdBoot[0]?.status).toBe("abandoned");
+      expect(investigateAttemptsAfterThirdBoot[0]?.taskRunId).toBe(investigateTaskRunIdBefore);
+      expect(investigateAttemptsAfterThirdBoot[1]?.status).toBe("completed");
+      expect(investigateAttemptsAfterThirdBoot[1]?.taskRunId).toBe(replacementTaskRunId);
+      const runWideAttemptKeys = afterThirdBoot.attempts.map(
+        (attempt) => `${attempt.planStepId}:${String(attempt.attemptNumber)}`,
+      );
+      expect(runWideAttemptKeys).toEqual([...runWideAttemptKeys].sort());
+
+      // --- Step 29: no raw stderr, absolute path, process ID, owner
       // token, database epoch, or lease data appears anywhere in Hall Web ---
       await page.goto(planUrl);
       const bodyText = await page.locator("body").innerText();
@@ -768,7 +813,7 @@ test.describe("CEO plan execution — unclean browser restart (Phase 15.5 / 15.6
         `unexpected failed requests (possible CORS): ${failedRequests.join("; ")}`,
       ).toEqual([]);
     } finally {
-      // --- Steps 29-30: stop every test-owned process, remove temporary
+      // --- Steps 30-31: stop every test-owned process, remove temporary
       // state ---
       if (hallCore !== undefined) {
         await killAndWait(hallCore.child);

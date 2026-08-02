@@ -149,3 +149,49 @@ describe("migration 5 — ceo_plan_execution_signals coalescing index", () => {
     db.close();
   });
 });
+
+describe("migration 6 — ceo_plan_abandoned_retry_intents", () => {
+  it("records at most one operator retry intent for one exact abandoned attempt", () => {
+    const db = migratedDb();
+    db.exec(
+      `INSERT INTO ceo_plan_runs (run_id, plan_id, plan_version, status, execution_mode, policy_snapshot_json, created_at)
+       VALUES ('run-1', 'plan-1', 1, 'running', 'autonomous', '{}', '2026-07-31T00:00:00.000Z')`,
+    );
+    db.exec(
+      `INSERT INTO ceo_plan_step_attempts (attempt_id, run_id, plan_step_id, child_task_id, attempt_number, status, trigger_reason, scheduler_signal_id, created_at, owner_token)
+       VALUES ('a-1', 'run-1', 'step-1', 'task-1', 1, 'abandoned', 'execution_started', 'sig-1', '2026-07-31T00:00:00.000Z', 'owner-1')`,
+    );
+    db.exec(
+      `INSERT INTO ceo_plan_abandoned_retry_intents (intent_id, run_id, plan_step_id, child_task_id, abandoned_attempt_id, actor, requested_at)
+       VALUES ('intent-1', 'run-1', 'step-1', 'task-1', 'a-1', 'human:local-operator', '2026-07-31T00:01:00.000Z')`,
+    );
+
+    expect(() => {
+      db.exec(
+        `INSERT INTO ceo_plan_abandoned_retry_intents (intent_id, run_id, plan_step_id, child_task_id, abandoned_attempt_id, actor, requested_at)
+         VALUES ('intent-2', 'run-1', 'step-1', 'task-1', 'a-1', 'human:local-operator', '2026-07-31T00:02:00.000Z')`,
+      );
+    }).toThrow();
+    db.close();
+  });
+
+  it("only accepts the bounded human operator actor as durable retry intent proof", () => {
+    const db = migratedDb();
+    db.exec(
+      `INSERT INTO ceo_plan_runs (run_id, plan_id, plan_version, status, execution_mode, policy_snapshot_json, created_at)
+       VALUES ('run-1', 'plan-1', 1, 'running', 'autonomous', '{}', '2026-07-31T00:00:00.000Z')`,
+    );
+    db.exec(
+      `INSERT INTO ceo_plan_step_attempts (attempt_id, run_id, plan_step_id, child_task_id, attempt_number, status, trigger_reason, scheduler_signal_id, created_at, owner_token)
+       VALUES ('a-1', 'run-1', 'step-1', 'task-1', 1, 'abandoned', 'execution_started', 'sig-1', '2026-07-31T00:00:00.000Z', 'owner-1')`,
+    );
+
+    expect(() => {
+      db.exec(
+        `INSERT INTO ceo_plan_abandoned_retry_intents (intent_id, run_id, plan_step_id, child_task_id, abandoned_attempt_id, actor, requested_at)
+         VALUES ('intent-1', 'run-1', 'step-1', 'task-1', 'a-1', 'system:ceo-scheduler', '2026-07-31T00:01:00.000Z')`,
+      );
+    }).toThrow();
+    db.close();
+  });
+});

@@ -15,6 +15,12 @@
 > below and `docs/architecture/0015-security-review-matrix.md` scenario 23 for the executable
 > proof, including 5/5 consecutive unclean-restart and 3/3 consecutive clean-restart Playwright
 > runs.
+>
+> **Phase 15.1 hardening:** abandoned-step retry is now crash-safe after the operator clicks
+> "Retry step". The operator's intent is recorded first in a durable, idempotent
+> `ceo_plan_abandoned_retry_intents` row keyed to the exact abandoned attempt; restart
+> reconciliation may continue the retry only from that row, never from inferred task state or a
+> Board message. Attempt listing order is now a documented store contract.
 
 ## Why this phase exists
 
@@ -114,6 +120,16 @@ an immutable policy snapshot and an explicit start).
   step-execution linkage, an `activeAttemptId` pointing at a rolled-back attempt, or the reverse)
   is observable in either mode — snapshot/restore and `SAVEPOINT` are different implementations of
   the same all-or-nothing guarantee for this span.
+- **Migration 6** adds `ceo_plan_abandoned_retry_intents`, a private execution-runtime table used
+  only for explicit abandoned-step retry recovery. It stores bounded metadata only: run ID, step ID,
+  child task ID, the exact abandoned attempt ID, the fixed human operator actor, request time, and
+  an optional replacement attempt ID once claim succeeds. It never stores provider output. The
+  unique `(run_id, plan_step_id, abandoned_attempt_id)` key makes repeated/replayed operator Retry
+  requests idempotent; a unique replacement-attempt link preserves the one-replacement-attempt
+  invariant.
+- `listAttempts(runId, stepId)` returns attempts ordered by `attemptNumber ASC`. `listAttempts(runId)`
+  returns a deterministic run-wide order of `planStepId ASC, attemptNumber ASC`. SQLite uses
+  explicit `ORDER BY` clauses; the in-memory implementation sorts explicitly too.
 
 ## Dependency-aware, incremental scheduling — `ceo-plan-step-readiness.ts`
 
@@ -186,10 +202,10 @@ live scheduling decisions against stale, not-yet-reconciled run state.
 
 ## Explicit abandoned-step recovery — `retryAbandonedStep()` (Phase 15.6)
 
-Unclean-restart recovery (above) never auto-retries an abandoned step, by design — the durable
-execution-event log, not a live process, is the only thing that can vouch for what genuinely
-happened. Making forward progress on that step is therefore always two separate, explicit operator
-actions, never one and never automatic:
+Unclean-restart recovery (above) never auto-retries an abandoned step, by design — durable
+execution state, not a live process, is the only thing that can vouch for what genuinely happened.
+Making forward progress on that step is therefore always two separate, explicit operator actions,
+never one and never automatic:
 
 1. **Resume** (`POST .../resume`) moves the run from `awaiting_intervention` back to `running`,
    rotates and validates `activeGeneration`, resets the circuit breaker, and — as of Phase 15.6 —
@@ -214,18 +230,36 @@ actions, never one and never automatic:
    raise it to at least 2 if in-place recovery matters); a committed terminal event exists for the
    previous task run; the approved adapter/agent assignment is still present; and the scheduler's
    dependency index for this run exists (fails loudly if Resume never ran in this process instance,
-   rather than silently dropping the signal). On success it calls the same
-   `TaskOrchestrator.prepareRetry()` atomic, revision-CAS commit `#prepareTaskRetryIfEligible`
-   already uses (the true authority on "no competing recovery already succeeded" — every check
-   above runs synchronously, so nothing above it can itself be the race), appends one
+   rather than silently dropping the signal). On success it first records the durable
+   abandoned-retry intent row keyed to that exact abandoned attempt, appends one
    `ceo.execution.retry_requested` event attributed to `"human:local-operator"` (never the
-   scheduler's own `system:ceo-scheduler` actor), posts one dedup-gated Board summary keyed by the
-   specific abandoned attempt being recovered, then hands off to the ordinary claim-then-launch
-   tail — re-running `startTask()`'s full eligibility chain (adapter detection,
-   capability/execution-trust evidence, workspace validation, revision/assignment CAS) and creating
-   exactly one new attempt with exactly one new task-run ID. The old provider process and the old
-   task-run ID are never revived or reused; the abandoned attempt row and the original task-run
-   ID's history are preserved unchanged.
+   scheduler's own `system:ceo-scheduler` actor), and posts one dedup-gated Board summary keyed by
+   the specific abandoned attempt being recovered. Only after that durable intent exists does it
+   call the same `TaskOrchestrator.prepareRetry()` atomic, revision-CAS commit
+   `#prepareTaskRetryIfEligible` already uses, persist/coalesce the `operator_manual_retry` signal,
+   and hand off to the ordinary claim-then-launch tail — re-running `startTask()`'s full eligibility
+   chain (adapter detection, capability/execution-trust evidence, workspace validation,
+   revision/assignment CAS) and creating exactly one new attempt with exactly one new task-run ID.
+   When that replacement attempt is claimed, the intent row is linked to the exact replacement
+   attempt before any adapter launch is attempted. The old provider process and the old task-run ID
+   are never revived or reused; the abandoned attempt row and the original task-run ID's history are
+   preserved unchanged.
+
+   Crash boundaries after the operator click are recoverable: after intent recording but before
+   task preparation, restart recovery prepares the task and continues from the intent; after task
+   preparation but before signal/claim, recovery persists or coalesces the scheduler signal and
+   drains it; after signal persistence but before claim, replay coalesces with the existing signal
+   or claims exactly one replacement attempt; after replacement-attempt claim but before adapter
+   launch, recovery preserves the unlaunched claimed attempt and starts that same attempt, rather
+   than creating attempt 3. If adapter launch was already durably reached (the task has a run ID, or
+   the attempt has a task-run ID), an unclean restart abandons that replacement attempt like any
+   other interrupted provider attempt and does not relaunch it automatically. Another operator
+   decision is required.
+
+   A legacy partial state created before this hardening — task assigned, step
+   `awaiting_intervention`, latest attempt `abandoned`, no replacement attempt, and no pending
+   signal — is not auto-repaired, because the old schema has no durable proof that the operator
+   clicked Retry. Recovery fails closed instead of guessing intent.
 
 Every rejection throws `CeoPlanExecutionAbandonedRetryNotEligibleError` (409, a bounded,
 pre-written safe reason — never raw error text, a path, an owner token, or a revision/epoch value)
@@ -599,13 +633,15 @@ consecutiveFailures` always holds (both reset together on progress; same-code on
     still present, and the run's `maxAttemptsPerStep` budget is not already exhausted (**the
     abandoned attempt itself counts toward that budget** — a deliberate bounded-recovery decision,
     not an oversight; a run configured at the protocol minimum of 1 has no in-place recovery path
-    and must be cancelled and restarted). On success it calls the same
-    `TaskOrchestrator.prepareRetry()` atomic, revision-CAS commit `#prepareTaskRetryIfEligible`
-    already uses, appends one `ceo.execution.retry_requested` event attributed to
+    and must be cancelled and restarted). On success it first records or reuses a durable
+    abandoned-retry intent keyed to that exact abandoned attempt. That intent, not a Board message
+    and not inferred task assignment state, is the authoritative proof that a human operator
+    requested continuation. It then appends one `ceo.execution.retry_requested` event attributed to
     `"human:local-operator"` (never the scheduler's own actor), posts one dedup-gated Board summary,
-    then hands off to the ordinary claim-then-launch tail — re-running `startTask()`'s full
-    eligibility chain (adapter detection, capability/execution-trust evidence, workspace validation,
-    revision/assignment CAS) and creating exactly one new attempt with exactly one new task-run ID.
+    prepares the task if needed, persists/coalesces a scheduler signal, and hands off to the
+    ordinary claim-then-launch tail — re-running `startTask()`'s full eligibility chain (adapter
+    detection, capability/execution-trust evidence, workspace validation, revision/assignment CAS)
+    and creating at most one replacement attempt with at most one new task-run ID.
   - The `/resume` REST route (`routes/ceo-plan-runs.ts`) now rebuilds the scheduler's in-memory
     dependency index from the approved plan version immediately after `resumeRun()` succeeds,
     closing cause (2) — the exact gap a genuinely fresh cross-process scheduler instance would
@@ -613,12 +649,10 @@ consecutiveFailures` always holds (both reset together on progress; same-code on
     Manual "Retry step" (`POST .../steps/:stepId/retry`) branches on the step's latest attempt status:
     `"abandoned"` routes through `retryAbandonedStep()`; anything else routes through the unchanged,
     ordinary `#prepareTaskRetryIfEligible`/`enqueueSignal` path. Proven at three layers — scheduler
-    unit tests (`ceo-plan-execution-abandoned-retry.test.ts`, 15 tests, including a fresh
-    cross-process scheduler scenario that exercises the dependency-index fix specifically), REST tests
-    (`routes/ceo-plan-runs.test.ts`), and a browser-level Playwright spec
-    (`ceo-plan-execution-unclean-restart.spec.ts`) — all passing 10/10 (focused suite),
-    and 5/5 consecutive Playwright runs respectively; see
-    `docs/architecture/0015-security-review-matrix.md` scenario 23 for the full citation list.
+    unit tests (`ceo-plan-execution-abandoned-retry.test.ts`, including crash-boundary and
+    adapter-count coverage), REST tests (`routes/ceo-plan-runs.test.ts`), and a browser-level
+    Playwright spec (`ceo-plan-execution-unclean-restart.spec.ts`); see
+    `docs/architecture/0015-security-review-matrix.md` scenario 23 for the broader citation list.
 - **Clean/unclean restart browser coverage — done (Phase 15.5), extended (Phase 15.6).** Two
   dedicated Playwright specs exist: `apps/e2e/tests/ceo-plan-execution-clean-restart.spec.ts`
   (graceful shutdown, restart with identical config, reconnect without a page reload,

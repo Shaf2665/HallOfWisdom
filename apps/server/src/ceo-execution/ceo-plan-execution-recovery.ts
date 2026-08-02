@@ -1,6 +1,7 @@
 import { CEO_PLAN_STEP_ATTEMPT_TERMINAL_STATUSES } from "@hall-of-wisdom/protocol";
 import type { CeoPlanStorePort } from "../ceo-plans/ceo-plan-store-port.js";
 import type { PreviousShutdownKind } from "../recovery/restart-recovery.js";
+import type { TaskStorePort } from "../tasks/task-store-port.js";
 import type { CeoPlanRunStorePort } from "./ceo-plan-run-store-port.js";
 import type { ExecutionSignalStorePort } from "./execution-signal-store-port.js";
 import type { CeoPlanExecutionScheduler } from "./ceo-plan-execution-scheduler.js";
@@ -10,6 +11,7 @@ const RECOVERY_ACTOR = "recovery:hall-core" as const;
 export interface CeoPlanExecutionRecoveryInput {
   readonly planRunStore: CeoPlanRunStorePort;
   readonly signalStore: ExecutionSignalStorePort;
+  readonly taskStore: TaskStorePort;
   readonly scheduler: CeoPlanExecutionScheduler;
   readonly planStore: CeoPlanStorePort;
   readonly postBoardAudit: (planId: string, text: string) => void;
@@ -25,6 +27,7 @@ export interface CeoPlanExecutionRecoverySummary {
   readonly attemptsAbandoned: number;
   readonly runsContinuedAfterCleanRestart: number;
   readonly runsSkippedMissingPlan: number;
+  readonly abandonedRetryIntentsContinued: number;
 }
 
 /**
@@ -69,6 +72,7 @@ export async function runCeoPlanExecutionRecovery(
   let attemptsAbandoned = 0;
   let runsContinuedAfterCleanRestart = 0;
   let runsSkippedMissingPlan = 0;
+  let abandonedRetryIntentsContinued = 0;
 
   for (const run of runningRuns) {
     if (input.previousShutdown === "unclean") {
@@ -80,7 +84,19 @@ export async function runCeoPlanExecutionRecovery(
       const { abandoned, shouldPostAudit } = input.runAtomicUnit(() => {
         let abandonedCount = 0;
         const attempts = input.planRunStore.listAttempts(run.id);
+        const preserveUnlaunchedReplacementAttemptIds = new Set(
+          attempts
+            .filter((attempt) =>
+              shouldPreserveUnlaunchedReplacementAttempt({
+                attempt,
+                taskStore: input.taskStore,
+                planRunStore: input.planRunStore,
+              }),
+            )
+            .map((attempt) => attempt.id),
+        );
         for (const attempt of attempts) {
+          if (preserveUnlaunchedReplacementAttemptIds.has(attempt.id)) continue;
           if (!CEO_PLAN_STEP_ATTEMPT_TERMINAL_STATUSES.includes(attempt.status)) {
             input.planRunStore.updateAttempt({
               attemptId: attempt.id,
@@ -100,6 +116,12 @@ export async function runCeoPlanExecutionRecovery(
         // the step projection itself must move to a re-evaluatable
         // status too.
         for (const step of input.planRunStore.listStepExecutions(run.id)) {
+          if (
+            step.activeAttemptId !== undefined &&
+            preserveUnlaunchedReplacementAttemptIds.has(step.activeAttemptId)
+          ) {
+            continue;
+          }
           if (["claimed", "starting", "running"].includes(step.status)) {
             input.planRunStore.upsertStepExecution({
               runId: run.id,
@@ -170,11 +192,66 @@ export async function runCeoPlanExecutionRecovery(
     runsContinuedAfterCleanRestart += 1;
   }
 
+  for (const intent of input.planRunStore.listAbandonedRetryIntents()) {
+    const run = input.planRunStore.findRun(intent.runId);
+    if (run?.executionMode !== "autonomous") continue;
+    if (run.status !== "running" && run.status !== "awaiting_intervention") continue;
+    let version;
+    try {
+      version = input.planStore.getVersion(run.planId, run.planVersion);
+    } catch {
+      runsSkippedMissingPlan += 1;
+      continue;
+    }
+    input.scheduler.registerDependencyIndex(
+      run.id,
+      version.steps.map((step) => ({ id: step.id, dependencies: step.dependencies })),
+    );
+    if (run.status === "awaiting_intervention") {
+      if (run.recoveryClassification !== "unclean_paused") continue;
+      input.planRunStore.resumeRun({ runId: run.id, now: input.now });
+    }
+    const continued = await input.scheduler.continueAbandonedRetryIntent(intent);
+    if (continued) abandonedRetryIntentsContinued += 1;
+  }
+
   return {
     runsScanned: runningRuns.length,
     runsPausedForUncleanRestart,
     attemptsAbandoned,
     runsContinuedAfterCleanRestart,
     runsSkippedMissingPlan,
+    abandonedRetryIntentsContinued,
   };
+}
+
+function shouldPreserveUnlaunchedReplacementAttempt(input: {
+  readonly attempt: {
+    readonly id: string;
+    readonly planRunId: string;
+    readonly planStepId: string;
+    readonly childTaskId: string;
+    readonly taskRunId?: string | undefined;
+  };
+  readonly taskStore: TaskStorePort;
+  readonly planRunStore: CeoPlanRunStorePort;
+}): boolean {
+  if (input.attempt.taskRunId !== undefined) return false;
+  const intent = input.planRunStore
+    .listAbandonedRetryIntents()
+    .find((candidate) => candidate.replacementAttemptId === input.attempt.id);
+  if (intent === undefined) return false;
+  if (
+    intent.runId !== input.attempt.planRunId ||
+    intent.planStepId !== input.attempt.planStepId ||
+    intent.childTaskId !== input.attempt.childTaskId
+  ) {
+    return false;
+  }
+  try {
+    const task = input.taskStore.get(input.attempt.childTaskId);
+    return task.task.status === "assigned" && task.runId === undefined;
+  } catch {
+    return false;
+  }
 }
