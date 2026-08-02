@@ -525,6 +525,53 @@ const MIGRATION_6: Migration = {
   },
 };
 
+/**
+ * Migration 7 — Phase 16.1's provider-neutral, server-owned agent worktree
+ * foundation. Absolute filesystem paths are deliberately kept in this
+ * internal-only table, never in a public task or run projection.
+ */
+const MIGRATION_7: Migration = {
+  version: 7,
+  description: "Phase 16.1: Hall-owned agent worktree foundation.",
+  up(db) {
+    db.exec(`
+      CREATE TABLE agent_worktrees (
+        worktree_id TEXT PRIMARY KEY,
+        hall_task_id TEXT NOT NULL,
+        hall_agent_run_id TEXT NOT NULL,
+        source_repository_root TEXT NOT NULL,
+        source_working_directory_relative_path TEXT NOT NULL,
+        base_commit TEXT NOT NULL,
+        worktree_path TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (
+          status IN (
+            'creating',
+            'ready',
+            'creation_failed',
+            'cleanup_pending',
+            'cleaned',
+            'cleanup_failed'
+          )
+        ),
+        created_at TEXT NOT NULL,
+        ready_at TEXT,
+        cleanup_requested_at TEXT,
+        cleaned_at TEXT,
+        safe_failure_code TEXT CHECK (safe_failure_code IS NULL OR length(safe_failure_code) <= 80),
+        safe_failure_summary TEXT CHECK (
+          safe_failure_summary IS NULL OR length(safe_failure_summary) <= 501
+        ),
+        revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0)
+      );
+      CREATE INDEX idx_agent_worktrees_task ON agent_worktrees (hall_task_id);
+      CREATE INDEX idx_agent_worktrees_status ON agent_worktrees (status, created_at);
+      CREATE UNIQUE INDEX idx_agent_worktrees_one_active_per_agent_run
+        ON agent_worktrees (hall_agent_run_id)
+        WHERE status NOT IN ('creation_failed', 'cleaned');
+    `);
+  },
+};
+
 /** Ordered by `version`, ascending — `migration-runner.ts` applies whichever ones a given database hasn't recorded yet, one transaction each. */
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -533,6 +580,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_4,
   MIGRATION_5,
   MIGRATION_6,
+  MIGRATION_7,
 ];
 
 export const HIGHEST_KNOWN_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

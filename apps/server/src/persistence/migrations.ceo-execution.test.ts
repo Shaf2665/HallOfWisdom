@@ -195,3 +195,55 @@ describe("migration 6 — ceo_plan_abandoned_retry_intents", () => {
     db.close();
   });
 });
+
+describe("migration 7 — agent_worktrees", () => {
+  it("rejects a second active worktree for one Hall agent run id", () => {
+    const db = migratedDb();
+    db.exec(
+      `INSERT INTO agent_worktrees (
+        worktree_id, hall_task_id, hall_agent_run_id, source_repository_root,
+        source_working_directory_relative_path, base_commit, worktree_path, status, created_at
+      ) VALUES (
+        'wt-1', 'task-1', 'run-1', 'C:\\repo', '.', '${"0".repeat(40)}',
+        'C:\\owned\\wt_1', 'ready', '2026-08-02T10:00:00.000Z'
+      )`,
+    );
+    expect(() => {
+      db.exec(
+        `INSERT INTO agent_worktrees (
+          worktree_id, hall_task_id, hall_agent_run_id, source_repository_root,
+          source_working_directory_relative_path, base_commit, worktree_path, status, created_at
+        ) VALUES (
+          'wt-2', 'task-2', 'run-1', 'C:\\repo', '.', '${"0".repeat(40)}',
+          'C:\\owned\\wt_2', 'creating', '2026-08-02T10:01:00.000Z'
+        )`,
+      );
+    }).toThrow();
+    db.close();
+  });
+
+  it("allows a replacement worktree after the previous one is cleaned", () => {
+    const db = migratedDb();
+    db.exec(
+      `INSERT INTO agent_worktrees (
+        worktree_id, hall_task_id, hall_agent_run_id, source_repository_root,
+        source_working_directory_relative_path, base_commit, worktree_path, status, created_at
+      ) VALUES (
+        'wt-1', 'task-1', 'run-1', 'C:\\repo', '.', '${"0".repeat(40)}',
+        'C:\\owned\\wt_1', 'cleaned', '2026-08-02T10:00:00.000Z'
+      )`,
+    );
+    expect(() => {
+      db.exec(
+        `INSERT INTO agent_worktrees (
+          worktree_id, hall_task_id, hall_agent_run_id, source_repository_root,
+          source_working_directory_relative_path, base_commit, worktree_path, status, created_at
+        ) VALUES (
+          'wt-2', 'task-2', 'run-1', 'C:\\repo', '.', '${"0".repeat(40)}',
+          'C:\\owned\\wt_2', 'creating', '2026-08-02T10:01:00.000Z'
+        )`,
+      );
+    }).not.toThrow();
+    db.close();
+  });
+});
