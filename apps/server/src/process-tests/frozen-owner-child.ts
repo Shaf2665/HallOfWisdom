@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import { randomUUID } from "node:crypto";
+import { DEFAULT_CEO_PLAN_EXECUTION_POLICY } from "@hall-of-wisdom/protocol";
 import { HallDatabase } from "../persistence/database.js";
 import { runMigrations } from "../persistence/migration-runner.js";
 import { acquireInstanceOwnership } from "../persistence/instance-ownership.js";
 import { acquireDatabaseEpoch } from "../persistence/database-ownership-fence.js";
 import { withTransaction } from "../persistence/transaction.js";
 import { OwnershipLostError } from "../persistence/persistence-errors.js";
+import { SqliteCeoPlanRunStore } from "../ceo-execution/sqlite-ceo-plan-run-store.js";
 
 /**
  * Test-only child process for the frozen-owner fencing proof (Phase 13.2
@@ -30,8 +32,18 @@ import { OwnershipLostError } from "../persistence/persistence-errors.js";
  *   (on startup)     -> {"event":"ready","ownerToken":string,"epoch":number}
  *   PAUSE-HEARTBEAT  -> {"event":"heartbeat-paused"}
  *   MUTATE           -> {"event":"mutate-result","ok":true} | {"event":"mutate-result","ok":false,"error":string}
+ *   MUTATE-EXECUTION -> {"event":"mutate-execution-result","ok":true} | {"event":"mutate-execution-result","ok":false,"error":string}
  *   RELEASE-ATTEMPT  -> {"event":"release-attempted"}
  *   EXIT             -> process exits 0, without releasing ownership
+ *
+ * `MUTATE-EXECUTION` (Phase 15.1 kickoff §5 — "a real child-process test
+ * for at least one stale scheduler mutation") exercises exactly the same
+ * frozen connection and fence as `MUTATE`, but through
+ * `SqliteCeoPlanRunStore.configureRun` — a genuine CEO-plan-execution
+ * scheduler write, not the generic scratch table — proving the durable
+ * ownership fence protects the execution surface through a real second
+ * OS process, not just the in-process unit tests in
+ * `ceo-execution/ceo-plan-execution-ownership-fencing.test.ts`.
  */
 
 function emit(event: Record<string, unknown>): void {
@@ -66,6 +78,7 @@ function main(): void {
   db.exec(
     "CREATE TABLE IF NOT EXISTS frozen_owner_test_scratch (id INTEGER PRIMARY KEY, v TEXT NOT NULL)",
   );
+  const executionStore = new SqliteCeoPlanRunStore({ db });
 
   emit({ event: "ready", ownerToken, epoch: fence.epoch });
 
@@ -99,6 +112,27 @@ function main(): void {
         } catch (error) {
           emit({
             event: "mutate-result",
+            ok: false,
+            error: error instanceof OwnershipLostError ? "OwnershipLostError" : String(error),
+          });
+        }
+        break;
+      }
+      case "MUTATE-EXECUTION": {
+        try {
+          executionStore.configureRun({
+            runId: `frozen-owner-exec-run-${String(Date.now())}`,
+            planId: "frozen-owner-exec-plan",
+            planVersion: 1,
+            executionMode: "autonomous",
+            policy: DEFAULT_CEO_PLAN_EXECUTION_POLICY,
+            now: new Date().toISOString(),
+            steps: [{ stepId: "step-a", childTaskId: "task-a", dependencyStepIds: [] }],
+          });
+          emit({ event: "mutate-execution-result", ok: true });
+        } catch (error) {
+          emit({
+            event: "mutate-execution-result",
             ok: false,
             error: error instanceof OwnershipLostError ? "OwnershipLostError" : String(error),
           });

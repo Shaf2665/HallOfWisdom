@@ -154,6 +154,32 @@ export class SqliteEventStore implements NormalizedEventStorePort {
     return this.#streamLength(streamId);
   }
 
+  /**
+   * See `EventStore.reopenForRetry()`'s doc comment for the full
+   * contract. SQLite-backed: unlike the in-memory twin's separate
+   * `#terminalSequenceByTaskId` marker, this store derives "terminal" by
+   * querying `is_terminal = 1` directly on the `events` table
+   * (`#terminalSequence()`), so reopening flips that one row's flag back
+   * to `0` rather than clearing a cache entry. The row itself —
+   * `event_id`, `payload_json` (which still truthfully shows this event's
+   * real `type`, e.g. `"run.failed"`), everything — is left completely
+   * untouched; only the append-guard bookkeeping column changes.
+   */
+  reopenForRetry(streamId: string, expectedTerminalSequence: number): boolean {
+    return withTransaction(this.#db, () => {
+      const terminalSequence = this.#terminalSequence(streamId);
+      if (terminalSequence === undefined || terminalSequence !== expectedTerminalSequence) {
+        return false;
+      }
+      this.#db
+        .prepare(
+          "UPDATE events SET is_terminal = 0 WHERE stream_kind = ? AND stream_id = ? AND sequence = ?",
+        )
+        .run(this.#streamKind, streamId, expectedTerminalSequence);
+      return true;
+    });
+  }
+
   #streamLength(streamId: string): number {
     const row = this.#db
       .prepare("SELECT COUNT(*) AS c FROM events WHERE stream_kind = ? AND stream_id = ?")

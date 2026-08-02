@@ -352,6 +352,145 @@ export class TaskStore implements TaskStorePort {
   }
 
   /**
+   * Phase 15.2 — atomically resets a genuinely terminal `"failed"` task
+   * back to `"assigned"` for a governed retry
+   * (`TaskOrchestrator.prepareRetry()`, called only after
+   * `CeoPlanExecutionScheduler`'s own 13-precondition eligibility check
+   * passes). Clears exactly the CURRENT-run projection a fresh
+   * `startTask()` needs to be able to claim a new run —
+   * `runId`/`terminalEventType`/`failure`/`completedAt`/`startedAt` —
+   * and nothing else: `adapterId`/`agentId`/`requirements`/
+   * `assignedExecutionTrust` stay exactly as they were, since this is a
+   * retry of the SAME assignment, not a new one. Never deletes or
+   * touches the prior run's own history — its events (already recorded
+   * in `EventStore`, reopened separately by
+   * `TaskOrchestrator.prepareRetry()`) and its `CeoPlanStepAttempt` row
+   * (already marked terminal by the caller before this is ever invoked)
+   * are untouched.
+   *
+   * Same revision + four-field-snapshot ABA-safety as `assignIfEligible()`/
+   * `startIfEligible()` — see either's doc comment for why revision, not
+   * a plain field compare, is what closes the race. Independently
+   * re-derives the launch invariant from the LIVE record (status must be
+   * `"failed"`) rather than trusting the caller. Any mismatch throws
+   * `TaskStateConflictError` (409) — this single atomic commit is also
+   * exactly what makes "no competing retry preparation already
+   * succeeded" hold: only the first caller to commit wins; every other
+   * concurrent caller's now-stale revision is rejected, never
+   * last-write-wins.
+   *
+   * Deliberately bypasses `updateStatus()`/`isValidTaskTransition()`
+   * entirely — `failed -> assigned` is NOT in `ALLOWED_TRANSITIONS` (see
+   * that table's doc comment) and must never be: this method has its
+   * own, much narrower, independently re-derived invariant
+   * (`status === "failed"`) plus 12 further plan/attempt/circuit
+   * preconditions its caller (`CeoPlanExecutionScheduler`) verifies
+   * first — a generic transition table has no way to express any of
+   * that. `updateStatus()` staying strict is what makes it structurally
+   * impossible for any other caller, including `POST /transition`, to
+   * reach this edge by accident.
+   */
+  prepareRetryIfEligible(
+    taskId: string,
+    expectedRevision: number,
+    expected: {
+      readonly status: TaskStatus;
+      readonly runId: string | undefined;
+      readonly adapterId: string | undefined;
+      readonly agentId: string | undefined;
+    },
+  ): TaskRecord {
+    const record = this.#mustGetLive(taskId);
+    const currentRevision = this.#revisions.get(taskId) ?? 0;
+
+    const isRetryable = record.task.status === "failed";
+    const stillMatchesExpectation =
+      currentRevision === expectedRevision &&
+      record.task.status === expected.status &&
+      record.runId === expected.runId &&
+      record.adapterId === expected.adapterId &&
+      record.agentId === expected.agentId;
+
+    if (!isRetryable || !stillMatchesExpectation) {
+      throw new TaskStateConflictError(taskId, record.task.status, "assigned");
+    }
+
+    const now = new Date().toISOString();
+    record.runId = undefined;
+    record.terminalEventType = undefined;
+    record.failure = undefined;
+    record.completedAt = undefined;
+    record.startedAt = undefined;
+    record.task = { ...record.task, status: "assigned", updatedAt: now };
+    this.#bumpRevision(taskId);
+
+    return structuredClone(record);
+  }
+
+  /**
+   * Phase 15.2 — the TOCTOU-safe successor to `setRunId()` as the launch
+   * reservation `TaskOrchestrator.startTask()` commits with. `setRunId()`
+   * only ever checked `runId === undefined`, which cannot detect a task
+   * whose `status`/`adapterId`/`agentId` moved and moved back (an ABA
+   * race) while the caller was awaiting a fresh `adapter.detect()` and a
+   * re-run capability/execution-trust eligibility check. This method
+   * closes that race the same way `assignIfEligible()` does: the caller
+   * snapshots `expectedRevision` and the four-field `expected` struct
+   * BEFORE its `await`s, then commits here in one synchronous call with
+   * no further `await` in between.
+   *
+   * Re-validates:
+   * 1. The live revision still equals `expectedRevision`.
+   * 2. The live record's `status`/`runId`/`adapterId`/`agentId` still
+   *    exactly match `expected`.
+   * 3. The live status is independently still `"assigned"` with no run
+   *    claimed yet — re-derived from the live record, not trusted from
+   *    the caller, so this method is self-contained and correct even if
+   *    a future caller skips `startTask()`'s own pre-checks.
+   *
+   * Any mismatch throws `TaskStateConflictError` (409) — never
+   * last-write-wins, and never a second, weaker check that only catches
+   * some of the ways the task could have drifted.
+   *
+   * Deliberately does NOT touch `assignedExecutionTrust` — that field is
+   * documented (see `TaskRecord`) as an assignment-time snapshot that must
+   * never silently drift; the freshly detected execution trust used for
+   * this launch's eligibility re-check is a transient input to that
+   * check, not a new persisted snapshot.
+   */
+  startIfEligible(
+    taskId: string,
+    expectedRevision: number,
+    expected: {
+      readonly status: TaskStatus;
+      readonly runId: string | undefined;
+      readonly adapterId: string | undefined;
+      readonly agentId: string | undefined;
+    },
+    runId: string,
+  ): TaskRecord {
+    const record = this.#mustGetLive(taskId);
+    const currentRevision = this.#revisions.get(taskId) ?? 0;
+
+    const isLaunchable = record.task.status === "assigned" && record.runId === undefined;
+    const stillMatchesExpectation =
+      currentRevision === expectedRevision &&
+      record.task.status === expected.status &&
+      record.runId === expected.runId &&
+      record.adapterId === expected.adapterId &&
+      record.agentId === expected.agentId;
+
+    if (!isLaunchable || !stillMatchesExpectation) {
+      throw new TaskStateConflictError(taskId, record.task.status, "started");
+    }
+
+    record.runId = runId;
+    this.#bumpRevision(taskId);
+
+    return structuredClone(record);
+  }
+
+  /**
    * Phase 14.1 — the ephemeral-mode analogue of `withTransaction`'s
    * durable-mode SAVEPOINT, used by `createEphemeralAtomicUnit` to give
    * in-memory CEO plan delegation genuine all-or-nothing semantics. This

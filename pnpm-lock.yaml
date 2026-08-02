@@ -113,6 +113,9 @@ importers:
       '@hall-of-wisdom/hall-runner':
         specifier: workspace:*
         version: link:../../runners/hall-runner
+      '@hall-of-wisdom/mock-agent':
+        specifier: workspace:*
+        version: link:../../adapters/mock-agent
       '@hall-of-wisdom/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol

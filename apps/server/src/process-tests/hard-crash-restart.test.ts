@@ -115,7 +115,14 @@ describe("hard-crash restart via the real server binary", () => {
     // production default `staleAfterMs`, not a shortened test-only
     // value, since the real CLI has no override flag for it), a new
     // instance can reacquire ownership and start normally.
-    const { child: second, attempts } = await retryStartUntilSuccessful(args, port, 2000, 40000);
+    // Per-attempt budget deliberately wider than the 2000ms other
+    // process-tests in this directory use: this scenario's restart must
+    // run real crash-recovery reconciliation against a database that
+    // already holds a completed task, which measurably (~2.2s, timed
+    // directly against this exact scenario) takes longer than the
+    // lighter, freshly-migrated-or-near-empty databases those other
+    // tests restart against.
+    const { child: second, attempts } = await retryStartUntilSuccessful(args, port, 6000, 60000);
     spawned.push(second);
     expect(attempts).toBeGreaterThan(1);
 
@@ -140,5 +147,5 @@ describe("hard-crash restart via the real server binary", () => {
       tasks: readonly { task: { taskId: string } }[];
     };
     expect(list.tasks.filter((record) => record.task.taskId === taskId)).toHaveLength(1);
-  }, 60000);
+  }, 90000);
 });

@@ -9,49 +9,67 @@ import {
   ceoPlanVersionSchema,
   communicationBoardSchema,
   communicationMessageSchema,
+  configureCeoPlanRunResponseSchema,
   createCeoPlanResponseSchema,
   createTaskResponseSchema,
   decideCeoPlanApprovalResponseSchema,
   delegateCeoPlanResponseSchema,
+  emergencyStopResponseSchema,
   ensureBoardResponseSchema,
   errorResponseSchema,
   getCeoPlanResponseSchema,
+  getCeoPlanRunResponseSchema,
   healthResponseSchema,
   listAdaptersResponseSchema,
   listBoardMessagesResponseSchema,
   listBoardsResponseSchema,
   listCeoApprovalsResponseSchema,
   listCeoPlanEventsResponseSchema,
+  listCeoPlanRunEventsResponseSchema,
+  listCeoPlanRunsResponseSchema,
   listCeoPlansResponseSchema,
   listCeoPlanVersionsResponseSchema,
   listComparisonsResponseSchema,
   listTasksResponseSchema,
+  ceoPlanRunSchedulerStatusResponseSchema,
+  retryCeoPlanRunStepResponseSchema,
   routeAndAssignResponseSchema,
   routingAnalysisResponseSchema,
+  runMutationResponseSchema,
   systemStorageResponseSchema,
   taskRecordSchema,
   type AgentComparisonRecord,
   type CancelComparisonCandidateResponse,
   type CancelTaskResponse,
   type CeoPlan,
+  type CeoPlanExecutionMode,
+  type CeoPlanExecutionPolicy,
   type CommunicationBoard,
   type CommunicationMessage,
+  type ConfigureCeoPlanRunResponse,
   type CreateCeoPlanResponse,
   type CreateTaskResponse,
   type DecideCeoPlanApprovalResponse,
   type DelegateCeoPlanResponse,
+  type EmergencyStopResponse,
   type EnsureBoardResponse,
   type GetCeoPlanResponse,
+  type GetCeoPlanRunResponse,
   type HealthResponse,
   type ListBoardMessagesResponse,
   type ListBoardsResponse,
   type ListCeoApprovalsResponse,
   type ListCeoPlanEventsResponse,
+  type ListCeoPlanRunEventsResponse,
+  type ListCeoPlanRunsResponse,
   type ListCeoPlansResponse,
   type ListCeoPlanVersionsResponse,
   type ListComparisonsResponse,
+  type CeoPlanRunSchedulerStatusResponse,
+  type RetryCeoPlanRunStepResponse,
   type RouteAndAssignResponse,
   type RoutingAnalysisResponse,
+  type RunMutationResponse,
   type SystemStorageResponse,
   type TaskRecord,
   type TaskRequirements,
@@ -831,6 +849,192 @@ export function cancelCeoPlan(
     options,
   );
 }
+
+/**
+ * Phase 15 — autonomous execution of an already-delegated CEO plan. Every
+ * mutating function below matches a `routes/ceo-plan-runs.ts` route
+ * one-to-one: `configureCeoPlanRunExecution` creates a run but starts
+ * nothing (`.../start` is the one route that lets the scheduler begin
+ * claiming signals), `retryCeoPlanRunStep` is the only route that can move
+ * a stuck step back toward execution, and none of these functions ever
+ * accept an actor identity — the server always attributes the resulting
+ * event to the fixed `"human:local-operator"` actor.
+ */
+export interface ConfigureCeoPlanRunRequestBody {
+  readonly executionMode: CeoPlanExecutionMode;
+  readonly policy: CeoPlanExecutionPolicy;
+}
+
+/** Creates an execution run for an already-delegated plan. Configuration alone starts no task run. */
+export function configureCeoPlanRunExecution(
+  baseUrl: string,
+  planId: string,
+  body: ConfigureCeoPlanRunRequestBody,
+  options: RequestOptions = {},
+): Promise<ConfigureCeoPlanRunResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/execution/configure`,
+    { method: "POST", body },
+    configureCeoPlanRunResponseSchema,
+    options,
+  );
+}
+
+export function listCeoPlanRuns(
+  baseUrl: string,
+  options: RequestOptions = {},
+): Promise<ListCeoPlanRunsResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs`,
+    { method: "GET" },
+    listCeoPlanRunsResponseSchema,
+    options,
+  );
+}
+
+export function getCeoPlanRun(
+  baseUrl: string,
+  runId: string,
+  options: RequestOptions = {},
+): Promise<GetCeoPlanRunResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs/${encodeURIComponent(runId)}`,
+    { method: "GET" },
+    getCeoPlanRunResponseSchema,
+    options,
+  );
+}
+
+export function listCeoPlanRunEvents(
+  baseUrl: string,
+  runId: string,
+  afterSequence?: number,
+  options: RequestOptions = {},
+): Promise<ListCeoPlanRunEventsResponse> {
+  const query = afterSequence === undefined ? "" : `?afterSequence=${String(afterSequence)}`;
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs/${encodeURIComponent(runId)}/events${query}`,
+    { method: "GET" },
+    listCeoPlanRunEventsResponseSchema,
+    options,
+  );
+}
+
+export function getCeoPlanRunSchedulerStatus(
+  baseUrl: string,
+  runId: string,
+  options: RequestOptions = {},
+): Promise<CeoPlanRunSchedulerStatusResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs/${encodeURIComponent(runId)}/scheduler-status`,
+    { method: "GET" },
+    ceoPlanRunSchedulerStatusResponseSchema,
+    options,
+  );
+}
+
+/** The one route that lets the scheduler begin claiming signals for this run — a `manual`-mode run still starts nothing on its own even after this call. */
+export function startCeoPlanRun(
+  baseUrl: string,
+  runId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<RunMutationResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs/${encodeURIComponent(runId)}/start`,
+    { method: "POST", body: { expectedMutationToken } },
+    runMutationResponseSchema,
+    options,
+  );
+}
+
+/** Pauses scheduling. Already-active child tasks are left running under their own steam — nothing is force-cancelled. */
+export function pauseCeoPlanRun(
+  baseUrl: string,
+  runId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<RunMutationResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs/${encodeURIComponent(runId)}/pause`,
+    { method: "POST", body: { expectedMutationToken } },
+    runMutationResponseSchema,
+    options,
+  );
+}
+
+export function resumeCeoPlanRun(
+  baseUrl: string,
+  runId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<RunMutationResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs/${encodeURIComponent(runId)}/resume`,
+    { method: "POST", body: { expectedMutationToken } },
+    runMutationResponseSchema,
+    options,
+  );
+}
+
+/** Stops future scheduling for this run. Does not cancel already-active child tasks — use emergency stop for that. */
+export function cancelCeoPlanRun(
+  baseUrl: string,
+  runId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<RunMutationResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs/${encodeURIComponent(runId)}/cancel`,
+    { method: "POST", body: { expectedMutationToken } },
+    runMutationResponseSchema,
+    options,
+  );
+}
+
+/** Stops future scheduling AND requests cancellation of every currently active child task linked to this run. */
+export function emergencyStopCeoPlanRun(
+  baseUrl: string,
+  runId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<EmergencyStopResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs/${encodeURIComponent(runId)}/emergency-stop`,
+    { method: "POST", body: { expectedMutationToken } },
+    emergencyStopResponseSchema,
+    options,
+  );
+}
+
+/** Manually retries one step currently `failed` or `awaiting_intervention`. The only route that can move a stuck step back toward execution. */
+export function retryCeoPlanRunStep(
+  baseUrl: string,
+  runId: string,
+  stepId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<RetryCeoPlanRunStepResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plan-runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/retry`,
+    { method: "POST", body: { expectedMutationToken } },
+    retryCeoPlanRunStepResponseSchema,
+    options,
+  );
+}
+
+export type {
+  CeoPlanExecutionMode,
+  CeoPlanExecutionPolicy,
+  CeoPlanRunSchedulerStatusResponse,
+  ConfigureCeoPlanRunResponse,
+  EmergencyStopResponse,
+  GetCeoPlanRunResponse,
+  ListCeoPlanRunEventsResponse,
+  ListCeoPlanRunsResponse,
+  RetryCeoPlanRunStepResponse,
+  RunMutationResponse,
+} from "./api-schemas";
 
 export { adapterSummarySchema };
 export type { AdapterSummary } from "./api-schemas";

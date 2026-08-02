@@ -135,7 +135,19 @@ export function RoutingDialog({
 
   return (
     <Dialog titleId={titleId} onClose={onClose} maxWidthClassName="max-w-2xl">
-      <div className="flex flex-col gap-4">
+      {/*
+       * A real, reported mobile defect (Phase 15.1): with no bound of its
+       * own, this dialog's content (a variable-length candidates table
+       * plus, in "custom" mode, two capability/trust checkbox fieldsets)
+       * could exceed a 390×844 viewport's height entirely, with no way
+       * to reach "Route and assign" — the shared `Dialog` primitive
+       * itself imposes no max-height/scroll (by design: several other
+       * dialogs are short enough to never need it). The fix is the same
+       * per-consumer `max-h-*` + `overflow-y-auto` wrapper
+       * `ceo-plan-execution-configure-dialog.tsx` already established
+       * for its own tall policy form — not a new pattern.
+       */}
+      <div className="flex max-h-[85vh] flex-col gap-4 overflow-y-auto">
         <h2 id={titleId} className="text-lg font-semibold">
           Find suitable agent
         </h2>

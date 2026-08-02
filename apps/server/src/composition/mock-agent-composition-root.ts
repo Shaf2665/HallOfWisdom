@@ -29,12 +29,20 @@ import {
 } from "../ceo-plans/ceo-plan-composition.js";
 import { wrapTaskStoreWithMutationHook } from "../ceo-plans/task-mutation-hook.js";
 import type { CeoPlanOrchestrator } from "../ceo-plans/ceo-plan-orchestrator.js";
+import {
+  createCeoPlanExecutionComposition,
+  type CeoPlanExecutionComposition,
+} from "../ceo-execution/ceo-plan-execution-composition.js";
+import type { CeoPlanExecutionScheduler } from "../ceo-execution/ceo-plan-execution-scheduler.js";
+import { isTerminalTaskStatus } from "../tasks/task-status-transitions.js";
 
 export interface ServerCompositionOptions {
   /** Canonical, already-validated workspace root. */
   readonly workspaceRoot: string;
   readonly mockScenario?: string | undefined;
   readonly mockStepDelayMs?: number | undefined;
+  /** Test-only knob (never a real CLI flag) — lets a "failure" scenario report a retryable (transient) structured failure instead of the schema's own `false` default, for tests that specifically need to distinguish transient from permanent classification through the real mutation-hook bridge. */
+  readonly mockFailureRetryable?: boolean | undefined;
   readonly limits: ServerLimits;
   readonly onExecutionError?: ((taskId: string, error: unknown) => void) | undefined;
   /**
@@ -74,6 +82,23 @@ export interface ServerComposition {
   readonly comparison?: ComparisonComposition | undefined;
   /** Phase 14 — always composed (unlike `comparison`, CEO plans need no separate filesystem root). */
   readonly ceoPlans: CeoPlanComposition;
+  /** Phase 15 — always composed alongside `ceoPlans`; a delegated plan may still have no active run and stay in manual mode (Phase 14 behavior, unchanged) until an operator explicitly configures and starts autonomous execution. */
+  readonly ceoExecution: CeoPlanExecutionComposition;
+  /**
+   * Arms the task-mutation bridge that lets `ceoExecution.scheduler` react
+   * to child-task completions. Deliberately NOT armed automatically by
+   * this function — the caller (`server.ts`) must call this only AFTER
+   * `runCeoPlanExecutionRecovery` has finished deciding what to do with
+   * every previously-configured run (pause on an unclean restart, or
+   * revalidate-and-continue on a clean one). Calling this before that
+   * pass runs would let `runRestartRecovery`'s own `reconcileTasks` step
+   * — which mutates `taskStore` directly, before the recovery pass below
+   * ever executes — trigger live scheduling decisions on stale,
+   * not-yet-reconciled run state. Safe (and required) to call
+   * unconditionally in ephemeral mode, where there is no restart sequence
+   * at all and no run can already exist.
+   */
+  readonly activateAutonomousScheduling: () => void;
 }
 
 function resolveScenario(rawScenario: string | undefined): MockAgentScenario {
@@ -209,6 +234,9 @@ export function createMockAgentServerComposition(
   const adapter = new MockAgentAdapter({
     scenario: resolveScenario(options.mockScenario),
     stepDelayMs: options.mockStepDelayMs,
+    ...(options.mockFailureRetryable !== undefined
+      ? { failureRetryable: options.mockFailureRetryable }
+      : {}),
   });
   const registry = new AgentRegistry();
   registry.register(adapter);
@@ -223,6 +251,21 @@ export function createMockAgentServerComposition(
   // ever read after this whole function has returned (the earliest any
   // task mutation could occur is a subsequent route call).
   const ceoOrchestratorRef: { current: CeoPlanOrchestrator | undefined } = { current: undefined };
+  // Phase 15 — same ref pattern, for the scheduler this composition builds
+  // further below. Deliberately forwarded ONLY on a terminal child-task
+  // status (`completed`/`failed`/`cancelled`), for two reasons: (1) it is
+  // the only status transition `CeoPlanExecutionScheduler.onChildTaskMutated`
+  // itself ever acts on (see that method), so forwarding every intermediate
+  // transition would be pure overhead on the hottest possible path — the
+  // exact "idle efficiency" / "never scan or notify on irrelevant
+  // transitions" target this phase requires; and (2) it structurally rules
+  // out the one real reentrancy risk in this bridge: `TaskOrchestrator
+  // .startTask()` itself calls `taskStore.setRunId(...)` while the task is
+  // merely "running" (not yet terminal), so a same-tick "start → notify →
+  // scheduler tries to start something else" cycle can never begin here —
+  // by the time a task reaches a terminal state, the scheduler's own
+  // `startTask()` call for it has long since returned.
+  const schedulerRef: { current: CeoPlanExecutionScheduler | undefined } = { current: undefined };
   const stores = createCoreStoresComposition({
     registry,
     workspaceRoot: options.workspaceRoot,
@@ -231,6 +274,21 @@ export function createMockAgentServerComposition(
     db: options.db,
     onTaskMutated: (taskId) => {
       ceoOrchestratorRef.current?.onChildTaskMutated(taskId);
+      const scheduler = schedulerRef.current;
+      if (scheduler === undefined) return;
+      let record;
+      try {
+        record = stores.taskStore.get(taskId);
+      } catch {
+        return;
+      }
+      if (isTerminalTaskStatus(record.task.status)) {
+        scheduler.onChildTaskMutated(taskId).catch(() => {
+          // Best-effort bridge — a missed scheduler wakeup here is
+          // recoverable by the bounded reconciliation pass (Phase 15's
+          // safety net, never the primary scheduling path).
+        });
+      }
     },
   });
 
@@ -244,5 +302,32 @@ export function createMockAgentServerComposition(
   });
   ceoOrchestratorRef.current = ceoPlans.orchestrator;
 
-  return { registry, ...stores, ceoPlans };
+  const ceoExecution = createCeoPlanExecutionComposition({
+    taskStore: stores.taskStore,
+    taskOrchestrator: stores.orchestrator,
+    boardStore: stores.boardStore,
+    messageStore: stores.messageStore,
+    planStore: ceoPlans.planStore,
+    db: options.db,
+  });
+  // Deliberately NOT set here — see `activateAutonomousScheduling`'s doc
+  // comment on `ServerComposition`. `schedulerRef.current` stays
+  // `undefined` (the bridge stays inert) until the caller explicitly arms
+  // it, after its own recovery pass has run.
+  const activateAutonomousScheduling = (): void => {
+    schedulerRef.current = ceoExecution.scheduler;
+    // Phase 15.3 — arms the retry-due wake timer for any signal already
+    // pending in durable storage (e.g. from before an unclean restart).
+    // Called here, never earlier, so it inherits the exact same ordering
+    // guarantee `schedulerRef.current` itself relies on: only after
+    // recovery has already decided what to do with every previously-
+    // configured run — a genuinely interrupted (`"running"`) step stays
+    // untouched by Phase 13's own rule, while a step recovery left in
+    // `"retry_wait"` (never interrupted mid-flight, only ever waiting out
+    // its own already-decided backoff) is exactly what this timer exists
+    // to wake.
+    ceoExecution.scheduler.start();
+  };
+
+  return { registry, ...stores, ceoPlans, ceoExecution, activateAutonomousScheduling };
 }

@@ -4,6 +4,7 @@ import type { TaskStatus } from "@hall-of-wisdom/protocol";
 import { useDroppable } from "@dnd-kit/core";
 import type { TaskRecord } from "../../lib/api-schemas";
 import type { ColumnDefinition } from "../../lib/kanban";
+import type { CeoPlanRunBadgeMap } from "../../hooks/use-ceo-plan-run-badges";
 import { KanbanCard } from "./kanban-card";
 
 export function KanbanColumn({
@@ -13,6 +14,7 @@ export function KanbanColumn({
   isDragActive,
   isPending,
   lastActedOnTaskId,
+  executionBadges,
   onFocusHandled,
   onMove,
   onOpenAssign,
@@ -30,6 +32,7 @@ export function KanbanColumn({
   readonly isDragActive: boolean;
   readonly isPending: (taskId: string) => boolean;
   readonly lastActedOnTaskId: string | null;
+  readonly executionBadges: CeoPlanRunBadgeMap;
   readonly onFocusHandled: () => void;
   readonly onMove: (taskId: string, targetStatus: TaskStatus) => Promise<void>;
   readonly onOpenAssign: (record: TaskRecord) => void;
@@ -95,6 +98,7 @@ export function KanbanColumn({
               record={record}
               isPending={isPending(record.task.taskId)}
               shouldFocusOnMount={lastActedOnTaskId === record.task.taskId}
+              executionBadge={executionBadges.get(record.task.taskId)}
               onFocusHandled={onFocusHandled}
               onMove={onMove}
               onOpenAssign={onOpenAssign}

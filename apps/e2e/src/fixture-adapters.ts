@@ -1,15 +1,18 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import type {
-  AgentAdapter,
-  AgentAdapterDescriptor,
-  AgentDetectionResult,
-  AgentRunHandle,
-  AgentTaskInput,
-  RunTerminalState,
+import {
+  parseAgentAdapterDescriptor,
+  type AgentAdapter,
+  type AgentAdapterDescriptor,
+  type AgentDetectionResult,
+  type AgentRunHandle,
+  type AgentTaskInput,
+  type RunTerminalState,
 } from "@hall-of-wisdom/agent-adapter-sdk";
 import type { CapabilityObservation, NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
+import { MockAgentAdapter, type MockAgentScenario } from "@hall-of-wisdom/mock-agent";
 
 /**
  * Deterministic, fixture `AgentAdapter` implementations for Playwright
@@ -256,4 +259,183 @@ export function createFixtureComparisonAdapter(input: {
       });
     },
   };
+}
+
+/**
+ * Phase 15.1 — CEO plan execution E2E specs need a fixture adapter whose
+ * `startTask()` genuinely runs to a real terminal event (unlike every
+ * adapter above, whose `startTask()` always rejects — see this file's own
+ * header comment and `MOCK_AGENT_ADAPTER_ID`'s fixed reject-everything
+ * registration in `fixture-server.ts`, which every routing/assignment/
+ * planning spec still relies on unchanged).
+ *
+ * Rather than hand-rolling a parallel reimplementation of failure/retry
+ * event shapes, this wraps the REAL, already-published, already-tested
+ * `@hall-of-wisdom/mock-agent` package (the exact same class
+ * `apps/server`'s own test suites use) — but `MockAgentAdapter`'s
+ * `descriptor` is a fixed module-level constant
+ * (`MOCK_AGENT_ADAPTER_ID` == `"hall.mock-agent"`), which would collide
+ * with `createFixtureMockAgentAdapter()`'s own registration under that
+ * same id if registered as-is. This wrapper overrides `descriptor` (a new
+ * adapter id + display name, revalidated through the SDK's own
+ * `parseAgentAdapterDescriptor`) AND `detect()`'s reported trust/
+ * capabilities — matching `createFixtureComparisonAdapter`'s own
+ * established precedent of declaring `executionTrust: "isolated"` plus
+ * `IMPLEMENTATION_CAPABILITIES` — because the delegated child tasks these
+ * E2E specs need to actually run inherit `requirements` from their parent
+ * task's own routing profile ("Code implementation — isolated
+ * preferred": `project.read`/`project.edit`/`structured.events`/
+ * `cancellation`, `allowedExecutionTrust: ["isolated"]`); the real Mock
+ * Agent's own honest, narrow profile (`simulated` trust, no file editing)
+ * would leave every wrapped instance showing "does not meet requirements"
+ * and disabled in the real "Assign an agent" dialog, same as
+ * `hall.mock-agent` itself already does for such a task — unselectable
+ * through genuine UI regardless of adapter id. `startTask()` still
+ * delegates unchanged to the real instance for its deterministic
+ * success/failure/retry event behavior — still fully deterministic,
+ * offline, no real provider process, no subscription usage of any kind.
+ */
+function withAdapterId(
+  adapter: AgentAdapter,
+  adapterId: string,
+  displayName: string,
+): AgentAdapter {
+  // `agentDisplayName` in the `/api/v1/adapters` response (and this
+  // dialog's own `<option>` text) is read from
+  // `descriptor.supportedAgent.displayName`, NOT `descriptor.displayName`
+  // — both must be overridden, or every wrapped instance still renders
+  // as the wrapped adapter's own original display name ("Mock Agent"),
+  // indistinguishable from `hall.mock-agent` itself and from each other.
+  const descriptor: AgentAdapterDescriptor = parseAgentAdapterDescriptor({
+    ...adapter.descriptor,
+    adapterId,
+    displayName,
+    // `integrationLevel` MUST also be overridden, not just left as the
+    // wrapped `MockAgentAdapter`'s own `"native"` — `evaluateRouting`'s
+    // tie-break (`routing-policy.ts`) ranks a lower integration level
+    // ABOVE `"structured_cli"` (Claude Code's own declared level), so a
+    // still-`"native"` wrapped instance would silently outrank Claude
+    // Code for every OTHER spec's "isolated" routing recommendation —
+    // a real regression this file's own author found by running the
+    // full existing E2E suite after adding these adapters, not a
+    // hypothetical. Matched to Claude Code's level so the final
+    // tie-break is the adapter-id alphabetical sort below, which this
+    // file's ids are deliberately named to lose.
+    integrationLevel: "structured_cli",
+    capabilities: { ...adapter.descriptor.capabilities, fileEditing: true, shellExecution: true },
+    declaredCapabilities: ["project.read", "project.edit", "structured.events", "cancellation"],
+    supportedAgent: {
+      ...adapter.descriptor.supportedAgent,
+      adapterId,
+      displayName,
+      agentId: adapterId,
+    },
+  });
+  return {
+    descriptor,
+    async detect(): Promise<AgentDetectionResult> {
+      const real = await adapter.detect();
+      return {
+        ...real,
+        executionTrust: "isolated",
+        capabilityObservations: [...IMPLEMENTATION_CAPABILITIES],
+      };
+    },
+    startTask: (input, options) => adapter.startTask(input, options),
+  };
+}
+
+function fixtureMockAgent(scenario: MockAgentScenario, failureRetryable?: boolean): AgentAdapter {
+  return new MockAgentAdapter({
+    scenario,
+    stepDelayMs: scenario === "cancellable" ? 5000 : 0,
+    ...(failureRetryable !== undefined ? { failureRetryable } : {}),
+  });
+}
+
+/** Always completes successfully — the default for CEO execution E2E specs that don't need a failure path. */
+export function createCeoExecutionSuccessAdapter(): AgentAdapter {
+  return withAdapterId(
+    fixtureMockAgent("success"),
+    "hall.zzz-ceo-fixture-success",
+    "CEO Execution Fixture (success)",
+  );
+}
+
+/** Always fails with `retryable: true` — drives the automatic-retry path deterministically. */
+export function createCeoExecutionTransientFailureAdapter(): AgentAdapter {
+  return withAdapterId(
+    fixtureMockAgent("failure", true),
+    "hall.zzz-ceo-fixture-transient",
+    "CEO Execution Fixture (transient failure)",
+  );
+}
+
+/** `createCeoExecutionTransientThenSuccessAdapter`'s "seen" markers, one empty file per already-attempted taskId — see that function's own doc comment for why this is a directory on disk, not an in-memory `Set`. */
+const TRANSIENT_THEN_SUCCESS_MARKER_DIR = path.join(
+  os.tmpdir(),
+  "hall-e2e-transient-then-success-markers",
+);
+
+/**
+ * Fails with `retryable: true` on a child task's FIRST attempt only, then
+ * succeeds on every subsequent attempt for that same task — deterministic
+ * proof that governed retry doesn't just relaunch (any transient-failure
+ * adapter already shows that) but produces a genuinely different, better
+ * outcome the second time. Keyed by `hallTask.taskId`, never by call
+ * count alone, so two different steps each get their own independent
+ * "first attempt" — this adapter can be assigned to more than one step in
+ * the same run without cross-contaminating each other's attempt count.
+ *
+ * Phase 15.5 — the "seen" marker is a file on disk
+ * (`TRANSIENT_THEN_SUCCESS_MARKER_DIR`), not an in-memory `Set`: this
+ * adapter is re-constructed from scratch on every `fixture-server.ts`
+ * boot (a brand new closure, a brand new empty `Set`), so an in-memory
+ * marker would silently forget every already-failed task across a
+ * restart — a step whose one real attempt happened before the restart
+ * would look like a fresh "first attempt" again after it, and fail
+ * forever instead of succeeding on its due retry. `taskId`s are globally
+ * unique per run, so the marker file name can never collide across
+ * tests or across a real vs. fixture task.
+ */
+export function createCeoExecutionTransientThenSuccessAdapter(): AgentAdapter {
+  const failureAdapter = fixtureMockAgent("failure", true);
+  const successAdapter = fixtureMockAgent("success");
+  const base: AgentAdapter = {
+    descriptor: failureAdapter.descriptor,
+    detect: () => failureAdapter.detect(),
+    startTask: (input, options) => {
+      const taskId = input.hallTask.taskId;
+      fs.mkdirSync(TRANSIENT_THEN_SUCCESS_MARKER_DIR, { recursive: true });
+      const markerPath = path.join(TRANSIENT_THEN_SUCCESS_MARKER_DIR, taskId);
+      const isFirstAttempt = !fs.existsSync(markerPath);
+      fs.writeFileSync(markerPath, "");
+      return isFirstAttempt
+        ? failureAdapter.startTask(input, options)
+        : successAdapter.startTask(input, options);
+    },
+  };
+  return withAdapterId(
+    base,
+    "hall.zzz-ceo-fixture-transient-then-success",
+    "CEO Execution Fixture (transient once, then success)",
+  );
+}
+
+/** Always fails with `retryable: false` — drives the circuit-breaker trip path deterministically. */
+export function createCeoExecutionPermanentFailureAdapter(): AgentAdapter {
+  return withAdapterId(
+    fixtureMockAgent("failure", false),
+    "hall.zzz-ceo-fixture-permanent",
+    "CEO Execution Fixture (permanent failure)",
+  );
+}
+
+/** Stays "running" until explicitly cancelled — lets a spec exercise pause/cancel/emergency-stop against a genuinely in-flight task rather than one that already raced to completion. */
+export function createCeoExecutionCancellableAdapter(): AgentAdapter {
+  return withAdapterId(
+    fixtureMockAgent("cancellable"),
+    "hall.zzz-ceo-fixture-cancellable",
+    "CEO Execution Fixture (cancellable)",
+  );
 }

@@ -17,4 +17,6 @@ export interface NormalizedEventStorePort {
   ): AppendResult;
   list(streamId: string, afterSequence?: number): NormalizedAgentEvent[];
   nextSequence(streamId: string): number;
+  /** See `EventStore.reopenForRetry()`'s doc comment — Phase 15.2 governed-retry stream reopening. */
+  reopenForRetry(streamId: string, expectedTerminalSequence: number): boolean;
 }

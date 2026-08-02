@@ -10,6 +10,7 @@ import type {
 import { MockAgentAdapter, type MockAgentConfigInput } from "@hall-of-wisdom/mock-agent";
 import { createHallCoreApp, type CreateHallCoreAppOptions } from "./app.js";
 import { TaskStore } from "./tasks/task-store.js";
+import type { TaskStorePort } from "./tasks/task-store-port.js";
 import { TaskOrchestrator } from "./tasks/task-orchestrator.js";
 import { EventStore } from "./events/event-store.js";
 import { EventBus } from "./events/event-bus.js";
@@ -25,6 +26,12 @@ import {
   createCeoPlanComposition,
   type CeoPlanComposition,
 } from "./ceo-plans/ceo-plan-composition.js";
+import {
+  createCeoPlanExecutionComposition,
+  type CeoPlanExecutionComposition,
+} from "./ceo-execution/ceo-plan-execution-composition.js";
+import { wrapTaskStoreWithMutationHook } from "./ceo-plans/task-mutation-hook.js";
+import { isTerminalTaskStatus } from "./tasks/task-status-transitions.js";
 
 /** JSON shape of a `TaskRecord` as it round-trips through an HTTP response body. */
 export interface TaskRecordJson {
@@ -74,11 +81,23 @@ export interface TestHarnessOptions {
   readonly withComparisons?: boolean | undefined;
   /** Phase 13.2 — passed straight through to `createHallCoreApp`; see `CreateHallCoreAppOptions.readiness`. `undefined` (the default) means `/api/v1/health` always reports ready. */
   readonly readiness?: CreateHallCoreAppOptions["readiness"];
+  /**
+   * Phase 15 — off by default, exactly like production's own
+   * `activateAutonomousScheduling()` (`mock-agent-composition-root.ts`):
+   * wires `taskStore` through `wrapTaskStoreWithMutationHook` and forwards
+   * every *terminal* child-task mutation to both
+   * `ceoPlans.orchestrator.onChildTaskMutated` and
+   * `ceoExecution.scheduler.onChildTaskMutated`, the same bridge real Hall
+   * Core arms after its own restart-recovery pass. Existing callers that
+   * never set this are byte-identical to before — the bridge stays
+   * entirely unwired, `taskStore` stays the plain, unwrapped store.
+   */
+  readonly armAutonomousScheduling?: boolean | undefined;
 }
 
 export interface TestHarness {
   readonly registry: AgentRegistry;
-  readonly taskStore: TaskStore;
+  readonly taskStore: TaskStorePort;
   readonly eventStore: EventStore;
   readonly eventBus: EventBus;
   readonly orchestrator: TaskOrchestrator;
@@ -89,6 +108,8 @@ export interface TestHarness {
   readonly comparison?: ComparisonComposition | undefined;
   /** Phase 14 — always composed (ephemeral, deterministic planner), matching every other Hall Core composition root. */
   readonly ceoPlans: CeoPlanComposition;
+  /** Phase 15 — always composed alongside `ceoPlans`, matching production's `createMockAgentServerComposition`. */
+  readonly ceoExecution: CeoPlanExecutionComposition;
   /** No-op unless `withComparisons` was set — removes the temp comparison-root directory this harness created. */
   cleanupComparisonRoot(): void;
 }
@@ -102,7 +123,39 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     registry.register(additionalAdapter);
   }
 
-  const taskStore = new TaskStore({ maxTasks: limits.maxTasks });
+  // Same ref-forwarding pattern `mock-agent-composition-root.ts` uses in
+  // production: the hook needs a callback at `taskStore` construction
+  // time, but `ceoPlans`/`ceoExecution` do not exist until after
+  // `TaskOrchestrator` (which needs `taskStore` already wrapped) is
+  // built. Left entirely unset (both refs stay `undefined`, `rawTaskStore`
+  // is exposed unwrapped) unless `options.armAutonomousScheduling` is true
+  // — every existing caller is unaffected.
+  const ceoOrchestratorRef: { current: CeoPlanComposition["orchestrator"] | undefined } = {
+    current: undefined,
+  };
+  const schedulerRef: { current: CeoPlanExecutionComposition["scheduler"] | undefined } = {
+    current: undefined,
+  };
+  const rawTaskStore = new TaskStore({ maxTasks: limits.maxTasks });
+  const taskStore: TaskStorePort = options.armAutonomousScheduling
+    ? wrapTaskStoreWithMutationHook(rawTaskStore, (taskId) => {
+        ceoOrchestratorRef.current?.onChildTaskMutated(taskId);
+        const scheduler = schedulerRef.current;
+        if (scheduler === undefined) return;
+        let record;
+        try {
+          record = rawTaskStore.get(taskId);
+        } catch {
+          return;
+        }
+        if (isTerminalTaskStatus(record.task.status)) {
+          scheduler.onChildTaskMutated(taskId).catch(() => {
+            // Best-effort bridge, exactly like production's own — see
+            // `mock-agent-composition-root.ts`'s identical catch.
+          });
+        }
+      })
+    : rawTaskStore;
   const eventStore = new EventStore({ maxEventsPerTask: limits.maxEventsPerTask });
   const eventBus = new EventBus({ maxSubscribersPerTask: limits.maxSubscribersPerTask });
 
@@ -128,6 +181,18 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     messageStore,
     messageBus,
   });
+  ceoOrchestratorRef.current = ceoPlans.orchestrator;
+
+  const ceoExecution = createCeoPlanExecutionComposition({
+    taskStore,
+    taskOrchestrator: orchestrator,
+    boardStore,
+    messageStore,
+    planStore: ceoPlans.planStore,
+  });
+  if (options.armAutonomousScheduling) {
+    schedulerRef.current = ceoExecution.scheduler;
+  }
 
   let comparison: ComparisonComposition | undefined;
   let comparisonRootDir: string | undefined;
@@ -156,6 +221,7 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     limits,
     comparison,
     ceoPlans,
+    ceoExecution,
     cleanupComparisonRoot(): void {
       if (comparisonRootDir) fs.rmSync(comparisonRootDir, { recursive: true, force: true });
     },
@@ -178,6 +244,7 @@ export async function buildTestApp(options: TestHarnessOptions): Promise<{
     registry: harness.registry,
     comparison: harness.comparison,
     ceoPlanOrchestrator: harness.ceoPlans.orchestrator,
+    ceoExecution: harness.ceoExecution,
     webOrigin: options.webOrigin,
     limits: harness.limits,
     logger: options.logger ?? false,

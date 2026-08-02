@@ -123,6 +123,16 @@ export function wrapTaskStoreWithMutationHook(
       taskStore.clearRunId(taskId);
       notify(taskId);
     },
+    startIfEligible(taskId, expectedRevision, expected, runId) {
+      const result = taskStore.startIfEligible(taskId, expectedRevision, expected, runId);
+      notify(taskId);
+      return result;
+    },
+    prepareRetryIfEligible(taskId, expectedRevision, expected) {
+      const result = taskStore.prepareRetryIfEligible(taskId, expectedRevision, expected);
+      notify(taskId);
+      return result;
+    },
   };
 
   if (isSnapshottableStore(taskStore)) {

@@ -181,12 +181,13 @@ export function AssignDialog({
 
   return (
     <Dialog titleId={titleId} onClose={onClose}>
+      {/* Same `max-h-*` + `overflow-y-auto` defense as `RoutingDialog` — a task with `requirements` set adds a capability/trust summary block plus a selected-adapter eligibility notice, tall enough at 390×844 to be worth the same guard even though this dialog is less likely to overflow than the routing table. */}
       <form
         onSubmit={(event) => {
           void handleSubmit(event);
         }}
         noValidate
-        className="flex flex-col gap-4"
+        className="flex max-h-[85vh] flex-col gap-4 overflow-y-auto"
       >
         <h2 id={titleId} className="text-lg font-semibold">
           Assign an agent

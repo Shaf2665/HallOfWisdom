@@ -245,6 +245,14 @@ to by the CEO Agent, and the browser still can never supply either author kind d
 "Server-owned author" below and
 [`0014-ceo-planning-approval-and-delegation.md`](0014-ceo-planning-approval-and-delegation.md).
 
+**Phase 15 reuses the exact same dedup-gated `"system"` audit path** for autonomous execution
+milestones (execution paused for review after an unclean restart, circuit breaker tripped, run
+completed) — `claimBoardAuditOnce(runId, dedupKey, now)` on the execution-run store is the same
+"claim once, post only if you win the claim" idiom `CeoPlanOrchestrator` already uses, applied to a
+different dedup-key namespace so a repeated recovery pass or a duplicate-coalesced signal can never
+post the same summary twice. See
+[`0015-autonomous-plan-execution-and-scheduling.md`](0015-autonomous-plan-execution-and-scheduling.md).
+
 ## Why editing, deletion, and richer interactions remain deferred
 
 Editing and deletion would require deciding what "delete" means for a sequence-numbered,

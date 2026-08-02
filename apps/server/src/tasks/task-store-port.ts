@@ -55,6 +55,27 @@ export interface TaskStorePort {
   clearAssignment(taskId: string): void;
   setRunId(taskId: string, runId: string): void;
   clearRunId(taskId: string): void;
+  startIfEligible(
+    taskId: string,
+    expectedRevision: number,
+    expected: {
+      readonly status: TaskStatus;
+      readonly runId: string | undefined;
+      readonly adapterId: string | undefined;
+      readonly agentId: string | undefined;
+    },
+    runId: string,
+  ): TaskRecord;
+  prepareRetryIfEligible(
+    taskId: string,
+    expectedRevision: number,
+    expected: {
+      readonly status: TaskStatus;
+      readonly runId: string | undefined;
+      readonly adapterId: string | undefined;
+      readonly agentId: string | undefined;
+    },
+  ): TaskRecord;
   /**
    * How many more tasks `add()` can accept before `TaskCapacityReachedError`.
    * Phase 14 — the CEO plan delegation coordinator (`ceo-plan-orchestrator.ts`)

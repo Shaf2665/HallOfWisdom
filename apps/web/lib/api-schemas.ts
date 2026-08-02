@@ -5,8 +5,15 @@ import {
   capabilityObservationSchema,
   ceoApprovalSchema,
   ceoPlanEventSchema,
+  ceoPlanExecutionEventSchema,
+  ceoPlanExecutionModeSchema,
+  ceoPlanExecutionPolicySchema,
+  ceoPlanRunSchema,
+  ceoPlanSchedulerStatusSchema,
   ceoPlanSchema,
   ceoPlanStatusSchema,
+  ceoPlanStepAttemptSchema,
+  ceoPlanStepExecutionSchema,
   ceoPlanStepSchema,
   ceoPlanVersionSchema,
   communicationBoardSchema,
@@ -37,6 +44,177 @@ export type {
   CeoPlanStep,
   CeoPlanVersion,
 } from "@hall-of-wisdom/protocol";
+
+/**
+ * Phase 15 — the autonomous execution shapes. `CeoPlanRun`/
+ * `CeoPlanStepExecution`/`CeoPlanStepAttempt`/`CeoPlanExecutionEvent`/
+ * `CeoPlanExecutionPolicy`/`CeoPlanSchedulerStatus` all come straight from
+ * `@hall-of-wisdom/protocol`, matching this file's established convention
+ * of never redefining a protocol-owned shape. Only Hall Core's own wire
+ * envelopes and the two shapes that exist purely server-side (circuit
+ * state snapshot, intervention record — `ceo-plan-run-store-port.ts`) are
+ * hand-mirrored here.
+ */
+export {
+  ceoPlanExecutionEventSchema,
+  ceoPlanExecutionModeSchema,
+  ceoPlanExecutionPolicySchema,
+  ceoPlanRunSchema,
+  ceoPlanSchedulerStatusSchema,
+  ceoPlanStepAttemptSchema,
+  ceoPlanStepExecutionSchema,
+};
+export type {
+  CeoPlanExecutionActor,
+  CeoPlanExecutionCircuitState,
+  CeoPlanExecutionCircuitTripReason,
+  CeoPlanExecutionEvent,
+  CeoPlanExecutionEventType,
+  CeoPlanExecutionFailureClassification,
+  CeoPlanExecutionInterventionType,
+  CeoPlanExecutionMode,
+  CeoPlanExecutionPolicy,
+  CeoPlanExecutionSignalState,
+  CeoPlanExecutionTriggerReason,
+  CeoPlanRun,
+  CeoPlanRunRecoveryClassification,
+  CeoPlanRunStatus,
+  CeoPlanSchedulerState,
+  CeoPlanSchedulerStatus,
+  CeoPlanStepAttempt,
+  CeoPlanStepAttemptStatus,
+  CeoPlanStepDependencySummary,
+  CeoPlanStepExecution,
+  CeoPlanStepExecutionStatus,
+  CeoPlanStepReadinessReason,
+} from "@hall-of-wisdom/protocol";
+export {
+  DEFAULT_CEO_PLAN_EXECUTION_POLICY,
+  MAX_ADAPTER_CONCURRENCY_OVERRIDE,
+  MAX_CONSECUTIVE_FAILURES_CEILING,
+  MAX_MAX_ATTEMPTS_PER_STEP,
+  MAX_MAX_CONCURRENT_STEPS,
+  MAX_NO_PROGRESS_ATTEMPTS_CEILING,
+  MAX_PLAN_ELAPSED_SECONDS_CEILING,
+  MAX_RETRY_BACKOFF_SECONDS,
+  MAX_STEP_ELAPSED_SECONDS_CEILING,
+  MIN_ADAPTER_CONCURRENCY_OVERRIDE,
+  MIN_MAX_ATTEMPTS_PER_STEP,
+  MIN_MAX_CONCURRENT_STEPS,
+} from "@hall-of-wisdom/protocol";
+
+export const circuitStateSnapshotSchema = z
+  .object({
+    state: z.enum(["closed", "open"]),
+    consecutiveFailures: z.number(),
+    consecutiveSameCodeFailures: z.number(),
+    noProgressAttempts: z.number(),
+    lastFailureCode: z.string().optional(),
+    tripReason: z
+      .enum([
+        "consecutive_failures",
+        "consecutive_same_code_failures",
+        "no_progress_retries",
+        "rapid_attempt_churn",
+        "adapter_flapping",
+      ])
+      .optional(),
+  })
+  .strict();
+export type CircuitStateSnapshot = z.infer<typeof circuitStateSnapshotSchema>;
+
+export const ceoPlanExecutionInterventionRecordSchema = z
+  .object({
+    id: z.string(),
+    type: z.enum(["pause", "resume", "retry_step", "cancel", "emergency_stop"]),
+    note: z.string().optional(),
+    createdAt: z.string(),
+  })
+  .strict();
+export type CeoPlanExecutionInterventionRecord = z.infer<
+  typeof ceoPlanExecutionInterventionRecordSchema
+>;
+
+export const runMutationResponseSchema = z
+  .object({ run: ceoPlanRunSchema, mutationToken: z.string() })
+  .strict();
+export type RunMutationResponse = z.infer<typeof runMutationResponseSchema>;
+
+export const configureCeoPlanRunResponseSchema = z
+  .object({ run: ceoPlanRunSchema, mutationToken: z.string() })
+  .strict();
+export type ConfigureCeoPlanRunResponse = z.infer<typeof configureCeoPlanRunResponseSchema>;
+
+export const getCeoPlanRunResponseSchema = z
+  .object({
+    run: ceoPlanRunSchema,
+    stepExecutions: z.array(ceoPlanStepExecutionSchema),
+    attempts: z.array(ceoPlanStepAttemptSchema),
+    circuit: circuitStateSnapshotSchema,
+    interventions: z.array(ceoPlanExecutionInterventionRecordSchema),
+    mutationToken: z.string(),
+  })
+  .strict();
+export type GetCeoPlanRunResponse = z.infer<typeof getCeoPlanRunResponseSchema>;
+
+export const listCeoPlanRunsResponseSchema = z.object({ runs: z.array(ceoPlanRunSchema) }).strict();
+export type ListCeoPlanRunsResponse = z.infer<typeof listCeoPlanRunsResponseSchema>;
+
+export const listCeoPlanRunEventsResponseSchema = z
+  .object({ events: z.array(ceoPlanExecutionEventSchema) })
+  .strict();
+export type ListCeoPlanRunEventsResponse = z.infer<typeof listCeoPlanRunEventsResponseSchema>;
+
+export const ceoPlanRunSchedulerStatusResponseSchema = z
+  .object({
+    state: z.enum(["active", "paused", "idle"]),
+    pendingSignalCount: z.number(),
+    claimedSignalCount: z.number(),
+    runningStepCount: z.number(),
+    waitingForDependencyCount: z.number(),
+    retryWaitingCount: z.number(),
+    circuitState: z.enum(["closed", "open"]),
+    activeAttemptCount: z.number(),
+    lastDecisionAt: z.string().optional(),
+  })
+  .strict();
+export type CeoPlanRunSchedulerStatusResponse = z.infer<
+  typeof ceoPlanRunSchedulerStatusResponseSchema
+>;
+
+export const emergencyStopOutcomeSchema = z
+  .object({
+    planStepId: z.string(),
+    childTaskId: z.string(),
+    outcome: z.enum(["cancellation_requested", "already_requested", "failed"]),
+    detail: z.string().optional(),
+  })
+  .strict();
+export type EmergencyStopOutcome = z.infer<typeof emergencyStopOutcomeSchema>;
+
+export const emergencyStopResponseSchema = z
+  .object({
+    result: z
+      .object({
+        runId: z.string(),
+        outcomes: z.array(emergencyStopOutcomeSchema),
+        allSucceeded: z.boolean(),
+      })
+      .strict(),
+    run: ceoPlanRunSchema,
+    mutationToken: z.string(),
+  })
+  .strict();
+export type EmergencyStopResponse = z.infer<typeof emergencyStopResponseSchema>;
+
+export const retryCeoPlanRunStepResponseSchema = z
+  .object({
+    run: ceoPlanRunSchema,
+    step: ceoPlanStepExecutionSchema,
+    mutationToken: z.string(),
+  })
+  .strict();
+export type RetryCeoPlanRunStepResponse = z.infer<typeof retryCeoPlanRunStepResponseSchema>;
 
 export {
   capabilityIdSchema,

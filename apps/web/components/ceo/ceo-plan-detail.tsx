@@ -24,6 +24,7 @@ import { CeoApproveDialog } from "./ceo-approve-dialog";
 import { CeoRejectDialog } from "./ceo-reject-dialog";
 import { CeoDelegateDialog } from "./ceo-delegate-dialog";
 import { CeoPlanEditForm } from "./ceo-plan-edit-form";
+import { CeoPlanExecutionSection } from "./ceo-plan-execution-section";
 
 function safeMessage(error: unknown): string {
   return error instanceof ApiClientError ? error.message : "The action could not be completed.";
@@ -396,6 +397,14 @@ export function CeoPlanDetail({
           </ul>
         </section>
       ) : null}
+
+      <CeoPlanExecutionSection
+        baseUrl={baseUrl}
+        wsBaseUrl={wsBaseUrl}
+        planId={planId}
+        version={activeVersion}
+        links={links}
+      />
 
       {events.length > 0 ? (
         <section className="flex flex-col gap-2">

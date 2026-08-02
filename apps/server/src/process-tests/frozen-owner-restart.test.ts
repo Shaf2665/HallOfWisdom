@@ -144,7 +144,10 @@ describe("a frozen (not crashed) former owner cannot commit after a legitimate t
       "--mock-scenario",
       "success",
     ];
-    const { child: b } = await retryStartUntilSuccessful(argsForB, portB, 2000, 40000);
+    // See `hard-crash-restart.test.ts` — a wider per-attempt budget than
+    // the 2000ms default avoids an intermittent false failure under load
+    // on this machine, not a genuine regression.
+    const { child: b } = await retryStartUntilSuccessful(argsForB, portB, 6000, 60000);
     spawned.push(b);
     await waitForHealth(portB);
 
@@ -179,6 +182,18 @@ describe("a frozen (not crashed) former owner cannot commit after a legitimate t
       error: "OwnershipLostError",
     });
 
+    // Phase 15.1 kickoff §5 — "a real child-process test for at least one
+    // stale scheduler mutation." Same frozen connection, same fence, but
+    // through the real CEO-plan-execution store instead of the generic
+    // scratch table — see `frozen-owner-child.ts`'s doc comment.
+    sendCommand(a, "MUTATE-EXECUTION");
+    const rejectedExecutionMutate = await aOutput.next();
+    expect(rejectedExecutionMutate).toEqual({
+      event: "mutate-execution-result",
+      ok: false,
+      error: "OwnershipLostError",
+    });
+
     // Kickoff §6, item 7 — A cannot remove B's ownership record: A's own
     // `release()` call is confirmed to leave B fully healthy afterward
     // (see `instance-ownership.ts`'s `release()` — it only ever removes a
@@ -209,8 +224,14 @@ describe("a frozen (not crashed) former owner cannot commit after a legitimate t
         count: number;
       };
       expect(taskCount.count).toBe(1);
+      // A's rejected MUTATE-EXECUTION attempt (there was exactly one)
+      // contributed no `ceo_plan_runs` row at all.
+      const executionRunCount = db.prepare("SELECT COUNT(*) AS count FROM ceo_plan_runs").get() as {
+        count: number;
+      };
+      expect(executionRunCount.count).toBe(0);
     } finally {
       db.close();
     }
-  }, 60000);
+  }, 90000);
 });

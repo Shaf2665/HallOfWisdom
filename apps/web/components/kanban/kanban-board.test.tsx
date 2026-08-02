@@ -18,6 +18,8 @@ vi.mock("../../lib/api-client", async () => {
     startTask: vi.fn(),
     cancelTask: vi.fn(),
     ensureTaskBoard: vi.fn(),
+    listCeoPlanRuns: vi.fn(),
+    getCeoPlanRun: vi.fn(),
   };
 });
 
@@ -61,6 +63,8 @@ describe("KanbanBoard", () => {
     vi.mocked(apiClient.assignTask).mockReset();
     vi.mocked(apiClient.startTask).mockReset();
     vi.mocked(apiClient.cancelTask).mockReset();
+    vi.mocked(apiClient.listCeoPlanRuns).mockReset().mockResolvedValue({ runs: [] });
+    vi.mocked(apiClient.getCeoPlanRun).mockReset();
   });
 
   afterEach(() => {
@@ -545,6 +549,96 @@ describe("KanbanBoard", () => {
       const dl = document.querySelector("dl");
       if (!dl) throw new Error("metadata <dl> not found");
       expect(dl.className).toMatch(/\bbreak-words\b/);
+    });
+
+    it("the execution badge wraps rather than forcing the card wider, and never replaces the task's own status badge", async () => {
+      vi.mocked(apiClient.listTasks).mockResolvedValue({
+        tasks: [makeRecord({ status: "running" }, "run-1")],
+      });
+      vi.mocked(apiClient.listCeoPlanRuns).mockResolvedValue({
+        runs: [
+          {
+            id: "exec-run-1",
+            planId: "plan-1",
+            planVersion: 1,
+            status: "running",
+            executionMode: "autonomous",
+            policySnapshot: {
+              maxConcurrentSteps: 1,
+              maxAttemptsPerStep: 1,
+              allowAutomaticTransientRetry: false,
+              retryBackoffSeconds: 30,
+              maxPlanElapsedSeconds: 3600,
+              maxStepElapsedSeconds: 600,
+              maxConsecutiveFailures: 2,
+              maxNoProgressAttempts: 2,
+              pauseOnAnyPermanentFailure: true,
+            },
+            createdAt: new Date().toISOString(),
+            activeGeneration: 0,
+            recoveryClassification: "none",
+          },
+        ],
+      });
+      vi.mocked(apiClient.getCeoPlanRun).mockResolvedValue({
+        run: {
+          id: "exec-run-1",
+          planId: "plan-1",
+          planVersion: 1,
+          status: "running",
+          executionMode: "autonomous",
+          policySnapshot: {
+            maxConcurrentSteps: 1,
+            maxAttemptsPerStep: 1,
+            allowAutomaticTransientRetry: false,
+            retryBackoffSeconds: 30,
+            maxPlanElapsedSeconds: 3600,
+            maxStepElapsedSeconds: 600,
+            maxConsecutiveFailures: 2,
+            maxNoProgressAttempts: 2,
+            pauseOnAnyPermanentFailure: true,
+          },
+          createdAt: new Date().toISOString(),
+          activeGeneration: 0,
+          recoveryClassification: "none",
+        },
+        stepExecutions: [
+          {
+            planRunId: "exec-run-1",
+            planStepId: "step-1",
+            childTaskId: "task-1",
+            status: "running",
+            attemptCount: 1,
+            dependencySummary: {
+              totalDependencies: 0,
+              completedDependencies: 0,
+              failedDependencies: 0,
+              cancelledDependencies: 0,
+            },
+            readinessReason: "ready",
+          },
+        ],
+        attempts: [],
+        circuit: {
+          state: "closed",
+          consecutiveFailures: 0,
+          consecutiveSameCodeFailures: 0,
+          noProgressAttempts: 0,
+        },
+        interventions: [],
+        mutationToken: "tok-1",
+      });
+
+      render(<KanbanBoard baseUrl={BASE_URL} />);
+      const badge = await screen.findByText(/Autonomous execution: running/);
+      expect(badge.className).toMatch(/\bbreak-words\b/);
+      expect(badge.closest("p")?.className).toMatch(/\bflex-wrap\b/);
+
+      // The task's own status badge (from `StatusBadge`) is still present
+      // and unmodified — the execution badge is purely additive.
+      const card = badge.closest("li");
+      if (!card) throw new Error("card <li> not found");
+      expect(within(card).getByText("Running")).toBeInTheDocument();
     });
 
     it("the MoveMenu trigger ('Actions') remains present and reachable regardless of viewport", async () => {

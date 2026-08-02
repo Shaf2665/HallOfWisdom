@@ -163,6 +163,8 @@ describe("wrapTaskStoreWithMutationHook", () => {
       clearAssignment: taskStore.clearAssignment.bind(taskStore),
       setRunId: taskStore.setRunId.bind(taskStore),
       clearRunId: taskStore.clearRunId.bind(taskStore),
+      startIfEligible: taskStore.startIfEligible.bind(taskStore),
+      prepareRetryIfEligible: taskStore.prepareRetryIfEligible.bind(taskStore),
       remainingCapacity: taskStore.remainingCapacity.bind(taskStore),
     };
     const wrapped = wrapTaskStoreWithMutationHook(nonSnapshottable, () => {

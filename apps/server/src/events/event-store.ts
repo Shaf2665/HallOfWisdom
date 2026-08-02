@@ -142,6 +142,38 @@ export class EventStore implements NormalizedEventStorePort {
     return { stored: true, duplicate: false };
   }
 
+  /**
+   * Phase 15.2 — reopens a task's event stream for a governed retry
+   * (`TaskOrchestrator.prepareRetry()`, called only after the caller has
+   * already atomically reset the task's own record back to `"assigned"`
+   * via `TaskStore.prepareRetryIfEligible()`): clears the terminal
+   * marker so a brand-new run's events (starting with a fresh
+   * `run.started`) can append, CONTINUING the same per-task sequence —
+   * never resetting to `0`, never renumbering, never deleting. The prior
+   * run's events, including its own terminal event, stay exactly where
+   * they are; a client reading this task's full event list still sees
+   * every event from every attempt, each carrying its own `runId`.
+   * `maxEventsPerTask`'s reserved-terminal-slot capacity is shared across
+   * every attempt of one task by design — see the class doc comment.
+   *
+   * ABA-safe: `expectedTerminalSequence` must equal the CURRENTLY
+   * recorded terminal sequence for this task (`TaskRecord.lastSequence`
+   * at the moment its status became terminal — see `recordEventMeta()`).
+   * Returns `false` without changing anything if it doesn't match (this
+   * task already has no terminal recorded, or a LATER terminal event
+   * landed than the caller observed) — the caller (`TaskOrchestrator.
+   * prepareRetry()`) treats that as a conflict, never silently reopening
+   * the wrong lifecycle.
+   */
+  reopenForRetry(taskId: string, expectedTerminalSequence: number): boolean {
+    const current = this.#terminalSequenceByTaskId.get(taskId);
+    if (current === undefined || current !== expectedTerminalSequence) {
+      return false;
+    }
+    this.#terminalSequenceByTaskId.delete(taskId);
+    return true;
+  }
+
   list(taskId: string, afterSequence?: number): NormalizedAgentEvent[] {
     const events = this.#eventsByTaskId.get(taskId) ?? [];
     if (afterSequence === undefined) {

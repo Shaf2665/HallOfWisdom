@@ -465,3 +465,115 @@ export class CeoPlanningBlockedError extends HallCoreError {
     super(reason);
   }
 }
+
+// ---- Phase 15: autonomous plan execution -------------------------------
+
+export class CeoPlanRunNotFoundError extends HallCoreError {
+  readonly code = "CEO_PLAN_RUN_NOT_FOUND";
+  readonly statusCode = 404;
+
+  constructor(runId: string) {
+    super(`No CEO plan execution run found with runId "${runId}".`);
+  }
+}
+
+/** Thrown when `configureRun` would violate "at most one active run per plan" — the database's own partial unique index (migration 5) is the actual enforcement; this is the safe, mapped surface of that conflict. */
+export class CeoPlanRunAlreadyActiveError extends HallCoreError {
+  readonly code = "CEO_PLAN_RUN_ALREADY_ACTIVE";
+  readonly statusCode = 409;
+
+  constructor(planId: string) {
+    super(`CEO plan "${planId}" already has an active execution run.`);
+  }
+}
+
+/** Wrong status for the attempted run transition (e.g. pausing an already-cancelled run) — the run-level analogue of `CeoPlanStateConflictError`. */
+export class CeoPlanRunStateConflictError extends HallCoreError {
+  readonly code = "CEO_PLAN_RUN_STATE_CONFLICT";
+  readonly statusCode = 409;
+
+  constructor(runId: string, currentStatus: string, attemptedAction: string) {
+    super(
+      `CEO plan run "${runId}" cannot be ${attemptedAction} while in status "${currentStatus}".`,
+    );
+  }
+}
+
+/** A scheduler decision targeted a generation the run has since moved past (paused/resumed/cancelled/recovered) — the signal or attempt is stale and must be discarded, never acted on. */
+export class CeoPlanRunStaleGenerationError extends HallCoreError {
+  readonly code = "CEO_PLAN_RUN_STALE_GENERATION";
+  readonly statusCode = 409;
+
+  constructor(runId: string) {
+    super(`CEO plan run "${runId}"'s execution generation has moved on; this signal is stale.`);
+  }
+}
+
+/** A step already has a non-terminal attempt — the database's own partial unique index (migration 5) is the actual enforcement; this is its safe, mapped surface. */
+export class CeoPlanStepAttemptConflictError extends HallCoreError {
+  readonly code = "CEO_PLAN_STEP_ATTEMPT_CONFLICT";
+  readonly statusCode = 409;
+
+  constructor(runId: string, planStepId: string) {
+    super(`CEO plan run "${runId}" step "${planStepId}" already has an active attempt.`);
+  }
+}
+
+/** A client-submitted run concurrency token did not match the run's current state — mirrors `CeoPlanMutationTokenInvalidError`'s discipline exactly (same message in both the "genuinely stale" and "malformed/forged" cases). */
+export class CeoPlanRunTokenInvalidError extends HallCoreError {
+  readonly code = "CEO_PLAN_RUN_TOKEN_INVALID";
+  readonly statusCode = 409;
+
+  constructor(runId: string) {
+    super(
+      `CEO plan run "${runId}"'s concurrency token is stale or invalid. Re-fetch the run and try again.`,
+    );
+  }
+}
+
+/**
+ * The operator attempted to start autonomous execution against a plan
+ * that is not currently `delegated`, or whose delegated child tasks no
+ * longer match the plan version being configured — the scheduler must
+ * never start work against a plan it cannot prove is exactly the
+ * approved, delegated version.
+ */
+export class CeoPlanExecutionNotEligibleError extends HallCoreError {
+  readonly code = "CEO_PLAN_EXECUTION_NOT_ELIGIBLE";
+  readonly statusCode = 422;
+
+  constructor(planId: string, safeReason: string) {
+    super(`CEO plan "${planId}" is not eligible for execution configuration: ${safeReason}`);
+  }
+}
+
+/** An operator-initiated manual retry was requested for a step whose current status is not `"failed"` or `"awaiting_intervention"` — retry is only ever eligible for a step that has actually stopped, never one that's active, waiting, or already terminal-success/cancelled. */
+export class CeoPlanExecutionStepRetryNotEligibleError extends HallCoreError {
+  readonly code = "CEO_PLAN_EXECUTION_STEP_RETRY_NOT_ELIGIBLE";
+  readonly statusCode = 409;
+
+  constructor(runId: string, planStepId: string, currentStatus: string) {
+    super(
+      `Step "${planStepId}" of run "${runId}" cannot be manually retried while in status "${currentStatus}".`,
+    );
+  }
+}
+
+/**
+ * Phase 15.6 — the governed abandoned-step recovery path
+ * (`CeoPlanExecutionScheduler.retryAbandonedStep()`) rejected an explicit
+ * operator "Retry step" request. `safeReason` is always one bounded,
+ * pre-written string from a small internal set (e.g. "run is not
+ * running", "latest attempt is not abandoned") — never raw error text,
+ * a path, an owner token, or a revision/epoch value.
+ */
+export class CeoPlanExecutionAbandonedRetryNotEligibleError extends HallCoreError {
+  readonly code = "CEO_PLAN_EXECUTION_ABANDONED_RETRY_NOT_ELIGIBLE";
+  readonly statusCode = 409;
+
+  constructor(runId: string, planStepId: string, safeReason: string) {
+    super(
+      `Step "${planStepId}" of run "${runId}" is not eligible for abandoned-step recovery: ${safeReason}.`,
+    );
+  }
+}

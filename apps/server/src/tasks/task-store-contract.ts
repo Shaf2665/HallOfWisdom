@@ -228,5 +228,468 @@ export function defineTaskStoreContractTests(
       store.add(makeRecord("task-1"));
       expect(store.remainingCapacity()).toBe(before - 1);
     });
+
+    // Phase 15.2 — TOCTOU-safe launch reservation. See
+    // `TaskStore.startIfEligible()`'s doc comment for the full contract:
+    // revision is the primary concurrency token, the four-field snapshot is
+    // secondary defense-in-depth, and the live status/runId are always
+    // independently re-derived rather than trusted from the caller.
+    describe("startIfEligible", () => {
+      function assignedRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
+        return makeRecord("task-1", {
+          task: makeTask("task-1", { status: "assigned" }),
+          adapterId: "hall.adapter-a",
+          agentId: "agent-a",
+          runId: undefined,
+          ...overrides,
+        });
+      }
+
+      it("succeeds from the exact expected revision and snapshot", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        const record = store.startIfEligible(
+          "task-1",
+          revision,
+          { status: "assigned", runId: undefined, adapterId: "hall.adapter-a", agentId: "agent-a" },
+          "run-1",
+        );
+        expect(record.runId).toBe("run-1");
+        expect(record.task.status).toBe("assigned");
+      });
+
+      it("rejects a stale expectedRevision", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        // Bump the revision via an unrelated mutation without touching any
+        // of the four launch-eligibility fields.
+        store.setCancellationRequested("task-1");
+        expect(() =>
+          store.startIfEligible(
+            "task-1",
+            revision,
+            {
+              status: "assigned",
+              runId: undefined,
+              adapterId: "hall.adapter-a",
+              agentId: "agent-a",
+            },
+            "run-1",
+          ),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects a changed status", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.startIfEligible(
+            "task-1",
+            revision,
+            { status: "ready", runId: undefined, adapterId: "hall.adapter-a", agentId: "agent-a" },
+            "run-1",
+          ),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects a changed runId", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.startIfEligible(
+            "task-1",
+            revision,
+            {
+              status: "assigned",
+              runId: "some-other-run",
+              adapterId: "hall.adapter-a",
+              agentId: "agent-a",
+            },
+            "run-1",
+          ),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects a changed adapterId", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.startIfEligible(
+            "task-1",
+            revision,
+            {
+              status: "assigned",
+              runId: undefined,
+              adapterId: "hall.adapter-b",
+              agentId: "agent-a",
+            },
+            "run-1",
+          ),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects a changed agentId", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.startIfEligible(
+            "task-1",
+            revision,
+            {
+              status: "assigned",
+              runId: undefined,
+              adapterId: "hall.adapter-a",
+              agentId: "agent-b",
+            },
+            "run-1",
+          ),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects when the task already has an active run — independently re-derived from the live record, even if the expected snapshot still matches", () => {
+        const store = createStore();
+        store.add(assignedRecord({ runId: "run-existing" }));
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.startIfEligible(
+            "task-1",
+            revision,
+            {
+              status: "assigned",
+              runId: "run-existing",
+              adapterId: "hall.adapter-a",
+              agentId: "agent-a",
+            },
+            "run-2",
+          ),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects a non-assigned task", () => {
+        const store = createStore();
+        store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "ready" }) }));
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.startIfEligible(
+            "task-1",
+            revision,
+            { status: "ready", runId: undefined, adapterId: undefined, agentId: undefined },
+            "run-1",
+          ),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("increments the revision exactly once on success", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        store.startIfEligible(
+          "task-1",
+          revision,
+          { status: "assigned", runId: undefined, adapterId: "hall.adapter-a", agentId: "agent-a" },
+          "run-1",
+        );
+        expect(store.getRevision("task-1")).toBe(revision + 1);
+      });
+
+      it("a rejected/rolled-back call increments the revision by zero", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.startIfEligible(
+            "task-1",
+            revision,
+            { status: "ready", runId: undefined, adapterId: "hall.adapter-a", agentId: "agent-a" },
+            "run-1",
+          ),
+        ).toThrow();
+        expect(store.getRevision("task-1")).toBe(revision);
+      });
+
+      it("of two competing calls with the same expected snapshot, exactly one succeeds", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        const expected = {
+          status: "assigned" as const,
+          runId: undefined,
+          adapterId: "hall.adapter-a",
+          agentId: "agent-a",
+        };
+        const first = store.startIfEligible("task-1", revision, expected, "run-1");
+        expect(first.runId).toBe("run-1");
+        // Second call still carries the SAME now-stale snapshot the first
+        // call captured — the winner's own commit already moved the
+        // revision on, so this must be rejected, never last-write-wins.
+        expect(() => store.startIfEligible("task-1", revision, expected, "run-2")).toThrow(
+          TaskStateConflictError,
+        );
+      });
+
+      it("never exposes the private revision counter on the record it returns", () => {
+        const store = createStore();
+        store.add(assignedRecord());
+        const revision = store.getRevision("task-1");
+        const record = store.startIfEligible(
+          "task-1",
+          revision,
+          { status: "assigned", runId: undefined, adapterId: "hall.adapter-a", agentId: "agent-a" },
+          "run-1",
+        );
+        expect(Object.keys(record)).not.toContain("revision");
+      });
+    });
+
+    // Phase 15.2 — governed-retry reset. See
+    // `TaskStore.prepareRetryIfEligible()`'s doc comment: clears exactly the
+    // CURRENT-run terminal projection so a fresh `startTask()` can claim a
+    // new run, while `adapterId`/`agentId`/`assignedExecutionTrust` (this is
+    // a retry of the SAME assignment, not a new one) and the cumulative
+    // event-stream position (`eventCount`/`lastSequence`) are preserved.
+    describe("prepareRetryIfEligible", () => {
+      function failedRecord(overrides: Partial<TaskRecord> = {}): TaskRecord {
+        return makeRecord("task-1", {
+          task: makeTask("task-1", { status: "failed" }),
+          adapterId: "hall.adapter-a",
+          agentId: "agent-a",
+          runId: "run-failed",
+          eventCount: 3,
+          lastSequence: 2,
+          terminalEventType: "run.failed",
+          failure: { code: "TEST_FAILURE", message: "boom", retryable: true },
+          startedAt: "2026-01-01T00:00:01.000Z",
+          completedAt: "2026-01-01T00:00:02.000Z",
+          assignedExecutionTrust: "isolated",
+          ...overrides,
+        });
+      }
+
+      const expectedForFailedRecord = {
+        status: "failed",
+        runId: "run-failed",
+        adapterId: "hall.adapter-a",
+        agentId: "agent-a",
+      } as const;
+
+      it("accepts only a genuinely failed, retryable task", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        const record = store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord);
+        expect(record.task.status).toBe("assigned");
+      });
+
+      it("rejects a completed task", () => {
+        const store = createStore();
+        store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "completed" }) }));
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, {
+            status: "completed",
+            runId: undefined,
+            adapterId: undefined,
+            agentId: undefined,
+          }),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects a cancelled task", () => {
+        const store = createStore();
+        store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "cancelled" }) }));
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, {
+            status: "cancelled",
+            runId: undefined,
+            adapterId: undefined,
+            agentId: undefined,
+          }),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects a running task", () => {
+        const store = createStore();
+        store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "running" }) }));
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, {
+            status: "running",
+            runId: undefined,
+            adapterId: undefined,
+            agentId: undefined,
+          }),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects a merely-assigned (not yet run) task", () => {
+        const store = createStore();
+        store.add(makeRecord("task-1", { task: makeTask("task-1", { status: "assigned" }) }));
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, {
+            status: "assigned",
+            runId: undefined,
+            adapterId: undefined,
+            agentId: undefined,
+          }),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects a stale expectedRevision", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        store.setCancellationRequested("task-1");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects when adapterId drifted from the expected snapshot", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, {
+            ...expectedForFailedRecord,
+            adapterId: "hall.adapter-other",
+          }),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("rejects when agentId drifted from the expected snapshot", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, {
+            ...expectedForFailedRecord,
+            agentId: "agent-other",
+          }),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      // NOTE: unlike `startIfEligible`/`assignIfEligible`, this method's own
+      // `isRetryable` check is solely `status === "failed"` — it does not
+      // independently re-derive a "no active run" invariant the way the
+      // other two do (a `"failed"` task's own `runId` normally holds the ID
+      // of the run that just failed, which is expected, not an anomaly).
+      // What actually catches a live runId that no longer matches what the
+      // caller last observed is the shared four-field snapshot compare —
+      // exercised here the same way an adapterId/agentId drift is above.
+      it("rejects when the live runId no longer matches the expected snapshot (e.g. another caller's write landed first)", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, {
+            ...expectedForFailedRecord,
+            runId: "some-other-run",
+          }),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("preserves the cumulative event-stream position (eventCount/lastSequence) across a retry reset", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        const record = store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord);
+        expect(record.eventCount).toBe(3);
+        expect(record.lastSequence).toBe(2);
+      });
+
+      it("preserves adapterId/agentId/assignedExecutionTrust — this is a retry of the same assignment, not a new one", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        const record = store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord);
+        expect(record.adapterId).toBe("hall.adapter-a");
+        expect(record.agentId).toBe("agent-a");
+        expect(record.assignedExecutionTrust).toBe("isolated");
+      });
+
+      it("clears exactly the current-run terminal projection: runId, terminalEventType, failure, completedAt, startedAt — and moves status to assigned", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        const record = store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord);
+        expect(record.runId).toBeUndefined();
+        expect(record.terminalEventType).toBeUndefined();
+        expect(record.failure).toBeUndefined();
+        expect(record.completedAt).toBeUndefined();
+        expect(record.startedAt).toBeUndefined();
+        expect(record.task.status).toBe("assigned");
+      });
+
+      it("increments the revision exactly once on success", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord);
+        expect(store.getRevision("task-1")).toBe(revision + 1);
+      });
+
+      it("of two competing calls with the same stale snapshot, exactly one succeeds", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        const first = store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord);
+        expect(first.task.status).toBe("assigned");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("a repeated/duplicate request after the first already succeeded is rejected safely, not a crash", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord);
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord),
+        ).toThrow(TaskStateConflictError);
+      });
+
+      it("a rejected call leaves no partial state change: revision, status, runId, adapterId, agentId all unchanged", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        // Capture a now-stale revision, then bump it via an unrelated
+        // mutation — every field below is populated (not left at a default
+        // `undefined`), so this actually pins that no write escaped the
+        // rejected commit's guard, not just that two `undefined`s match.
+        const staleRevision = store.getRevision("task-1");
+        store.setCancellationRequested("task-1");
+        const revisionBefore = store.getRevision("task-1");
+        const before = store.get("task-1");
+        expect(() =>
+          store.prepareRetryIfEligible("task-1", staleRevision, expectedForFailedRecord),
+        ).toThrow(TaskStateConflictError);
+        expect(store.getRevision("task-1")).toBe(revisionBefore);
+        const after = store.get("task-1");
+        expect(after.task.status).toBe("failed");
+        expect(after.runId).toBe("run-failed");
+        expect(after.adapterId).toBe("hall.adapter-a");
+        expect(after.agentId).toBe("agent-a");
+        expect(after.terminalEventType).toBe(before.terminalEventType);
+        expect(after.failure).toEqual(before.failure);
+        expect(after.completedAt).toBe(before.completedAt);
+        expect(after.startedAt).toBe(before.startedAt);
+      });
+
+      it("never exposes the private revision counter on the record it returns", () => {
+        const store = createStore();
+        store.add(failedRecord());
+        const revision = store.getRevision("task-1");
+        const record = store.prepareRetryIfEligible("task-1", revision, expectedForFailedRecord);
+        expect(Object.keys(record)).not.toContain("revision");
+      });
+    });
   });
 }

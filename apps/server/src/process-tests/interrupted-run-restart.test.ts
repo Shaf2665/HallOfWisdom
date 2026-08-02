@@ -90,7 +90,12 @@ describe("a genuinely interrupted run is reconciled through the real server bina
     first.kill("SIGKILL");
     await killAndWait(first);
 
-    const { child: second } = await retryStartUntilSuccessful(args, port, 2000, 40000);
+    // See `hard-crash-restart.test.ts` — a restart that must run real
+    // crash-recovery reconciliation measurably (~2.2s, timed directly)
+    // exceeds a 2000ms per-attempt budget on this machine under load; a
+    // wider budget avoids an intermittent false failure mid-repeated-run
+    // matrix rather than a genuine regression.
+    const { child: second } = await retryStartUntilSuccessful(args, port, 6000, 60000);
     spawned.push(second);
 
     const afterRestart = (await (await fetch(`${baseUrl}/api/v1/tasks/${taskId}`)).json()) as {
@@ -107,5 +112,5 @@ describe("a genuinely interrupted run is reconciled through the real server bina
     // any further transition, but confirm no adapter process for this
     // task lingers either.
     expect(afterRestart.task.status).not.toBe("completed");
-  }, 60000);
+  }, 90000);
 });

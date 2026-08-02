@@ -22,6 +22,26 @@ import type { TaskStatus } from "@hall-of-wisdom/protocol";
  * - `ready -> assigned`: only ever applied by `TaskOrchestrator.assignTask()`,
  *   after adapter existence/availability and working-directory validation.
  *
+ * Phase 15.2 — `failed -> assigned` (governed retry) is deliberately
+ * ABSENT from this table too, not just from `MANUAL_TRANSITIONS` below:
+ * `updateStatus()`/`isValidTaskTransition()` must keep rejecting it
+ * unconditionally (see `task-store.test.ts`, "rejects restarting a
+ * terminal task" — a real, relied-upon safety property, not an
+ * oversight). The one place that edge exists at all is
+ * `TaskStore.prepareRetryIfEligible()` (via
+ * `TaskOrchestrator.prepareRetry()`), which never calls `updateStatus()`
+ * and has its own, much narrower, independently re-derived invariant
+ * (live status must be exactly `"failed"`) plus a revision + four-field
+ * ABA check — the same shape `assignIfEligible()` already uses for
+ * `ready -> assigned`, just gated by a completely different precondition
+ * a generic transition table has no way to express (it also requires
+ * `CeoPlanExecutionScheduler` to have already verified 12 further
+ * plan/attempt/circuit/classification preconditions before ever calling
+ * it). Keeping this edge out of `ALLOWED_TRANSITIONS` entirely is what
+ * makes it structurally impossible for any future caller of the generic
+ * `updateStatus()` path — including a client-facing route — to reach it
+ * by accident.
+ *
  * `reviewing` and `waiting_for_approval` have no outgoing edges anywhere
  * in this table — those columns exist in the Kanban board (Phase 7) as
  * future-workflow placeholders (see `docs/architecture/0006-kanban-board.md`,

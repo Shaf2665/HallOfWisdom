@@ -39,3 +39,30 @@ export const DUAL_FIXTURE_DURABLE_RESTART_WEB_PORT = 3096;
  */
 export const CEO_PLANS_DURABLE_RESTART_HALL_CORE_PORT = 4397;
 export const CEO_PLANS_DURABLE_RESTART_WEB_PORT = 3097;
+
+/**
+ * Phase 15.5 — the CEO plan EXECUTION (not just editing/delegation)
+ * clean-restart spec (`ceo-plan-execution-clean-restart.spec.ts`) needs
+ * genuinely-completing, deterministic adapters for its delegated child
+ * steps — the real production binary only ever registers Mock/Claude
+ * Code/Codex (see `durable-restart.spec.ts`'s own doc comment on why),
+ * none of which can be scripted to fail/hang/complete on cue the way this
+ * spec's workflow requires. So, like `dual-fixture-durable-restart.spec.ts`,
+ * this spec spawns `apps/e2e`'s own built `dist/fixture-server.js` (the
+ * real `CeoPlanExecutionScheduler`, the real durable stores, the real
+ * ownership fence — only the adapter registry differs) via
+ * `spawnDurableFixtureHallCore`, on its own dedicated port pair.
+ */
+export const CLEAN_RESTART_EXECUTION_HALL_CORE_PORT = 4398;
+export const CLEAN_RESTART_EXECUTION_WEB_PORT = 3098;
+
+/**
+ * Phase 15.5 — the unclean-restart counterpart
+ * (`ceo-plan-execution-unclean-restart.spec.ts`), on its own dedicated
+ * port pair for the same reason every durable-restart spec in this
+ * repository uses one: `workers: 1` means these specs never run
+ * concurrently, so the ports only need to be distinct, not exclusively
+ * reserved at every instant.
+ */
+export const UNCLEAN_RESTART_EXECUTION_HALL_CORE_PORT = 4399;
+export const UNCLEAN_RESTART_EXECUTION_WEB_PORT = 3099;

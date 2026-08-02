@@ -474,6 +474,29 @@ ownership loss detected at the outer boundary fails every nested `SAVEPOINT` tog
 outermost; no premature publication occurs from an inner `SAVEPOINT` alone; and four levels of
 nesting with a failure at the innermost level leaves zero partial state at any level.
 
+## Ownership fencing extended to CEO plan execution (Phase 15.1)
+
+`SqliteCeoPlanRunStore` and `SqliteExecutionSignalStore` (the durable execution scheduler's own
+stores) get the exact same fencing guarantee as every other table for free — because every one of
+their mutating methods routes through the same `withTransaction`, they need no fencing logic of
+their own. `ceo-plan-execution-ownership-fencing.test.ts` proves this directly against the
+execution surface specifically (not just the generic `withTransaction` boundary above), covering
+all 14 named execution-scheduler mutations a frozen instance must be unable to perform (configure/
+start/pause/resume/cancel a run, insert/coalesce/claim a signal, create an attempt, update step
+runtime, schedule a retry, open the circuit breaker, append an event/intervention, post a Board
+message), against both ephemeral and durable backends, plus that a rejected mutation never
+publishes to `PlanRunEventBus` (structurally guaranteed: the store write throws before any event
+object exists to publish) and that the Board-audit dedup key a rejected attempt tried to claim is
+still claimable by the legitimate new owner. The existing real-child-process frozen-owner test
+(`process-tests/frozen-owner-child.ts`/`frozen-owner-restart.test.ts`, above) was extended with a
+`MUTATE-EXECUTION` command exercising a genuine `SqliteCeoPlanRunStore.configureRun` call from the
+same frozen connection, so the execution surface is proven fenced through a real second OS process
+too, not only in-process. "Instance A cannot overwrite or remove B's lock" is proven at the
+filesystem-lock layer above (`release()` never removes a lock a later instance has since taken
+over) — `acquireDatabaseEpoch` is intentionally always-successful for whoever calls it (required
+for legitimate restart reacquisition), so there is no equivalent "cannot overwrite" guarantee at
+the database-epoch layer, nor should there be.
+
 ## Startup and shutdown ordering — `server.ts`
 
 ```
@@ -747,6 +770,27 @@ a`/`-b` — genuinely completing, deterministic, no network or provider usage, a
    containment purely from string-form mismatch, not any real escape. Fixed by canonicalizing every
    workspace/comparison root through `fs.realpathSync.native` in `fixture-server.ts` regardless of
    whether it was freshly created or externally supplied.
+
+7. **(Phase 15.5) Genuine browser-driven CEO-execution restart, both clean and unclean** —
+   `apps/e2e/tests/ceo-plan-execution-clean-restart.spec.ts` and
+   `-unclean-restart.spec.ts`, applying this same dedicated-process/dedicated-port pattern to
+   Phase 15's autonomous execution runs specifically (a delegated plan under autonomous execution,
+   not a comparison or a plain task). `fixture-server.ts` did not previously call this phase's own
+   `runRestartRecovery()` at all — `previousShutdown` was hardcoded to `"first_start"` in every
+   fixture-composition boot, so nothing could prove real crash-vs-clean classification through the
+   dual-fixture harness. Closed by a new opt-in env var, `HALL_CORE_E2E_ENABLE_RESTART_RECOVERY=1`
+   (never a CLI flag, never reachable through the production binary, matching every other
+   `fixture-server.ts` env-gated behavior described above): when set, the fixture composition calls
+   the exact same `runRestartRecovery()` production uses, strictly before
+   `reconcileAllPlanProgress()`, matching `server.ts`'s own ordering. Left unset (the default), every
+   other existing fixture-based spec keeps its prior, unaffected behavior. See
+   `docs/architecture/0015-autonomous-plan-execution-and-scheduling.md`'s "Known Phase-15
+   limitations" for what these two specs proved. Phase 15.5 found a genuine operator-recovery gap
+   this way (neither Resume nor manual "Retry step" relaunched a step an unclean restart had
+   abandoned); Phase 15.6 closed it (`CeoPlanExecutionScheduler.retryAbandonedStep()`, see that
+   document's "Explicit abandoned-step recovery" section) and extended the unclean-restart spec to
+   prove the fix through to the replacement attempt's genuine natural completion, run 5/5
+   consecutive times.
 
 ## Process-level verification — `pnpm verify:process-recovery`
 

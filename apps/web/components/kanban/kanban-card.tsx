@@ -6,6 +6,7 @@ import type { TaskStatus } from "@hall-of-wisdom/protocol";
 import { ApiClientError } from "../../lib/api-client";
 import type { TaskRecord } from "../../lib/api-schemas";
 import { availableActionsFor, canDrag, type CardAction } from "../../lib/kanban";
+import type { CeoPlanRunBadge } from "../../hooks/use-ceo-plan-run-badges";
 import { StatusBadge } from "../task-list-item";
 import { MoveMenu } from "./move-menu";
 
@@ -13,6 +14,34 @@ type LocalState = "idle" | "confirming-start" | "confirming-cancel" | "busy";
 
 function safeMessage(error: unknown): string {
   return error instanceof ApiClientError ? error.message : "The action could not be completed.";
+}
+
+/** Same bounded, exhaustive step statuses as `CeoPlanExecutionSection` — kept as a small local copy rather than a shared import since the two components render this in visually different contexts (a full section vs. a one-line card annotation). */
+const EXECUTION_STEP_STATUS_LABELS: Record<string, string> = {
+  waiting_for_dependencies: "waiting on dependencies",
+  ready: "ready",
+  queued: "queued",
+  claimed: "claimed",
+  starting: "starting",
+  running: "running",
+  retry_wait: "waiting to retry",
+  completed: "completed",
+  failed: "failed",
+  cancelled: "cancelled",
+  awaiting_intervention: "awaiting intervention",
+};
+
+function executionBadgeClass(stepStatus: string): string {
+  if (stepStatus === "failed" || stepStatus === "cancelled") {
+    return "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300";
+  }
+  if (stepStatus === "awaiting_intervention" || stepStatus === "retry_wait") {
+    return "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300";
+  }
+  if (stepStatus === "completed") {
+    return "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300";
+  }
+  return "bg-stone-200 text-stone-700 dark:bg-stone-800 dark:text-stone-300";
 }
 
 export function KanbanCard({
@@ -28,9 +57,12 @@ export function KanbanCard({
   onStart,
   onCancel,
   onOpenDiscussion,
+  executionBadge,
 }: {
   readonly record: TaskRecord;
   readonly isPending: boolean;
+  /** Set only while this task's child step belongs to a still-active (non-terminal) Phase-15 execution run — see `useCeoPlanRunBadges`. Purely an annotation; never a source of truth for `task.status` itself. */
+  readonly executionBadge?: CeoPlanRunBadge | undefined;
   /**
    * True when this task was just acted on (moved, assigned, started, or
    * cancelled) by the user, so this card instance should claim focus once
@@ -277,6 +309,16 @@ export function KanbanCard({
         </div>
       </dl>
 
+      {executionBadge ? (
+        <p className="flex flex-wrap items-center gap-1 break-words text-xs" role="status">
+          <span
+            className={`break-words rounded-full px-2 py-0.5 font-medium ${executionBadgeClass(executionBadge.stepStatus)}`}
+          >
+            {executionBadge.executionMode === "autonomous" ? "Autonomous" : "Managed"} execution:{" "}
+            {EXECUTION_STEP_STATUS_LABELS[executionBadge.stepStatus] ?? executionBadge.stepStatus}
+          </span>
+        </p>
+      ) : null}
       {record.failure ? (
         <p className="break-words text-xs text-red-700 dark:text-red-400">
           Failure: {record.failure.code}

@@ -25,6 +25,7 @@ import {
 } from "./persistence/ownership-fence-monitor.js";
 import { runRestartRecovery, type RecoverySummary } from "./recovery/restart-recovery.js";
 import { reconcileAllPlanProgress } from "./ceo-plans/ceo-plan-progress-reconciliation.js";
+import { runCeoPlanExecutionRecovery } from "./ceo-execution/ceo-plan-execution-recovery.js";
 
 const EXIT_INVALID_INPUT = 2;
 const EXIT_INTERNAL_ERROR = 3;
@@ -189,6 +190,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
   // stores a crash left inconsistent. See
   // `docs/architecture/0013-durable-persistence-and-recovery.md`.
   let recoverySummary: RecoverySummary | undefined;
+  let previousShutdown: RecoverySummary["previousShutdown"] = "first_start";
   if (db !== undefined) {
     try {
       // In durable mode with comparisons enabled, `createComparisonComposition`
@@ -219,6 +221,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
         recovery.internalPathsForRehydration,
       );
       recoverySummary = recovery.summary;
+      previousShutdown = recovery.summary.previousShutdown;
     } catch (error) {
       console.error(formatError(error));
       db.close();
@@ -236,6 +239,28 @@ export async function runServer(argv: readonly string[]): Promise<number> {
   // no-op in ephemeral mode, since a fresh in-memory start has no plans
   // to reconcile.
   reconcileAllPlanProgress(composition.ceoPlans.orchestrator);
+
+  // Phase 15 — decides what to do with every previously-configured
+  // autonomous plan run BEFORE the scheduler's task-mutation bridge is
+  // allowed to react to anything: pause on an unclean restart (no
+  // automatic retry of interrupted work), or rebuild the dependency index
+  // and revalidate-and-continue on a clean one. Must run after
+  // `runRestartRecovery` (whose own `reconcileTasks` step already mutated
+  // `taskStore` for any genuinely interrupted child task) and before
+  // `activateAutonomousScheduling()` — see both functions' doc comments.
+  // A harmless no-op in ephemeral mode (`previousShutdown` stays
+  // "first_start" and no run can already exist).
+  await runCeoPlanExecutionRecovery({
+    planRunStore: composition.ceoExecution.planRunStore,
+    signalStore: composition.ceoExecution.signalStore,
+    scheduler: composition.ceoExecution.scheduler,
+    planStore: composition.ceoPlans.planStore,
+    postBoardAudit: composition.ceoExecution.postBoardAudit,
+    previousShutdown,
+    now: new Date().toISOString(),
+    runAtomicUnit: composition.ceoExecution.runAtomicUnit,
+  });
+  composition.activateAutonomousScheduling();
 
   // Phase 13.2, kickoff §3/§10 — "health must not report ready" once this
   // instance has lost durable ownership. `readiness` is the same object
@@ -258,6 +283,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     registry: composition.registry,
     comparison: composition.comparison,
     ceoPlanOrchestrator: composition.ceoPlans.orchestrator,
+    ceoExecution: composition.ceoExecution,
     webOrigin: cliOptions.webOrigin,
     limits: DEFAULT_LIMITS,
     storageMode: db !== undefined ? "durable" : "in-memory",
@@ -307,6 +333,10 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     fenceMonitorHandle?.stop();
     void (async () => {
       try {
+        // Phase 15.3 — cancels the retry-due wake timer, if armed, so a
+        // pending `setTimeout` never holds the process open past this
+        // controlled shutdown.
+        composition.ceoExecution.scheduler.stop();
         await composition.orchestrator.shutdown(SHUTDOWN_TIMEOUT_MS);
         // Deliberately does NOT call `cleanupComparison` for every
         // comparison here: shutdown aborts active runs and preserves

@@ -229,6 +229,29 @@ and human discussion — are kept structurally distinct end to end, protocol pac
 `0007-communication-boards.md` for the full design: board list, message history, composer, scroll
 behavior, and accessibility.
 
+## CEO plan execution UI (Phase 15, Phase 15.1)
+
+`/ceo/[planId]`'s **Autonomous execution** section (`components/ceo/ceo-plan-execution-section.tsx`)
+reuses the same reconnect-with-resume WebSocket discipline described above via its own dedicated
+hook, `hooks/use-ceo-plan-run-events.ts`, on the execution-run event stream (never mixed with the
+task-events or CEO-plan-definition streams). Four operator-action dialogs
+(`ceo-plan-execution-{configure,start}-dialog.tsx`, plus a single shared
+`ceo-plan-execution-confirm-dialog.tsx` parameterized for Pause/Cancel/Emergency-stop) each carry
+their own exact, non-interchangeable confirmation copy — see `0015-...md` for why Pause, Cancel, and
+Emergency-stop must never share ambiguous text even though they share one dialog component. A
+Kanban card's own derived execution-state badge (`hooks/use-ceo-plan-run-badges.ts`) is described in
+`0006-kanban-board.md`.
+
+**A real bug found and fixed in Phase 15.1, worth calling out for future readers**: this section's
+render/refresh gate was originally `planStatus !== "delegated"` (using the parent `CeoPlan`'s own
+aggregate status) — but Phase 14's plan-progress reconciliation moves that status off `"delegated"`
+the moment every delegated child task reaches a terminal status, which can happen while a Phase 15
+execution run is still legitimately `running`/`paused`/`awaiting_intervention` (e.g. one step
+permanently failed under `pauseOnAnyPermanentFailure: false` while sibling steps continue) — making
+the entire section, including Pause/Cancel/Emergency-stop/Retry, silently disappear at exactly the
+moment an operator would need it. The gate is now `links.length === 0` (was this plan ever
+delegated, a fact that never changes once true) instead.
+
 ## Why authentication is still deferred
 
 Unchanged from `0004-hall-core-server.md`: nothing in this system is reachable from outside

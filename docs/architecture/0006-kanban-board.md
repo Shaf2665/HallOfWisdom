@@ -444,6 +444,21 @@ real, adapter-recommended CEO plan unreachable through any genuine card-driven n
 the full CEO Agent design; child tasks a delegated plan creates land back on this same board,
 `assigned` and unstarted, using the existing "Start task" action unchanged.
 
+## CEO plan execution badges (Phase 15)
+
+A card whose task is a step in an autonomously-executing CEO plan run shows a small, derived
+execution-state badge (`hooks/use-ceo-plan-run-badges.ts`) alongside — never replacing — the
+card's own existing task-status badge; the two can legitimately disagree in wording for a moment
+(e.g. a task already `completed` while its step-execution projection is still catching up) without
+either one being wrong, since they are read from two independently-updating projections of the
+same underlying task. The badge is purely a rendering concern: it never writes `TaskStatus`, never
+opens its own WebSocket (it reuses the same bounded, pause-when-hidden polling the board already
+does, doing one run/status request per visible run, not one per card), and does no full-plan
+database scan. At 390×844 the badge wraps (`flex-wrap`, `break-words`) rather than forcing the card
+wider — a real gap found and fixed in Phase 15.1, verified by a dedicated
+`kanban-board.test.tsx` test. See `0015-autonomous-plan-execution-and-scheduling.md` for the
+execution run/step lifecycle this badge reflects.
+
 ## Kanban mobile overflow containment (Phase 14.3)
 
 **The guarantee.** `/board` never produces `document`-level horizontal scroll, at any viewport

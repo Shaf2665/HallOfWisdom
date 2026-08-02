@@ -409,6 +409,90 @@ export class SqliteTaskStore implements TaskStorePort {
     });
   }
 
+  /** See `TaskStore.startIfEligible()`'s doc comment — same TOCTOU-safe launch-reservation contract, SQLite-backed. */
+  startIfEligible(
+    taskId: string,
+    expectedRevision: number,
+    expected: {
+      readonly status: TaskStatus;
+      readonly runId: string | undefined;
+      readonly adapterId: string | undefined;
+      readonly agentId: string | undefined;
+    },
+    runId: string,
+  ): TaskRecord {
+    const row = this.#mustGetRow(taskId);
+
+    const isLaunchable = row.status === "assigned" && row.run_id === null;
+    const stillMatchesExpectation =
+      row.revision === expectedRevision &&
+      row.status === expected.status &&
+      (row.run_id ?? undefined) === expected.runId &&
+      (row.adapter_id ?? undefined) === expected.adapterId &&
+      (row.agent_id ?? undefined) === expected.agentId;
+
+    if (!isLaunchable || !stillMatchesExpectation) {
+      throw new TaskStateConflictError(taskId, row.status, "started");
+    }
+
+    return withTransaction(this.#db, () => {
+      const update = this.#db
+        .prepare(
+          "UPDATE tasks SET run_id = ?, revision = revision + 1 WHERE task_id = ? AND revision = ?",
+        )
+        .run(runId, taskId, expectedRevision);
+      if (update.changes === 0) {
+        const current = this.#mustGetRow(taskId);
+        throw new TaskStateConflictError(taskId, current.status, "started");
+      }
+      return rowToTaskRecord(this.#mustGetRow(taskId));
+    });
+  }
+
+  /** See `TaskStore.prepareRetryIfEligible()`'s doc comment — same atomic governed-retry-reset contract, SQLite-backed. */
+  prepareRetryIfEligible(
+    taskId: string,
+    expectedRevision: number,
+    expected: {
+      readonly status: TaskStatus;
+      readonly runId: string | undefined;
+      readonly adapterId: string | undefined;
+      readonly agentId: string | undefined;
+    },
+  ): TaskRecord {
+    const row = this.#mustGetRow(taskId);
+
+    const isRetryable = row.status === "failed";
+    const stillMatchesExpectation =
+      row.revision === expectedRevision &&
+      row.status === expected.status &&
+      (row.run_id ?? undefined) === expected.runId &&
+      (row.adapter_id ?? undefined) === expected.adapterId &&
+      (row.agent_id ?? undefined) === expected.agentId;
+
+    if (!isRetryable || !stillMatchesExpectation) {
+      throw new TaskStateConflictError(taskId, row.status, "assigned");
+    }
+
+    const now = new Date().toISOString();
+
+    return withTransaction(this.#db, () => {
+      const update = this.#db
+        .prepare(
+          `UPDATE tasks SET status = 'assigned', run_id = NULL, terminal_event_type = NULL,
+             failure_json = NULL, completed_at = NULL, started_at = NULL, updated_at = ?,
+             revision = revision + 1
+           WHERE task_id = ? AND revision = ?`,
+        )
+        .run(now, taskId, expectedRevision);
+      if (update.changes === 0) {
+        const current = this.#mustGetRow(taskId);
+        throw new TaskStateConflictError(taskId, current.status, "assigned");
+      }
+      return rowToTaskRecord(this.#mustGetRow(taskId));
+    });
+  }
+
   #mustGetRow(taskId: string): TaskRow {
     const row = this.#db.prepare("SELECT * FROM tasks WHERE task_id = ?").get(taskId) as
       TaskRow | undefined;

@@ -1079,6 +1079,69 @@ See
 for the full design, including the remaining disclosed gaps (no automatic replanning if a step
 fails; no live in-browser multi-agent execution demonstration).
 
+## Autonomous plan execution (Phase 15, Phase 15.1)
+
+Once a CEO plan is delegated, its **Autonomous execution** section (on the same `/ceo/[planId]`
+page) offers a scheduler-driven alternative to starting each child task by hand. **Configure
+execution…** creates an execution run bound to the plan's delegated children and records a policy
+(max concurrent steps, max attempts per step, retry backoff, circuit-breaker thresholds, whether
+transient failures retry automatically, whether any permanent failure pauses the whole run) —
+configuring alone starts nothing. Execution mode defaults to **Manual** (steps still require an
+explicit per-step Start, exactly like today); switching to **Autonomous** and then **Start
+execution…** — which requires ticking "I authorize Hall to automatically start eligible child
+tasks under this execution policy" — is what actually lets the scheduler claim and start steps on
+its own, respecting each step's declared dependencies.
+
+Once running, four distinct operator controls are available, each with its own confirmation
+dialog and its own exact meaning — never ambiguous shared copy, even though they share one dialog
+component:
+
+- **Pause…** — stops Hall from starting new child tasks; tasks already running continue.
+- **Cancel future scheduling…** — prevents any further child tasks from being scheduled; tasks
+  already running are not cancelled.
+- **Emergency stop…** — pauses future scheduling first, then attempts to cancel only the child
+  tasks currently active under this run (never unrelated tasks); requires its own separate
+  confirmation checkbox and reports partial failure accurately if a cancellation attempt fails.
+- **Retry step** (per failed/awaiting-intervention step) — an explicit, idempotent, one-attempt
+  action; a genuinely re-runnable retry is still subject to the same policy limits as an automatic
+  one. **Phase 15.6 — explicit abandoned-step recovery:** a step left `awaiting_intervention`
+  because an unclean Hall Core restart abandoned it mid-flight is recovered in two explicit
+  operator steps, never automatically: first **Resume** (which re-enables scheduling and rebuilds
+  the in-memory dependency index a fresh process instance needs, but starts nothing on its own —
+  a Resume that only restarts nothing is the deliberately safe half of this fix), then **Retry
+  step** on the specific abandoned step, which revalidates full launch eligibility (adapter
+  detection, capability/execution-trust evidence, workspace, assignment) and creates exactly one
+  new attempt with a new task-run ID — the old provider process and task run are never resumed or
+  reused. Retry step rejects with a bounded, safe reason (never raw error text) if the run hasn't
+  been resumed yet, if the step's latest attempt isn't genuinely `"abandoned"`, or if the run's
+  `maxAttemptsPerStep` budget is already exhausted — **note that the abandoned attempt itself
+  counts toward that budget**, so a run configured at the protocol minimum (`maxAttemptsPerStep:
+1`) has no in-place recovery path after an unclean restart and must be cancelled and restarted
+  instead; raise it to at least 2 if in-place unclean-restart recovery matters for a given run. See
+  the architecture doc's "Explicit abandoned-step recovery" section for the full precondition list
+  and `docs/architecture/0015-security-review-matrix.md` scenario 23 for the executable proof.
+
+Live progress streams over a dedicated WebSocket
+(`GET /api/v1/ceo-plan-runs/:runId/events` — never mixed with the task-events, CEO-plan-definition,
+comparison, or Board streams), with automatic reconnect-and-resume from the last seen sequence; the
+REST surface (`POST .../configure`, `/start`, `/pause`, `/resume`, `/cancel`, `/emergency-stop`,
+`/steps/:stepId/retry`, plus `GET` list/detail/events/status) is the same path every one of those
+UI actions uses — there is no separate, UI-only mutation path. Kanban cards for a step's child task
+show a derived execution-state badge alongside (never replacing) the task's own status badge.
+
+See
+[`docs/architecture/0015-autonomous-plan-execution-and-scheduling.md`](docs/architecture/0015-autonomous-plan-execution-and-scheduling.md)
+for the full design: dependency-aware scheduling, the durable execution-signal queue, retry
+classification and circuit-breaker semantics, ownership fencing under a durable-mode restart, and
+the complete list of disclosed limitations. A correctly-classified transient failure now reaches a
+genuine, automatic second attempt once its backoff elapses (a durable self-waking timer, no manual
+nudge required), and attempt rows are closed out on every terminal path, not just start-failure —
+both fixed in earlier Phase 15 sessions. As of Phase 15.6, the unclean-restart operator-recovery
+gap described above is closed: `awaiting_intervention` steps abandoned by a crash are relaunched
+by explicit Resume-then-Retry-step, never automatically (see above). `periodic_reconciliation`
+still has no wired timer, by design — see the architecture doc for why that is not itself a
+correctness gap.
+
 ---
 
 **The remaining steps walk through assigning and starting a real Codex task — only reachable with

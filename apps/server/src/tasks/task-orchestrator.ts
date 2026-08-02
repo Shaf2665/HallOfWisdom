@@ -129,6 +129,29 @@ export class TaskOrchestrator {
    */
   readonly #pendingWorkingDirectories = new Map<string, string>();
 
+  /**
+   * Phase 15.2 — the per-task sequence offset the CURRENT run's events
+   * must be shifted by before reaching `EventStore`. Every adapter's
+   * `EventFactory` (see `@hall-of-wisdom/agent-adapter-sdk`) always
+   * starts its own sequence counter at `0` for whatever run it was
+   * given — it has no notion of "this is attempt 2, start at 2," and
+   * changing that contract would mean threading a starting offset
+   * through every adapter package, which this class deliberately does
+   * not require. Instead, `startTask()` captures
+   * `eventStore.nextSequence(taskId)` once, right before the adapter is
+   * invoked, and `#handleEvent()` adds it to every event's own
+   * adapter-local `sequence` before storing/publishing — so `EventStore`
+   * still sees one continuous, ever-increasing per-task sequence
+   * (attempt 1's events at 0..N, attempt 2's at N+1..M, ...) while the
+   * adapter itself only ever has to know how to number ITS OWN run.
+   * Absent (defaults to `0` at every read site) for a task's first-ever
+   * run, and for any run whose orchestrator instance was freshly
+   * constructed (e.g. after a restart) — `startTask()` always
+   * re-establishes it fresh before that run's first event can arrive, so
+   * a missing entry here is never itself a source of drift.
+   */
+  readonly #runSequenceBase = new Map<string, number>();
+
   constructor(options: TaskOrchestratorOptions) {
     this.#taskStore = options.taskStore;
     this.#eventStore = options.eventStore;
@@ -263,38 +286,111 @@ export class TaskOrchestrator {
   }
 
   /**
-   * Starts execution for a task already assigned via `assignTask()`.
-   * Claims `runId` synchronously (no `await` between reading the task's
-   * current state and calling `TaskStore.setRunId()`) so two concurrent
-   * `POST .../start` calls for the same task can never both begin a run —
-   * see `TaskStore.setRunId()`'s own doc comment for why this ordering is
-   * what actually closes the race, not any lock or queue.
+   * Phase 15.2 — starts execution for a task already assigned via
+   * `assignTask()`. This is the single authoritative launch boundary:
+   * every caller (manual `POST .../start`, the CEO autonomous execution
+   * scheduler, and any future caller) goes through this one method, and
+   * no provider process may start before every check below passes. It is
+   * deliberately structured exactly like `assignTask()` (see that
+   * method's doc comment) rather than the old claim-then-detect ordering,
+   * because assignment-time eligibility can silently go stale by the time
+   * a task actually launches — an adapter can go unavailable, a
+   * capability/execution-trust observation can degrade, or `requirements`
+   * can change, all while this task sat `assigned` (possibly for a long
+   * time, e.g. queued behind other autonomous work).
+   *
+   * Order of operations, matching the numbered steps in
+   * `docs/architecture/0015-autonomous-plan-execution-and-scheduling.md`,
+   * "Authoritative launch-time eligibility":
+   *
+   * 1. Load the current record and snapshot `expectedRevision` plus the
+   *    four-field ABA-detection struct (`status`/`runId`/`adapterId`/
+   *    `agentId`) — BEFORE any `await` below.
+   * 2. Resolve the assigned adapter and re-run `detect()` — the exact same
+   *    fresh capability/availability/execution-trust read `assignTask()`
+   *    performs, never a cached or assignment-time value.
+   * 3. Re-run `evaluateCandidateEligibility()` against the task's CURRENT
+   *    `requirements` (read from this same pre-`await` snapshot — any
+   *    concurrent change to `requirements` always goes through
+   *    `assignIfEligible()`, which always bumps revision, so a stale read
+   *    here is still caught by step 5's revision check) using the
+   *    just-detected capabilities/execution-trust — the identical
+   *    eligibility function routing analysis and assignment already use,
+   *    never a second, independent capability-matching algorithm.
+   * 4. Resolve the working directory (synchronous, no `await` gap before
+   *    the atomic commit).
+   * 5. Atomically commit the launch reservation via
+   *    `TaskStore.startIfEligible()`, which independently re-validates
+   *    the revision + four-field snapshot against the store's CURRENT
+   *    live state and throws `TaskStateConflictError` on any drift
+   *    (revision changed, status changed, assignment changed, another run
+   *    ID appeared) — see its own doc comment for why revision, not a
+   *    plain field compare, is what closes the ABA race.
+   * 6. Only after that commit succeeds does the adapter actually get
+   *    invoked (`#beginExecution`).
+   *
+   * Every rejection path throws one of the same, already-safe error types
+   * `assignTask()` uses (`AdapterUnavailableError`,
+   * `AdapterRequirementsMismatchError`, `TaskStateConflictError`,
+   * `WorkspaceValidationFailedError`) — never raw detection output, and
+   * never a silent fallback to a different adapter.
    */
   async startTask(taskId: string): Promise<StartTaskResult> {
-    const record = this.#taskStore.get(taskId);
-    if (record.task.status !== "assigned") {
-      throw new TaskStateConflictError(taskId, record.task.status, "started");
+    const preCheck = this.#taskStore.get(taskId);
+    const expectedRevision = this.#taskStore.getRevision(taskId);
+
+    if (preCheck.task.status !== "assigned" || preCheck.runId !== undefined) {
+      throw new TaskStateConflictError(taskId, preCheck.task.status, "started");
     }
-    if (record.runId !== undefined) {
-      throw new TaskStateConflictError(taskId, record.task.status, "started");
-    }
-    if (record.adapterId === undefined) {
+    if (preCheck.adapterId === undefined) {
       throw new InternalServerError(`Task "${taskId}" is assigned but has no adapterId recorded.`);
     }
 
-    const adapter = this.#resolveAdapter(record.adapterId);
-    const runId = randomUUID();
-    // Atomic claim — see the doc comment above and on `TaskStore.setRunId()`.
-    this.#taskStore.setRunId(taskId, runId);
-
+    const adapter = this.#resolveAdapter(preCheck.adapterId);
     const detection = await adapter.detect();
     if (detection.availability !== "available") {
-      this.#taskStore.clearRunId(taskId);
-      throw new AdapterUnavailableError(record.adapterId, detection.availability);
+      throw new AdapterUnavailableError(preCheck.adapterId, detection.availability);
+    }
+    const executionTrust: ExecutionTrust = detection.executionTrust ?? "unavailable";
+
+    if (preCheck.task.requirements !== undefined) {
+      const eligibility = evaluateCandidateEligibility(preCheck.task.requirements, {
+        adapterId: preCheck.adapterId,
+        displayName: adapter.descriptor.displayName,
+        integrationLevel: adapter.descriptor.integrationLevel,
+        availability: detection.availability,
+        executionTrust,
+        capabilityObservations: detection.capabilityObservations ?? [],
+      });
+      if (!eligibility.eligible) {
+        throw new AdapterRequirementsMismatchError();
+      }
     }
 
+    const runId = randomUUID();
     const workingDirectory =
       this.#pendingWorkingDirectories.get(taskId) ?? this.#resolveWorkingDirectory(undefined);
+
+    // Atomic commit — see TaskStore.startIfEligible()'s doc comment. No
+    // `await` occurs between this call and the eligibility checks above
+    // other than the already-completed `adapter.detect()`.
+    const record = this.#taskStore.startIfEligible(
+      taskId,
+      expectedRevision,
+      {
+        status: preCheck.task.status,
+        runId: preCheck.runId,
+        adapterId: preCheck.adapterId,
+        agentId: preCheck.agentId,
+      },
+      runId,
+    );
+
+    // Only consume the cached working directory once THIS request's start
+    // has actually been committed — a losing concurrent request (rejected
+    // by `startIfEligible` above) must never delete the winner's cached
+    // working directory. Mirrors `assignTask()`'s "only cache once
+    // committed" ordering, for consumption instead of caching.
     this.#pendingWorkingDirectories.delete(taskId);
 
     const taskInput = parseAgentTaskInput({
@@ -304,9 +400,81 @@ export class TaskOrchestrator {
       workingDirectory,
     });
 
+    // Phase 15.2 — establish this run's sequence offset BEFORE the
+    // adapter can produce a single event: see `#runSequenceBase`'s doc
+    // comment. `eventStore.nextSequence(taskId)` is exactly "how many
+    // events this task already has" — 0 for a first-ever run, or
+    // continuing past a prior attempt's events for a governed retry.
+    this.#runSequenceBase.set(taskId, this.#eventStore.nextSequence(taskId));
+
     this.#beginExecution(taskId, adapter.descriptor.adapterId, taskInput);
 
-    return { task: this.#taskStore.get(taskId).task, runId };
+    return { task: record.task, runId };
+  }
+
+  /**
+   * Phase 15.2 — prepares a genuinely terminal `"failed"` task for a
+   * governed retry: atomically resets it back to `"assigned"` and
+   * reopens its event stream so a fresh `startTask()` can claim a new
+   * run. This is deliberately the ONLY place that ever reverses a task
+   * out of a terminal status, and it is deliberately narrow — it never
+   * decides WHETHER a retry is eligible (that is entirely
+   * `CeoPlanExecutionScheduler`'s job: attempt/policy/circuit/generation/
+   * classification/run-status checks, none of which this class knows
+   * about), and it never re-runs adapter detection or eligibility itself
+   * — `startTask()` (called by the scheduler immediately after this
+   * succeeds) is the sole authority for "is this still launchable right
+   * now," exactly the same authority it is for a task's first launch.
+   * Duplicating that check here would only add an extra `await` gap
+   * between two atomic commits, reopening exactly the kind of race
+   * Section 1 closed.
+   *
+   * Synchronous — no `await` anywhere in this method — so its own
+   * TaskStore commit and the caller's surrounding checks never straddle
+   * an await gap.
+   *
+   * Two-store span, deliberately ordered: `TaskStore.
+   * prepareRetryIfEligible()` first (the rollback-covered, revision-
+   * checked commit — if this throws, nothing happened) THEN
+   * `EventStore.reopenForRetry()` second (not itself rollback-covered,
+   * but idempotent-shaped and safe to fail after: if it somehow returned
+   * `false` here despite the precondition above, the task would be left
+   * `"assigned"` with its stream still capped at the old terminal
+   * sequence — the very next `startTask()` attempt would then fail
+   * closed with a clear, bounded infrastructure error
+   * (`EventAfterTerminalError` -> `#handleEventStoreFailure`) rather than
+   * silently corrupting or duplicating anything). This mirrors the
+   * project's existing "un-rollbackable step goes last, and stays safe
+   * even if it fails" discipline.
+   *
+   * Throws `TaskStateConflictError` if the live task is not genuinely
+   * `"failed"` with no run claimed (the same error a losing concurrent
+   * caller gets — treat it as "someone else already prepared this retry
+   * or the task moved on," never a reason to retry the call).
+   */
+  prepareRetry(taskId: string): TaskRecord {
+    const preCheck = this.#taskStore.get(taskId);
+    const expectedRevision = this.#taskStore.getRevision(taskId);
+
+    if (preCheck.task.status !== "failed") {
+      throw new TaskStateConflictError(taskId, preCheck.task.status, "assigned");
+    }
+
+    const record = this.#taskStore.prepareRetryIfEligible(taskId, expectedRevision, {
+      status: preCheck.task.status,
+      runId: preCheck.runId,
+      adapterId: preCheck.adapterId,
+      agentId: preCheck.agentId,
+    });
+
+    if (preCheck.lastSequence !== undefined) {
+      const reopened = this.#eventStore.reopenForRetry(taskId, preCheck.lastSequence);
+      if (!reopened) {
+        throw new TaskStateConflictError(taskId, "failed", "assigned");
+      }
+    }
+
+    return record;
   }
 
   /**
@@ -726,7 +894,7 @@ export class TaskOrchestrator {
     });
   }
 
-  #handleEvent(taskId: string, event: NormalizedAgentEvent): void {
+  #handleEvent(taskId: string, rawEvent: NormalizedAgentEvent): void {
     const record = this.#taskStore.get(taskId);
     if (record.runId === undefined || record.agentId === undefined) {
       // Defense in depth: `#handleEvent` is only ever wired up from
@@ -736,6 +904,18 @@ export class TaskOrchestrator {
       console.error(`Received an event for task "${taskId}" with no run recorded; ignoring.`);
       return;
     }
+
+    // Phase 15.2 — translate this run's own adapter-local sequence
+    // (always 0-based per run; see `#runSequenceBase`'s doc comment)
+    // into the task's continuous, ever-increasing sequence space before
+    // it ever reaches `EventStore`. `eventId`/`type`/`payload`/etc. are
+    // untouched — only `sequence` differs from what the adapter itself
+    // produced, so a genuine redelivery of the same adapter event still
+    // maps to the same adjusted sequence and is still correctly detected
+    // as a duplicate by `EventStore.append()`.
+    const sequenceBase = this.#runSequenceBase.get(taskId) ?? 0;
+    const event: NormalizedAgentEvent =
+      sequenceBase === 0 ? rawEvent : { ...rawEvent, sequence: rawEvent.sequence + sequenceBase };
 
     let appendResult;
     try {
@@ -762,16 +942,38 @@ export class TaskOrchestrator {
         this.#taskStore.setStarted(taskId, event.timestamp);
         break;
       case "run.completed":
-        this.#taskStore.updateStatus(taskId, "completed");
+        // `setCompleted` before `updateStatus` — deliberately, not
+        // incidentally. `wrapTaskStoreWithMutationHook` notifies after
+        // EVERY status-changing call independently, and a real listener
+        // (the CEO-execution mutation-hook bridge) only forwards a
+        // notification once `isTerminalTaskStatus(record.task.status)` is
+        // true. Calling `updateStatus` first used to fire that "now
+        // terminal" notification a full call BEFORE `setCompleted` had
+        // recorded `completedAt`/`terminalEventType`/`failure` — and
+        // `onChildTaskMutated`'s own idempotency guard (never reprocess a
+        // step already resolved) then silently discarded the SECOND,
+        // fully-populated notification. For "run.failed" specifically,
+        // this made every real transient failure classify as "permanent"
+        // (`taskRecord.failure` read as `undefined`, falling back to
+        // `retryable: false`) — a real, reproducible defect found via a
+        // genuine browser-driven Playwright run, invisible to the unit
+        // test harness because it never wires this hook and only ever
+        // calls `onChildTaskMutated` once, well after both store calls
+        // have already settled. Setting the terminal fields first means
+        // that premature notification now fires while `record.task.status`
+        // is still non-terminal (correctly ignored by the bridge), and the
+        // ONE notification that matters — from `updateStatus` — arrives
+        // with every terminal field already populated.
         this.#taskStore.setCompleted(taskId, event.timestamp, "run.completed");
+        this.#taskStore.updateStatus(taskId, "completed");
         break;
       case "run.failed":
-        this.#taskStore.updateStatus(taskId, "failed");
         this.#taskStore.setCompleted(taskId, event.timestamp, "run.failed", event.payload.failure);
+        this.#taskStore.updateStatus(taskId, "failed");
         break;
       case "run.cancelled":
-        this.#taskStore.updateStatus(taskId, "cancelled");
         this.#taskStore.setCompleted(taskId, event.timestamp, "run.cancelled");
+        this.#taskStore.updateStatus(taskId, "cancelled");
         break;
       default:
         break;

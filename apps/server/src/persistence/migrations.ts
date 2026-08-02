@@ -327,12 +327,179 @@ const MIGRATION_4: Migration = {
   },
 };
 
+/**
+ * Migration 5 — Phase 15's autonomous plan execution domain. Every table
+ * here is dedicated to the execution runtime, never sharing a table with
+ * the immutable plan-definition tables migration 3 created — a run's own
+ * `plan_id`/`plan_version` are the only link back, never a foreign key
+ * into `ceo_plan_versions` that could tempt a query to also mutate plan
+ * content. `internal_revision`/lease/owner-token columns exist on several
+ * tables (mirroring `ceo_plans.revision`'s precedent: kept as a plain
+ * column, simply never selected into the public row-mapper) rather than a
+ * separate private table, since none of this data is a filesystem path —
+ * the one genuinely sensitive category Phase 13 always isolates into its
+ * own table.
+ *
+ * Two partial unique indexes enforce, at the database level (not just in
+ * application code — required so the concurrent-claim race tests actually
+ * prove something), the two "at most one" invariants the kickoff calls
+ * out by name: at most one non-terminal run per plan, and at most one
+ * non-terminal attempt per step. A third partial unique index
+ * (`idx_ceo_plan_execution_signals_coalesce`) makes duplicate-signal
+ * coalescing atomic: an INSERT that would collide with an existing
+ * *pending* signal for the same `(run_id, step-or-plan-level, generation)`
+ * key fails with a constraint violation the store layer turns into a
+ * merge (`ON CONFLICT DO UPDATE`), never a second row.
+ */
+const MIGRATION_5: Migration = {
+  version: 5,
+  description: "Phase 15: autonomous plan execution runs, signals, attempts, and events.",
+  up(db) {
+    db.exec(`
+      CREATE TABLE ceo_plan_runs (
+        run_id TEXT PRIMARY KEY,
+        plan_id TEXT NOT NULL,
+        plan_version INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        execution_mode TEXT NOT NULL,
+        policy_snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        started_at TEXT,
+        paused_at TEXT,
+        completed_at TEXT,
+        failed_at TEXT,
+        cancelled_at TEXT,
+        active_generation INTEGER NOT NULL DEFAULT 0,
+        last_scheduler_decision_at TEXT,
+        recovery_classification TEXT NOT NULL DEFAULT 'none',
+        internal_revision INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX idx_ceo_plan_runs_plan ON ceo_plan_runs (plan_id);
+      CREATE INDEX idx_ceo_plan_runs_status ON ceo_plan_runs (status);
+      -- At most one active (non-terminal) run per plan.
+      CREATE UNIQUE INDEX idx_ceo_plan_runs_one_active_per_plan
+        ON ceo_plan_runs (plan_id)
+        WHERE status NOT IN ('completed', 'failed', 'cancelled');
+
+      CREATE TABLE ceo_plan_step_executions (
+        run_id TEXT NOT NULL REFERENCES ceo_plan_runs(run_id) ON DELETE CASCADE,
+        plan_step_id TEXT NOT NULL,
+        child_task_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        active_attempt_id TEXT,
+        last_failure_code TEXT,
+        next_eligible_at TEXT,
+        dependency_summary_json TEXT NOT NULL,
+        readiness_reason TEXT NOT NULL,
+        started_at TEXT,
+        completed_at TEXT,
+        internal_revision INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (run_id, plan_step_id)
+      );
+      CREATE INDEX idx_ceo_plan_step_executions_child_task ON ceo_plan_step_executions (child_task_id);
+
+      CREATE TABLE ceo_plan_step_attempts (
+        attempt_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES ceo_plan_runs(run_id) ON DELETE CASCADE,
+        plan_step_id TEXT NOT NULL,
+        child_task_id TEXT NOT NULL,
+        attempt_number INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        trigger_reason TEXT NOT NULL,
+        scheduler_signal_id TEXT NOT NULL,
+        task_run_id TEXT,
+        safe_failure_code TEXT,
+        safe_failure_summary TEXT,
+        created_at TEXT NOT NULL,
+        claimed_at TEXT,
+        started_at TEXT,
+        finished_at TEXT,
+        lease_generation INTEGER NOT NULL DEFAULT 0,
+        owner_token TEXT NOT NULL,
+        UNIQUE (run_id, plan_step_id, attempt_number)
+      );
+      -- At most one active (non-terminal) attempt per step.
+      CREATE UNIQUE INDEX idx_ceo_plan_step_attempts_one_active
+        ON ceo_plan_step_attempts (run_id, plan_step_id)
+        WHERE status NOT IN ('completed', 'failed', 'cancelled', 'abandoned');
+
+      CREATE TABLE ceo_plan_execution_signals (
+        signal_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES ceo_plan_runs(run_id) ON DELETE CASCADE,
+        plan_step_id TEXT,
+        generation INTEGER NOT NULL,
+        reasons_json TEXT NOT NULL,
+        priority TEXT NOT NULL,
+        available_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        state TEXT NOT NULL,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        claim_lease TEXT,
+        claim_owner_token TEXT,
+        claim_expires_at TEXT,
+        internal_revision INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE INDEX idx_ceo_plan_execution_signals_claimable
+        ON ceo_plan_execution_signals (state, available_at, priority);
+      -- Coalescing key: only one *pending* signal per (run, step-or-plan-level, generation).
+      CREATE UNIQUE INDEX idx_ceo_plan_execution_signals_coalesce
+        ON ceo_plan_execution_signals (run_id, COALESCE(plan_step_id, ''), generation)
+        WHERE state = 'pending';
+
+      CREATE TABLE ceo_plan_execution_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id TEXT NOT NULL REFERENCES ceo_plan_runs(run_id) ON DELETE CASCADE,
+        sequence INTEGER NOT NULL,
+        event_type TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE (run_id, sequence)
+      );
+
+      CREATE TABLE ceo_plan_execution_circuit_state (
+        run_id TEXT PRIMARY KEY REFERENCES ceo_plan_runs(run_id) ON DELETE CASCADE,
+        state TEXT NOT NULL DEFAULT 'closed',
+        trip_reason TEXT,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        consecutive_same_code_failures INTEGER NOT NULL DEFAULT 0,
+        last_failure_code TEXT,
+        no_progress_attempts INTEGER NOT NULL DEFAULT 0,
+        tripped_at TEXT,
+        tripped_step_id TEXT,
+        internal_revision INTEGER NOT NULL DEFAULT 0
+      );
+
+      CREATE TABLE ceo_plan_execution_interventions (
+        intervention_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES ceo_plan_runs(run_id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        actor TEXT NOT NULL,
+        note TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_ceo_plan_execution_interventions_run ON ceo_plan_execution_interventions (run_id);
+
+      -- Board-summary deduplication: one row per (run, summary kind) ever posted.
+      CREATE TABLE ceo_plan_execution_board_audit (
+        run_id TEXT NOT NULL REFERENCES ceo_plan_runs(run_id) ON DELETE CASCADE,
+        dedup_key TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (run_id, dedup_key)
+      );
+    `);
+  },
+};
+
 /** Ordered by `version`, ascending — `migration-runner.ts` applies whichever ones a given database hasn't recorded yet, one transaction each. */
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
   MIGRATION_2,
   MIGRATION_3,
   MIGRATION_4,
+  MIGRATION_5,
 ];
 
 export const HIGHEST_KNOWN_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

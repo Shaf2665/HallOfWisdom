@@ -8,22 +8,36 @@ import {
   createComparisonComposition,
   createCoreStoresComposition,
   createCeoPlanComposition,
+  createCeoPlanExecutionComposition,
+  runCeoPlanExecutionRecovery,
+  runRestartRecovery,
+  type RecoverySummary,
   reconcileAllPlanProgress,
   resolveDataDir,
   openDurableStorage,
   startOwnershipFenceMonitor,
   installShutdownSignals,
   recordCleanShutdown,
+  isTerminalTaskStatus,
   DEFAULT_LIMITS,
   LOCAL_ONLY_HOST,
   DATABASE_BUSY_TIMEOUT_MS,
   type CeoPlanOrchestrator,
+  type CeoPlanExecutionComposition,
   type ComparisonComposition,
   type HallDatabase,
   type OwnershipFenceMonitorHandle,
 } from "@hall-of-wisdom/hall-core";
 import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
-import { createAllFixtureAdapters, createFixtureComparisonAdapter } from "./fixture-adapters.js";
+import {
+  createAllFixtureAdapters,
+  createFixtureComparisonAdapter,
+  createCeoExecutionSuccessAdapter,
+  createCeoExecutionTransientFailureAdapter,
+  createCeoExecutionTransientThenSuccessAdapter,
+  createCeoExecutionPermanentFailureAdapter,
+  createCeoExecutionCancellableAdapter,
+} from "./fixture-adapters.js";
 import { E2E_SOURCE_REPO_RELATIVE_DIR } from "./fixture-constants.js";
 
 function git(args: readonly string[], cwd: string): void {
@@ -165,6 +179,16 @@ async function main(): Promise<void> {
       fileContent: "output from candidate B\n",
     }),
   );
+  // Phase 15.1 — new, dedicated adapter ids only (never
+  // "hall.mock-agent" itself, whose fixture registration above must keep
+  // rejecting every `startTask()` unchanged for every routing/assignment/
+  // planning spec) — see `fixture-adapters.ts`'s own doc comment on
+  // `withAdapterId`.
+  registry.register(createCeoExecutionSuccessAdapter());
+  registry.register(createCeoExecutionTransientFailureAdapter());
+  registry.register(createCeoExecutionTransientThenSuccessAdapter());
+  registry.register(createCeoExecutionPermanentFailureAdapter());
+  registry.register(createCeoExecutionCancellableAdapter());
 
   let db: HallDatabase | undefined;
   let fenceMonitorHandle: OwnershipFenceMonitorHandle | undefined;
@@ -199,6 +223,17 @@ async function main(): Promise<void> {
   // exist until `ceoPlans` is built below — see that function's own
   // comment for why the ref must be captured this way.
   const ceoOrchestratorRef: { current: CeoPlanOrchestrator | undefined } = { current: undefined };
+  // Phase 15 — same ref pattern for the execution scheduler. Wired
+  // immediately (not deferred behind an `activateAutonomousScheduling()`
+  // call the way `server.ts` does it) because THIS composition never
+  // calls Phase 13's `runRestartRecovery`/`reconcileTasks` at all (see
+  // the rehydration comment below) — the exact ordering hazard that
+  // deferral protects against in production (a task-level reconciliation
+  // pass mutating `taskStore` before Phase 15's own recovery has decided
+  // what to do with each run) cannot occur here.
+  const schedulerRef: { current: CeoPlanExecutionComposition["scheduler"] | undefined } = {
+    current: undefined,
+  };
   const stores = createCoreStoresComposition({
     registry,
     workspaceRoot,
@@ -209,6 +244,20 @@ async function main(): Promise<void> {
     db,
     onTaskMutated: (taskId) => {
       ceoOrchestratorRef.current?.onChildTaskMutated(taskId);
+      const scheduler = schedulerRef.current;
+      if (scheduler === undefined) return;
+      let record;
+      try {
+        record = stores.taskStore.get(taskId);
+      } catch {
+        return;
+      }
+      if (isTerminalTaskStatus(record.task.status)) {
+        scheduler.onChildTaskMutated(taskId).catch(() => {
+          // Best-effort bridge — see production's identical comment in
+          // `mock-agent-composition-root.ts`.
+        });
+      }
     },
   });
 
@@ -227,13 +276,81 @@ async function main(): Promise<void> {
     db,
   });
   ceoOrchestratorRef.current = ceoPlans.orchestrator;
+
+  // Phase 15.5 — `HALL_CORE_E2E_ENABLE_RESTART_RECOVERY` opts a single
+  // spec (`ceo-plan-execution-unclean-restart.spec.ts`) into the real
+  // Phase 13 crash-vs-clean classification (`runRestartRecovery`) instead
+  // of the hardcoded `"first_start"` every other fixture-composition spec
+  // relies on — those specs' own graceful stop-then-restart flow never
+  // leaves anything genuinely interrupted, so running the real
+  // classification for them would be a safe no-op, but opting in
+  // explicitly keeps every existing spec's behavior byte-for-byte
+  // unchanged. Comparison recovery is deliberately left out of this call
+  // (`comparison: undefined`) — this composition's own separate worktree
+  // rehydration below already covers it, and no spec exercising this flag
+  // touches comparisons. Run BEFORE `reconcileAllPlanProgress`, matching
+  // production's exact ordering (`server.ts`) — `runRestartRecovery`'s own
+  // `reconcileTasks` step may mark a genuinely-crashed task `failed`, and
+  // plan-progress reconciliation must see that already-updated status, not
+  // the stale pre-crash one.
+  let previousShutdown: "first_start" | "clean" | "unclean" = "first_start";
+  let recoverySummary: RecoverySummary | undefined;
+  if (durable && db !== undefined && process.env.HALL_CORE_E2E_ENABLE_RESTART_RECOVERY === "1") {
+    const recovery = await runRestartRecovery({
+      db,
+      bootId,
+      startedAt: new Date().toISOString(),
+      workspaceRoot,
+      comparisonRoot,
+      taskStore: stores.taskStore,
+      taskEventStore: stores.eventStore,
+      comparison: undefined,
+    });
+    previousShutdown = recovery.summary.previousShutdown;
+    recoverySummary = recovery.summary;
+  }
+
   // Phase 14.1 — idempotent backstop for the (rare, fixture-only) case of
   // a plan whose children finished progress-hook-invisibly before this
-  // composition was built — see `reconcileAllPlanProgress`'s doc
-  // comment. This fixture composition does not run the full
-  // `runRestartRecovery` pass (see the rehydration comment below), so
-  // this is the closest equivalent it has.
+  // composition was built — see `reconcileAllPlanProgress`'s doc comment.
+  // Also covers the real restart-recovery path above: a task the crash
+  // reconciliation just marked `failed` needs its owning plan's progress
+  // re-synchronized too.
   reconcileAllPlanProgress(ceoPlans.orchestrator);
+
+  // Phase 15 — identical to production's `createCeoPlanExecutionComposition`
+  // call, reusing the same stores/db.
+  const ceoExecution = createCeoPlanExecutionComposition({
+    taskStore: stores.taskStore,
+    taskOrchestrator: stores.orchestrator,
+    boardStore: stores.boardStore,
+    messageStore: stores.messageStore,
+    planStore: ceoPlans.planStore,
+    db,
+  });
+
+  await runCeoPlanExecutionRecovery({
+    planRunStore: ceoExecution.planRunStore,
+    signalStore: ceoExecution.signalStore,
+    scheduler: ceoExecution.scheduler,
+    planStore: ceoPlans.planStore,
+    postBoardAudit: ceoExecution.postBoardAudit,
+    previousShutdown,
+    now: new Date().toISOString(),
+    runAtomicUnit: ceoExecution.runAtomicUnit,
+  });
+  schedulerRef.current = ceoExecution.scheduler;
+  // Phase 15.5 — matches production's `activateAutonomousScheduling()`
+  // (`mock-agent-composition-root.ts`), called unconditionally on every
+  // boot, restart or not: arms the single retry-due wake timer from
+  // whatever is already durably pending (`#rearmWakeTimer` queries the
+  // signal store directly). Never called before this session — a genuine
+  // gap in this fixture-only file, not `server.ts` itself — meaning a
+  // step already parked in `retry_wait` before a restart would never
+  // resume on its own against a freshly constructed scheduler instance,
+  // since only a *live* signal insertion (not a durable one predating
+  // this process) re-arms the timer otherwise.
+  ceoExecution.scheduler.start();
 
   const comparison: ComparisonComposition = createComparisonComposition({
     registry,
@@ -286,10 +403,12 @@ async function main(): Promise<void> {
     registry,
     comparison,
     ceoPlanOrchestrator: ceoPlans.orchestrator,
+    ceoExecution,
     webOrigin,
     limits,
     storageMode: durable ? "durable" : "in-memory",
     readiness,
+    recoverySummary,
   });
 
   await app.listen({ port, host: LOCAL_ONLY_HOST });

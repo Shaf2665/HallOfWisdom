@@ -23,6 +23,7 @@ import {
 } from "../../lib/api-client";
 import type { AgentComparisonRecord, CreateTaskResponse, TaskRecord } from "../../lib/api-schemas";
 import { useKanbanTasks } from "../../hooks/use-kanban-tasks";
+import { useCeoPlanRunBadges } from "../../hooks/use-ceo-plan-run-badges";
 import {
   COLUMN_DEFINITIONS,
   DEFAULT_KANBAN_FILTERS,
@@ -73,6 +74,7 @@ function usePrefersReducedMotion(): boolean {
 export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
   const router = useRouter();
   const { tasks, state, warning, refresh } = useKanbanTasks(baseUrl);
+  const executionBadges = useCeoPlanRunBadges(baseUrl);
   const [filters, setFilters] = useState<KanbanFilters>(DEFAULT_KANBAN_FILTERS);
   const [pendingTaskIds, setPendingTaskIds] = useState<ReadonlySet<string>>(new Set());
   const [assigningRecord, setAssigningRecord] = useState<TaskRecord | null>(null);
@@ -391,6 +393,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
                 }
                 isPending={isPending}
                 lastActedOnTaskId={lastActedOnTaskId}
+                executionBadges={executionBadges}
                 onFocusHandled={handleFocusHandled}
                 onMove={handleMove}
                 onOpenAssign={setAssigningRecord}

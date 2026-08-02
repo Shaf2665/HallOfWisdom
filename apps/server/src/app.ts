@@ -14,6 +14,8 @@ import { registerComparisonRoutes } from "./routes/comparisons.js";
 import { registerComparisonCandidateEventsRoute } from "./routes/comparison-candidate-events.js";
 import { registerSystemStorageRoute } from "./routes/system.js";
 import { registerCeoPlanRoutes, registerCeoPlanEventsRoute } from "./routes/ceo-plans.js";
+import { registerCeoPlanRunRoutes, registerCeoPlanRunEventsRoute } from "./routes/ceo-plan-runs.js";
+import type { CeoPlanExecutionComposition } from "./ceo-execution/ceo-plan-execution-composition.js";
 import type { RecoverySummary } from "./recovery/restart-recovery.js";
 import type { ComparisonComposition } from "./composition/comparison-composition-root.js";
 import type { CeoPlanOrchestrator } from "./ceo-plans/ceo-plan-orchestrator.js";
@@ -40,6 +42,8 @@ export interface CreateHallCoreAppOptions {
   readonly comparison?: ComparisonComposition | undefined;
   /** Phase 14 — always present (see `ServerComposition.ceoPlans`'s doc comment). */
   readonly ceoPlanOrchestrator: CeoPlanOrchestrator;
+  /** Phase 15 — always present (see `ServerComposition.ceoExecution`'s doc comment). */
+  readonly ceoExecution: CeoPlanExecutionComposition;
   /** The single browser origin allowed by CORS and WebSocket Origin validation. */
   readonly webOrigin?: string | undefined;
   /** Passed straight through to Fastify's `logger` option; pass `false` in tests to keep output quiet. */
@@ -152,6 +156,16 @@ export async function createHallCoreApp(
   registerCeoPlanEventsRoute(
     app,
     { orchestrator: options.ceoPlanOrchestrator },
+    { allowedOrigin: webOrigin },
+  );
+
+  registerCeoPlanRunRoutes(app, {
+    ceoPlanOrchestrator: options.ceoPlanOrchestrator,
+    ceoExecution: options.ceoExecution,
+  });
+  registerCeoPlanRunEventsRoute(
+    app,
+    { ceoPlanOrchestrator: options.ceoPlanOrchestrator, ceoExecution: options.ceoExecution },
     { allowedOrigin: webOrigin },
   );
 

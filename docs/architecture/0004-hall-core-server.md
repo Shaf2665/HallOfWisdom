@@ -173,6 +173,21 @@ request directly through `POST /transition` — never `running`, `reviewing`,
 attempt to leave a terminal status (`completed`/`failed`/`cancelled`) — there is no "restart"
 operation in this phase.
 
+**Terminal-case write ordering (Phase 15.1 fix)**: `TaskOrchestrator#handleEvent`'s three terminal
+cases (`run.completed`/`run.failed`/`run.cancelled`) each make two separate `taskStore` calls —
+one to record the terminal fields (`completedAt`/`terminalEventType`/`failure`, via `setCompleted`)
+and one to transition `status` itself (via `updateStatus`). Any listener wired through
+`task-mutation-hook.ts`'s `wrapTaskStoreWithMutationHook` (currently: the CEO-plan
+`onChildTaskMutated` bridges) is notified after _each_ call independently. `setCompleted` is
+called first, deliberately: a listener gated on `isTerminalTaskStatus(record.task.status)` (as the
+Phase 15 execution scheduler's bridge is) only reacts to the _second_ call either way, but calling
+`setCompleted` first means that by the time it does, every terminal field is already populated —
+no listener can ever observe `status === "failed"` with `.failure` still `undefined`. Getting this
+backwards previously caused a real, silent defect: a genuinely transient failure was classified
+permanent because the terminal-status notification fired one call too early — see
+`docs/architecture/0015-...md`, "Known Phase-15 limitations," for the full story and its own
+downstream consequence.
+
 ## In-memory storage limitations
 
 `TaskStore` and `EventStore` are both bounded (`config/server-config.ts`'s `DEFAULT_LIMITS`):
@@ -423,6 +438,37 @@ established by `routes/task-events.ts` above, with one structural difference: a 
 has no terminal state, so this route never self-closes a healthy connection the way a task's event
 stream closes on `run.completed`/`run.failed`/`run.cancelled` — it stays open until the client
 disconnects, the server shuts down, or a policy violation closes it.
+
+## CEO plan execution endpoints (Phase 15, Phase 15.1)
+
+A dependency-aware scheduler for already-delegated CEO plan child tasks — a separate REST + WebSocket
+surface (`routes/ceo-plan-runs.ts`) from both the task-events API and the CEO-plan-definition API
+above (separate stores, separate event stream, separate sequence space, never mixed with any other
+stream). Manual mode (the default) leaves every step requiring an explicit per-step start, exactly
+like today; autonomous mode lets the scheduler claim and start eligible steps on its own, under an
+operator-recorded policy. See `0015-autonomous-plan-execution-and-scheduling.md` for the full design
+— summarized here as a contract reference:
+
+| Endpoint                                         | Purpose                                                                 | Success | Key failure codes                                                                   |
+| ------------------------------------------------ | ----------------------------------------------------------------------- | ------- | ----------------------------------------------------------------------------------- |
+| `POST /ceo-plans/:planId/execution/configure`    | Create a run bound to the plan's delegated children; starts nothing     | `201`   | `CEO_PLAN_NOT_FOUND` (404), plan not `delegated` (409)                              |
+| `GET /ceo-plan-runs`                             | List runs                                                               | `200`   | —                                                                                   |
+| `GET /ceo-plan-runs/:runId`                      | Run detail (steps, attempts, circuit state, interventions)              | `200`   | `CEO_PLAN_RUN_NOT_FOUND` (404)                                                      |
+| `GET /ceo-plan-runs/:runId/events`               | REST replay, optionally after a sequence                                | `200`   | `CEO_PLAN_RUN_NOT_FOUND` (404)                                                      |
+| `GET /ceo-plan-runs/:runId/events/live`          | WebSocket: replay then live stream                                      | `101`   | origin/not-found/policy close codes, same discipline as the task-events route above |
+| `GET /ceo-plan-runs/:runId/scheduler-status`     | Bounded, safe scheduler snapshot (queue depths, active attempt count)   | `200`   | `CEO_PLAN_RUN_NOT_FOUND` (404)                                                      |
+| `POST /ceo-plan-runs/:runId/start`               | Begin autonomous scheduling                                             | `200`   | wrong run status (409), stale mutation token (409)                                  |
+| `POST /ceo-plan-runs/:runId/pause`               | Stop future scheduling; running tasks continue                          | `200`   | same as above                                                                       |
+| `POST /ceo-plan-runs/:runId/resume`              | Resume scheduling                                                       | `200`   | same as above                                                                       |
+| `POST /ceo-plan-runs/:runId/cancel`              | Prevent further scheduling; running tasks left alone                    | `200`   | same as above                                                                       |
+| `POST /ceo-plan-runs/:runId/emergency-stop`      | Pause, then attempt cancellation of only this run's active linked tasks | `202`   | same as above                                                                       |
+| `POST /ceo-plan-runs/:runId/steps/:stepId/retry` | Explicit, idempotent manual retry of one step                           | `200`   | step not retry-eligible (409)                                                       |
+
+Every mutating route requires the same opaque per-run mutation token the CEO-plan-definition routes
+use, and no route ever accepts an actor identity from the request body — every event this file
+appends uses the fixed `"human:local-operator"` actor. No route ever inserts or claims an execution
+signal directly; only the scheduler itself does, strictly after a triggering write has committed
+(publish-after-commit — see the WebSocket delivery guarantee above, which this stream also follows).
 
 ## Graceful shutdown
 

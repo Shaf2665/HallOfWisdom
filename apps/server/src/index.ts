@@ -130,6 +130,21 @@ export type {
 } from "./persistence/ownership-fence-monitor.js";
 export { recordCleanShutdown } from "./persistence/boot-repository.js";
 export { PersistenceError } from "./persistence/persistence-errors.js";
+
+// Phase 15.5 — Phase 13's own crash-vs-clean restart classification,
+// exported for the same reason every other item in this section is: the
+// E2E fixture composition's unclean-restart spec needs to prove real
+// interrupted-run recovery (the actual `PreviousShutdownKind` detection
+// `server.ts` itself relies on), not a parallel reimplementation of it or
+// a hardcoded stand-in.
+export { runRestartRecovery } from "./recovery/restart-recovery.js";
+export type {
+  PreviousShutdownKind,
+  RecoverySummary,
+  RestartRecoveryComparisonInput,
+  RestartRecoveryInput,
+  RestartRecoveryResult,
+} from "./recovery/restart-recovery.js";
 export { installShutdownSignals, STDIN_SHUTDOWN_COMMAND } from "./process/signal-shutdown.js";
 export type { SignalShutdownHandle, SignalShutdownHandlers } from "./process/signal-shutdown.js";
 export { DATABASE_BUSY_TIMEOUT_MS } from "./config/server-config.js";
@@ -158,3 +173,20 @@ export type { CeoPlanOrchestratorOptions } from "./ceo-plans/ceo-plan-orchestrat
 // export — `createCoreStoresComposition`'s new `onTaskMutated` option
 // applies it internally; every composition root just passes a callback.)
 export { reconcileAllPlanProgress } from "./ceo-plans/ceo-plan-progress-reconciliation.js";
+
+// Phase 15 — the autonomous execution control plane, exported so the E2E
+// fixture composition can wire it in identically to production
+// (`server.ts`): build via `createCeoPlanExecutionComposition`, run
+// `runCeoPlanExecutionRecovery` strictly after restart recovery, and only
+// then arm the task-mutation bridge — never a parallel reimplementation
+// of any of those three steps.
+export { createCeoPlanExecutionComposition } from "./ceo-execution/ceo-plan-execution-composition.js";
+export type {
+  CeoPlanExecutionComposition,
+  CeoPlanExecutionCompositionOptions,
+} from "./ceo-execution/ceo-plan-execution-composition.js";
+export { runCeoPlanExecutionRecovery } from "./ceo-execution/ceo-plan-execution-recovery.js";
+export type {
+  CeoPlanExecutionRecoveryInput,
+  CeoPlanExecutionRecoverySummary,
+} from "./ceo-execution/ceo-plan-execution-recovery.js";

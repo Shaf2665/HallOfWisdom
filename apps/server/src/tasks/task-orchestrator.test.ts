@@ -21,6 +21,10 @@ import {
   WorkspaceValidationFailedError,
 } from "../errors/app-error.js";
 import { validCreateTaskBody, waitUntil } from "../test-support.js";
+import { HallDatabase } from "../persistence/database.js";
+import { runMigrations } from "../persistence/migration-runner.js";
+import { SqliteTaskStore } from "./sqlite-task-store.js";
+import { SqliteEventStore } from "../events/sqlite-event-store.js";
 
 /**
  * A deliberately non-cooperative fake adapter: its generator never checks
@@ -674,5 +678,108 @@ describe("TaskOrchestrator event-capacity failure", () => {
     const record = taskStore.get(task.taskId);
     expect(record.task.status).toBe("failed");
     expect(record.failure?.code).toBe("EVENT_CAPACITY_REACHED");
+  });
+});
+
+describe("TaskOrchestrator — governed retry across a simulated restart (Phase 15.2)", () => {
+  let tempRoot: string;
+  const openDbs: HallDatabase[] = [];
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hall-core-orchestrator-retry-restart-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+    for (const db of openDbs.splice(0)) db.close();
+  });
+
+  it("a fresh TaskOrchestrator instance (simulating a durable restart) still computes the correct event-sequence offset for a governed retry — no EVENT_SEQUENCE_CONFLICT", async () => {
+    // `TaskOrchestrator#runSequenceBase` (the offset that lets a second
+    // run's adapter-local, 0-based event sequence continue a task's
+    // cumulative sequence space) is in-memory only — freshly reconstructed
+    // on every process boot. This test proves that's safe by constructing
+    // TWO separate `TaskOrchestrator` instances (fresh `#runSequenceBase`,
+    // fresh `#pendingWorkingDirectories`, fresh `#activeControllers` —
+    // exactly what a real process restart produces) sharing the SAME
+    // durable `SqliteTaskStore`/`SqliteEventStore` backed by one SQLite
+    // database, exactly as `server.ts` would after a real restart:
+    // `startTask()` always re-derives the offset fresh from
+    // `eventStore.nextSequence(taskId)`, which reads the PERSISTED table,
+    // so a governed retry triggered by the SECOND instance still gets the
+    // correct offset — never colliding at sequence 0 with attempt 1's
+    // already-persisted events.
+    const db = HallDatabase.openInMemory();
+    runMigrations(db);
+    openDbs.push(db);
+
+    const taskStore = new SqliteTaskStore({ db, maxTasks: 100 });
+    const eventStore = new SqliteEventStore({ db, streamKind: "task", maxEventsPerStream: 1000 });
+    const eventBus = new EventBus({ maxSubscribersPerTask: 20 });
+
+    const registryBefore = new AgentRegistry();
+    registryBefore.register(
+      new MockAgentAdapter({ scenario: "failure", stepDelayMs: 0, failureRetryable: true }),
+    );
+    const before = new TaskOrchestrator({
+      taskStore,
+      eventStore,
+      eventBus,
+      registry: registryBefore,
+      workspaceRoot: tempRoot,
+    });
+
+    const { task } = before.createTask({
+      executionMode: "deferred",
+      projectId: "project-1",
+      title: "Task that fails once, then retries after a restart",
+    });
+    // Deferred tasks start "backlog" — move to "ready" before assigning,
+    // exactly like the manual planning-transition route would.
+    taskStore.updateStatus(task.taskId, "ready");
+    await before.assignTask(task.taskId, { adapterId: "hall.mock-agent" });
+    await before.startTask(task.taskId);
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "failed");
+
+    const eventsBeforeRestart = eventStore.list(task.taskId);
+    expect(eventsBeforeRestart.length).toBeGreaterThan(0);
+    const firstRunId = eventsBeforeRestart[0]?.runId;
+    expect(firstRunId).toBeDefined();
+
+    // Simulate the restart boundary: a brand-new orchestrator instance,
+    // registered with a NEW (successful) adapter instance under the same
+    // adapter id, sharing nothing in-process with `before`.
+    const registryAfter = new AgentRegistry();
+    registryAfter.register(new MockAgentAdapter({ scenario: "success", stepDelayMs: 0 }));
+    const after = new TaskOrchestrator({
+      taskStore,
+      eventStore,
+      eventBus,
+      registry: registryAfter,
+      workspaceRoot: tempRoot,
+    });
+
+    const prepared = after.prepareRetry(task.taskId);
+    expect(prepared.task.status).toBe("assigned");
+    expect(prepared.runId).toBeUndefined();
+
+    const started = await after.startTask(task.taskId);
+    expect(started.runId).not.toBe(firstRunId);
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "completed");
+    const finalRecord = taskStore.get(task.taskId);
+    // Never the synthetic infrastructure-failure path
+    // (`EVENT_SEQUENCE_CONFLICT` would drive this to `"failed"` instead).
+    expect(finalRecord.terminalEventType).toBe("run.completed");
+
+    const eventsAfterRetry = eventStore.list(task.taskId);
+    const sequences = eventsAfterRetry.map((e) => e.sequence);
+    // Strictly increasing from 0, no gaps, no duplicates — a genuinely
+    // continuous per-task sequence even across the simulated restart.
+    expect(sequences).toEqual(sequences.map((_, i) => i));
+    expect(eventsAfterRetry.length).toBeGreaterThan(eventsBeforeRestart.length);
+    // Attempt 1's own events remain in history, byte-identical, at the
+    // front — never rewritten or renumbered by the retry.
+    expect(eventsAfterRetry.slice(0, eventsBeforeRestart.length)).toEqual(eventsBeforeRestart);
   });
 });

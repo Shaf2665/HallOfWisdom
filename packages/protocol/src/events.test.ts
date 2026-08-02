@@ -40,6 +40,45 @@ describe("normalized agent events", () => {
     expect(normalizedAgentEventSchema.safeParse(event).success).toBe(true);
   });
 
+  it("Phase 15.7 — security matrix scenario 29: a message.delta event carrying any unsupported reasoning-shaped field (reasoning, chainOfThought, hiddenReasoning, internalThought, scratchpad) at the payload level is rejected outright by the strict schema, never silently accepted with the field stripped", () => {
+    const forbiddenFieldNames = [
+      "reasoning",
+      "chainOfThought",
+      "hiddenReasoning",
+      "internalThought",
+      "scratchpad",
+    ];
+    for (const fieldName of forbiddenFieldNames) {
+      const event = {
+        ...envelope,
+        type: "message.delta" as const,
+        payload: { text: "Reading package.json...", [fieldName]: "synthetic fixture value" },
+      };
+      const result = messageDeltaEventSchema.safeParse(event);
+      expect(result.success).toBe(false);
+      expect(normalizedAgentEventSchema.safeParse(event).success).toBe(false);
+    }
+  });
+
+  it("Phase 15.7 — security matrix scenario 29: the same five unsupported reasoning-shaped fields are rejected at the event ENVELOPE level too, not only inside payload", () => {
+    const forbiddenFieldNames = [
+      "reasoning",
+      "chainOfThought",
+      "hiddenReasoning",
+      "internalThought",
+      "scratchpad",
+    ];
+    for (const fieldName of forbiddenFieldNames) {
+      const event = {
+        ...envelope,
+        type: "message.delta" as const,
+        payload: { text: "Reading package.json..." },
+        [fieldName]: "synthetic fixture value",
+      };
+      expect(normalizedAgentEventSchema.safeParse(event).success).toBe(false);
+    }
+  });
+
   it("accepts a tool.started event", () => {
     const event = {
       ...envelope,

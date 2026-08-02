@@ -18,6 +18,7 @@
     "@hall-of-wisdom/agent-adapter-sdk": "workspace:*",
     "@hall-of-wisdom/hall-core": "workspace:*",
     "@hall-of-wisdom/hall-runner": "workspace:*",
+    "@hall-of-wisdom/mock-agent": "workspace:*",
     "@hall-of-wisdom/protocol": "workspace:*"
   },
   "devDependencies": {
