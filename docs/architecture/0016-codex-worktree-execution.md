@@ -1,11 +1,14 @@
 # 0016 — Durable Isolated Codex Execution
 
-Status: Phase 16.1 foundation implemented. Codex does **not** use these worktrees yet.
+Status: Phase 16.2 foundation implemented. Codex does **not** use these worktrees or execution
+artifacts yet.
 
 Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 builds
 only the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and
 SQLite stores, a narrow Git command runner, and a manager that can create and explicitly clean up a
-detached worktree by internal worktree id.
+detached worktree by internal worktree id. Phase 16.2 adds a provider-neutral, bounded terminal
+execution-artifact model and stores for future orchestration to write after an agent run reaches a
+terminal outcome.
 
 ## Ownership boundary
 
@@ -33,6 +36,23 @@ The Codex adapter, Agent Adapter SDK, protocol package, and Hall Runner do not c
 worktrees. A future integration will pass a ready worktree path to the adapter as an ordinary
 working directory.
 
+Execution artifacts live under `apps/server/src/execution-artifacts/`. They are owned by Hall Core
+and remain server-internal in Phase 16.2. Dependency direction is:
+
+```text
+future orchestration / terminalization
+                  ↓
+      AgentExecutionArtifactRecord
+                  ↓
+      AgentExecutionArtifactStorePort
+          ↙                    ↘
+ in-memory store          SQLite store
+```
+
+The artifact store does not launch providers, create worktrees, transition tasks, retry runs,
+cleanup worktrees, stream events, or reconcile restarts. It records only one bounded immutable
+terminal snapshot after some future owner has already classified the run outcome.
+
 ## Data model
 
 `AgentWorktreeRecord` is internal-only and contains:
@@ -51,6 +71,81 @@ working directory.
 
 The SQLite table is `agent_worktrees` in migration 7. Absolute paths are intentionally persisted
 only in this internal table and are not exposed through any Phase 16.1 route or public protocol.
+
+## Execution artifacts
+
+`AgentExecutionArtifactRecord` is internal-only and contains:
+
+- artifact id;
+- Hall task id;
+- Hall agent-run id;
+- adapter id;
+- optional internal worktree id;
+- optional internal provider execution/session reference;
+- terminal outcome: `completed`, `failed`, `cancelled`, or `abandoned`;
+- optional stable terminal reason code;
+- optional bounded safe terminal summary;
+- execution start/finish timestamps and duration;
+- optional process exit code;
+- optional base and final commit object ids;
+- bounded changed-file list and truncation flag;
+- diff counters only: files changed, insertions, deletions;
+- optional bounded final summary and truncation flag;
+- artifact creation timestamp.
+
+The record intentionally excludes raw stdout, raw stderr, raw JSONL, raw Git diffs, raw command
+lines, task prompts, environment variables, credentials, authentication paths, absolute source
+repository paths, absolute worktree paths, arbitrary provider payloads, and arbitrary metadata maps.
+
+The SQLite table is `agent_execution_artifacts` in migration 8. `artifact_id` is the primary key
+and `hall_agent_run_id` is unique, enforcing one immutable artifact per Hall agent run. The table
+has no foreign key to `agent_worktrees`: the artifact may store a safe worktree id, but Phase 16.3's
+orchestration layer will validate the relationship before creation. Keeping it nullable and
+unconstrained preserves provider-neutral artifact persistence for runs that do not use a worktree.
+
+Artifacts are not authoritative task state. The existing task, event, CEO plan-run, and future
+orchestration stores continue to own lifecycle, retries, cleanup decisions, and recovery behavior.
+
+## Artifact invariants and bounds
+
+Artifacts are immutable. The port supports create, get/find by artifact id, get/find by Hall
+agent-run id, and deterministic listing only. There are no update, delete, append, revision, or CAS
+methods. List order is `createdAt ASC, artifactId ASC` in both in-memory and SQLite stores.
+
+Central domain construction and stored-record parsing enforce the terminal invariants:
+
+- `completed` artifacts must not include a terminal reason or terminal summary, and may include
+  only exit code `0` or no exit code;
+- `failed`, `cancelled`, and `abandoned` artifacts require a stable terminal reason code;
+- finish time must not precede start time;
+- duration, diff counters, and exit codes must stay within bounded numeric ranges;
+- timestamps must be canonical ISO-8601 UTC strings;
+- commits, when present, must be full 40- or 64-character Git object ids.
+
+Safe terminal summaries are whitespace-normalized and bounded to 500 characters. Final summaries are
+bounded to 8,000 characters; oversized input is truncated deterministically, the truncation flag is
+set, and truncation avoids splitting UTF-16 surrogate pairs. Unsupported control characters are
+normalized before storage.
+
+Changed files are stored as repository-relative paths using `/`. Validation is lexical only and does
+not call the filesystem. It accepts either slash style as input, rejects empty paths, NUL/control
+characters, POSIX absolute paths, Windows drive-absolute paths, drive-relative paths, UNC paths,
+`.`/`..` segments, and paths whose first segment is `.git`. Normal spaces and `.gitignore` are
+allowed. Paths are deduplicated, sorted deterministically, case-preserved, and truncated only after
+normalization and sorting.
+
+Stored SQLite rows are parsed back through the same domain rules. Corrupt outcome values, malformed
+or wrongly typed changed-file JSON, invalid booleans, impossible terminal combinations, invalid
+commits, invalid timestamps, and unsafe changed paths fail closed with typed corruption errors; no
+partial artifact is returned.
+
+## Public-safe projection
+
+Phase 16.2 includes an internal pure projection for future route use. The projection may include the
+safe terminal outcome, IDs, timestamps, exit code, commits, changed files, diff counters, final
+summary, and truncation flags. It deliberately excludes the provider execution reference, internal
+worktree id, absolute paths, environment data, raw output, and any future internal-only fields. The
+projection is not exported through `packages/protocol` and no route consumes it in this phase.
 
 ## Lifecycle
 
@@ -215,6 +310,12 @@ preserves enough evidence for that future reconciler to fail closed.
 If Git fails during creation, the record transitions to `creation_failed` with bounded safe failure
 fields. If cleanup fails, the record transitions to `cleanup_failed`.
 
+Phase 16.2 does not collect Git artifacts, infer terminal status, reconcile restarts, or write an
+artifact automatically. Future terminalization may create an artifact after it has already decided a
+run is `completed`, `failed`, `cancelled`, or `abandoned`. If a process crashes before that future
+write, authoritative lifecycle remains in the existing task/run/event stores; the missing artifact is
+evidence to be handled by a later reconciliation phase, not a lifecycle source of truth.
+
 ## Windows considerations
 
 The implementation uses Node path APIs, canonicalization through `fs.realpathSync.native`, and
@@ -228,7 +329,8 @@ Deferred to later Phase 16 subphases:
 
 - Codex adapter integration;
 - TaskOrchestrator launch integration;
-- execution artifact persistence;
+- orchestration integration that creates execution artifacts;
+- Git artifact collection;
 - routes and UI;
 - startup reconciliation and cleanup workers;
 - automatic retry/relaunch behavior;

@@ -31,6 +31,7 @@ describe("runMigrations", () => {
         "comparison_internal_paths",
         "comparison_candidate_worktrees",
         "agent_worktrees",
+        "agent_execution_artifacts",
         "server_metadata",
         "boots",
       ]),
