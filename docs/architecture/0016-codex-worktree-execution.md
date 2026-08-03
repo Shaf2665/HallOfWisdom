@@ -110,7 +110,9 @@ orchestration stores continue to own lifecycle, retries, cleanup decisions, and 
 
 Artifacts are immutable. The port supports create, get/find by artifact id, get/find by Hall
 agent-run id, and deterministic listing only. There are no update, delete, append, revision, or CAS
-methods. List order is `createdAt ASC, artifactId ASC` in both in-memory and SQLite stores.
+methods. List order is `createdAt ASC, artifactId ASC` in both in-memory and SQLite stores, using
+fixed binary/string comparison rather than locale-dependent collation. SQLite list queries spell
+this out with `COLLATE BINARY`.
 
 Central domain construction and stored-record parsing enforce the terminal invariants:
 
@@ -121,6 +123,11 @@ Central domain construction and stored-record parsing enforce the terminal invar
 - duration, diff counters, and exit codes must stay within bounded numeric ranges;
 - timestamps must be canonical ISO-8601 UTC strings;
 - commits, when present, must be full 40- or 64-character Git object ids.
+- when the retained changed-file list is not truncated, `diffSummary.filesChanged` must equal the
+  normalized changed-file count;
+- when the retained changed-file list is truncated, `diffSummary.filesChanged` must exceed the
+  retained changed-file count;
+- zero changed files require zero insertions and zero deletions.
 
 Safe terminal summaries are whitespace-normalized and bounded to 500 characters. Final summaries are
 bounded to 8,000 characters; oversized input is truncated deterministically, the truncation flag is
@@ -130,14 +137,22 @@ normalized before storage.
 Changed files are stored as repository-relative paths using `/`. Validation is lexical only and does
 not call the filesystem. It accepts either slash style as input, rejects empty paths, NUL/control
 characters, POSIX absolute paths, Windows drive-absolute paths, drive-relative paths, UNC paths,
-`.`/`..` segments, and paths whose first segment is `.git`. Normal spaces and `.gitignore` are
-allowed. Paths are deduplicated, sorted deterministically, case-preserved, and truncated only after
-normalization and sorting.
+`.`/`..` segments, and paths whose first segment is `.git` under a case-insensitive comparison.
+Normal spaces, `.gitignore`, `.gitattributes`, and later path segments containing `.git`-like text
+are allowed. Paths are deduplicated, sorted deterministically with the same fixed string comparator,
+case-preserved, and truncated only after normalization and sorting.
 
 Stored SQLite rows are parsed back through the same domain rules. Corrupt outcome values, malformed
 or wrongly typed changed-file JSON, invalid booleans, impossible terminal combinations, invalid
-commits, invalid timestamps, and unsafe changed paths fail closed with typed corruption errors; no
-partial artifact is returned.
+changed-file/diff counter combinations, commits, invalid timestamps, and unsafe changed paths fail
+closed with typed corruption errors; no partial artifact is returned. Public-safe corruption
+messages use bounded sanitized labels and fixed details, so malformed JSON, control characters, SQL,
+path-like stored ids, and long corrupt values are not echoed back to callers.
+
+SQLite creation distinguishes duplicate immutable keys from unrelated database failures. Only
+confirmed duplicate `artifact_id` or `hall_agent_run_id` failures become typed artifact conflicts;
+closed connections, missing tables, check constraints, trigger failures, and other operational
+errors are rethrown without creating a readable partial artifact.
 
 ## Public-safe projection
 

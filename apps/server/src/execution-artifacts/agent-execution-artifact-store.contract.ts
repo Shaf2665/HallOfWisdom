@@ -68,29 +68,29 @@ export function runAgentExecutionArtifactStoreContractTests(
       const store = buildStore();
       store.create(
         artifactInput({
-          artifactId: "artifact-c",
+          artifactId: "artifact-a",
           hallAgentRunId: "run-c",
           createdAt: "2026-08-03T10:01:02.000Z",
         }),
       );
       store.create(
         artifactInput({
-          artifactId: "artifact-b",
+          artifactId: "artifact-z",
           hallAgentRunId: "run-b",
           createdAt: "2026-08-03T10:01:01.000Z",
         }),
       );
       store.create(
         artifactInput({
-          artifactId: "artifact-a",
+          artifactId: "artifact-A",
           hallAgentRunId: "run-a",
           createdAt: "2026-08-03T10:01:01.000Z",
         }),
       );
       expect(store.list().map((record) => record.artifactId)).toEqual([
+        "artifact-A",
+        "artifact-z",
         "artifact-a",
-        "artifact-b",
-        "artifact-c",
       ]);
     });
 
@@ -132,7 +132,12 @@ export function runAgentExecutionArtifactStoreContractTests(
     it("stores immutable data even if the caller mutates input arrays later", () => {
       const store = buildStore();
       const changedFiles = ["src/a.ts"];
-      store.create(artifactInput({ changedFiles }));
+      store.create(
+        artifactInput({
+          changedFiles,
+          diffSummary: { filesChanged: 1, insertions: 3, deletions: 4 },
+        }),
+      );
       changedFiles.push("src/b.ts");
       expect(store.get("artifact-1").changedFiles).toEqual(["src/a.ts"]);
     });

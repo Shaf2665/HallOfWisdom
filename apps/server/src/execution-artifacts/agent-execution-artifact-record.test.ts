@@ -5,6 +5,7 @@ import {
 } from "./agent-execution-artifact-errors.js";
 import {
   AGENT_EXECUTION_ARTIFACT_LIMITS,
+  compareArtifactStrings,
   createAgentExecutionArtifactRecord,
   normalizeChangedPath,
   parseStoredAgentExecutionArtifactRecord,
@@ -175,6 +176,68 @@ describe("AgentExecutionArtifact domain model", () => {
       }),
     ).toThrow(AgentExecutionArtifactCorruptRecordError);
   });
+
+  it("uses fixed binary string ordering instead of locale-dependent ordering", () => {
+    expect(["z", "A", "a", "Z"].sort(compareArtifactStrings)).toEqual(["A", "Z", "a", "z"]);
+  });
+
+  it("rejects changed-file and diff-summary count mismatches", () => {
+    expect(() =>
+      createAgentExecutionArtifactRecord(
+        input({
+          changedFiles: ["src/a.ts", "src/b.ts"],
+          diffSummary: { filesChanged: 1, insertions: 2, deletions: 3 },
+        }),
+      ),
+    ).toThrow(AgentExecutionArtifactValidationError);
+  });
+
+  it("requires truncated changed-file summaries to report omitted files", () => {
+    const changedFiles = Array.from(
+      { length: AGENT_EXECUTION_ARTIFACT_LIMITS.changedFiles + 1 },
+      (_, index) => `file-${String(index).padStart(4, "0")}.ts`,
+    );
+    expect(() =>
+      createAgentExecutionArtifactRecord(
+        input({
+          changedFiles,
+          diffSummary: {
+            filesChanged: AGENT_EXECUTION_ARTIFACT_LIMITS.changedFiles,
+            insertions: 2,
+            deletions: 3,
+          },
+        }),
+      ),
+    ).toThrow(AgentExecutionArtifactValidationError);
+  });
+
+  it("requires zero insertions and deletions when no files changed", () => {
+    expect(() =>
+      createAgentExecutionArtifactRecord(
+        input({
+          changedFiles: [],
+          diffSummary: { filesChanged: 0, insertions: 1, deletions: 0 },
+        }),
+      ),
+    ).toThrow(AgentExecutionArtifactValidationError);
+
+    const record = createAgentExecutionArtifactRecord(
+      input({
+        changedFiles: [],
+        diffSummary: { filesChanged: 0, insertions: 0, deletions: 0 },
+      }),
+    );
+    expect(record.changedFiles).toEqual([]);
+  });
+
+  it("uses a safe bounded corruption label before artifact ID validation", () => {
+    expect(() =>
+      parseStoredAgentExecutionArtifactRecord({
+        ...createAgentExecutionArtifactRecord(input()),
+        artifactId: `C:\\outside\\${"x".repeat(300)}\u0001`,
+      }),
+    ).toThrow(/"redacted-path"/u);
+  });
 });
 
 describe("AgentExecutionArtifact changed-file normalization", () => {
@@ -185,16 +248,27 @@ describe("AgentExecutionArtifact changed-file normalization", () => {
 
   it("sorts and deduplicates deterministically while preserving case", () => {
     const record = createAgentExecutionArtifactRecord(
-      input({ changedFiles: ["b.ts", "A.ts", "b.ts", "folder/Space Name.ts"] }),
+      input({
+        changedFiles: ["b.ts", "A.ts", "b.ts", "folder/Space Name.ts"],
+        diffSummary: { filesChanged: 3, insertions: 2, deletions: 3 },
+      }),
     );
     expect(record.changedFiles).toEqual(["A.ts", "b.ts", "folder/Space Name.ts"]);
   });
 
   it("allows spaces and .gitignore", () => {
     const record = createAgentExecutionArtifactRecord(
-      input({ changedFiles: ["docs/my file.md", ".gitignore"] }),
+      input({
+        changedFiles: ["docs/my file.md", ".gitignore", ".gitattributes", "docs/.git-example.md"],
+        diffSummary: { filesChanged: 4, insertions: 2, deletions: 3 },
+      }),
     );
-    expect(record.changedFiles).toEqual([".gitignore", "docs/my file.md"]);
+    expect(record.changedFiles).toEqual([
+      ".gitattributes",
+      ".gitignore",
+      "docs/.git-example.md",
+      "docs/my file.md",
+    ]);
   });
 
   it.each([
@@ -205,6 +279,8 @@ describe("AgentExecutionArtifact changed-file normalization", () => {
     ["src/../secret.ts", "traversal"],
     ["src/./file.ts", "dot segment"],
     [".git/config", "Git internals"],
+    [".Git/config", "Git internals with mixed case"],
+    [".GIT/config", "Git internals with uppercase"],
     ["src/\u0000file.ts", "NUL/control"],
   ])("rejects %s as %s", (changedPath) => {
     expect(() => normalizeChangedPath(changedPath)).toThrow(AgentExecutionArtifactValidationError);
@@ -221,7 +297,16 @@ describe("AgentExecutionArtifact changed-file normalization", () => {
       { length: AGENT_EXECUTION_ARTIFACT_LIMITS.changedFiles + 1 },
       (_, index) => `file-${String(index).padStart(4, "0")}.ts`,
     );
-    const record = createAgentExecutionArtifactRecord(input({ changedFiles }));
+    const record = createAgentExecutionArtifactRecord(
+      input({
+        changedFiles,
+        diffSummary: {
+          filesChanged: AGENT_EXECUTION_ARTIFACT_LIMITS.changedFiles + 1,
+          insertions: 2,
+          deletions: 3,
+        },
+      }),
+    );
     expect(record.changedFiles).toHaveLength(AGENT_EXECUTION_ARTIFACT_LIMITS.changedFiles);
     expect(record.changedFilesTruncated).toBe(true);
   });

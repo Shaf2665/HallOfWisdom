@@ -116,6 +116,11 @@ function corruptError(artifactId: string): ErrorFactory {
   return (message: string) => new AgentExecutionArtifactCorruptRecordError(artifactId, message);
 }
 
+export function compareArtifactStrings(a: string, b: string): number {
+  if (a === b) return 0;
+  return a < b ? -1 : 1;
+}
+
 export function createAgentExecutionArtifactRecord(
   input: CreateAgentExecutionArtifactInput,
 ): AgentExecutionArtifactRecord {
@@ -194,32 +199,33 @@ export function createAgentExecutionArtifactRecord(
     ...normalizeFinalSummary(input.finalSummary),
     createdAt: normalizeIsoTimestamp(input.createdAt, "createdAt", validationError),
   };
-  assertTerminalInvariants(record, validationError);
+  assertArtifactInvariants(record, validationError);
   return cloneArtifact(record);
 }
 
 export function parseStoredAgentExecutionArtifactRecord(
   value: unknown,
 ): AgentExecutionArtifactRecord {
-  const raw = requireObject(
-    value,
-    "record",
-    (message) => new AgentExecutionArtifactCorruptRecordError("unknown", message),
-  );
-  const artifactId = requireString(
-    raw,
+  const unknownCorruptError = (message: string) =>
+    new AgentExecutionArtifactCorruptRecordError("unknown", message);
+  const raw = requireObject(value, "record", unknownCorruptError);
+  const rawArtifactId = requireUnknown(raw, "artifactId", unknownCorruptError);
+  if (typeof rawArtifactId !== "string") {
+    throw new AgentExecutionArtifactCorruptRecordError(
+      rawArtifactId,
+      "artifactId must be a string",
+    );
+  }
+  const artifactId = normalizeIdentifier(
+    rawArtifactId,
     "artifactId",
-    (message) => new AgentExecutionArtifactCorruptRecordError("unknown", message),
+    AGENT_EXECUTION_ARTIFACT_LIMITS.generalId,
+    (message) => new AgentExecutionArtifactCorruptRecordError(rawArtifactId, message),
   );
   const fail = corruptError(artifactId);
 
   const record: AgentExecutionArtifactRecord = {
-    artifactId: normalizeIdentifier(
-      artifactId,
-      "artifactId",
-      AGENT_EXECUTION_ARTIFACT_LIMITS.generalId,
-      fail,
-    ),
+    artifactId,
     hallTaskId: normalizeIdentifier(
       requireString(raw, "hallTaskId", fail),
       "hallTaskId",
@@ -280,7 +286,7 @@ export function parseStoredAgentExecutionArtifactRecord(
     finalSummaryTruncated: requireBoolean(raw, "finalSummaryTruncated", fail),
     createdAt: normalizeIsoTimestamp(requireString(raw, "createdAt", fail), "createdAt", fail),
   };
-  assertTerminalInvariants(record, fail);
+  assertArtifactInvariants(record, fail);
   if (
     record.changedFilesTruncated &&
     record.changedFiles.length < AGENT_EXECUTION_ARTIFACT_LIMITS.changedFiles
@@ -479,7 +485,7 @@ function normalizeChangedFiles(
     if (typeof file !== "string") throw fail("changedFiles must contain only strings");
     return normalizeChangedPath(file, fail);
   });
-  const sorted = Array.from(new Set(normalized)).sort((a, b) => a.localeCompare(b));
+  const sorted = Array.from(new Set(normalized)).sort(compareArtifactStrings);
   const changedFilesTruncated = sorted.length > AGENT_EXECUTION_ARTIFACT_LIMITS.changedFiles;
   return {
     changedFiles: sorted.slice(0, AGENT_EXECUTION_ARTIFACT_LIMITS.changedFiles),
@@ -498,7 +504,7 @@ function parseStoredChangedFiles(value: unknown, fail: ErrorFactory): readonly s
     if (normalized !== entry) throw fail("changedFiles must already be slash-normalized");
     return normalized;
   });
-  const sorted = [...entries].sort((a, b) => a.localeCompare(b));
+  const sorted = [...entries].sort(compareArtifactStrings);
   if (new Set(entries).size !== entries.length) {
     throw fail("changedFiles must not contain duplicates");
   }
@@ -535,9 +541,14 @@ export function normalizeChangedPath(
     if (segment === "." || segment === "..")
       throw fail("changed path must not contain dot segments");
   }
-  if (segments[0] === ".git")
+  if ((segments[0] ?? "").toLowerCase() === ".git")
     throw fail("changed path must not target the Git internals directory");
   return normalized;
+}
+
+function assertArtifactInvariants(record: AgentExecutionArtifactRecord, fail: ErrorFactory): void {
+  assertTerminalInvariants(record, fail);
+  assertChangedFileDiffInvariants(record, fail);
 }
 
 function assertTerminalInvariants(record: AgentExecutionArtifactRecord, fail: ErrorFactory): void {
@@ -558,6 +569,27 @@ function assertTerminalInvariants(record: AgentExecutionArtifactRecord, fail: Er
   }
   if (record.terminalReasonCode === undefined) {
     throw fail(`${record.outcome} artifacts require terminalReasonCode`);
+  }
+}
+
+function assertChangedFileDiffInvariants(
+  record: AgentExecutionArtifactRecord,
+  fail: ErrorFactory,
+): void {
+  if (record.changedFilesTruncated) {
+    if (record.diffSummary.filesChanged <= record.changedFiles.length) {
+      throw fail(
+        "truncated changed files require diffSummary.filesChanged to exceed retained files",
+      );
+    }
+  } else if (record.diffSummary.filesChanged !== record.changedFiles.length) {
+    throw fail("diffSummary.filesChanged must equal changedFiles length when not truncated");
+  }
+  if (
+    record.diffSummary.filesChanged === 0 &&
+    (record.diffSummary.insertions !== 0 || record.diffSummary.deletions !== 0)
+  ) {
+    throw fail("zero changed files require zero insertions and deletions");
   }
 }
 

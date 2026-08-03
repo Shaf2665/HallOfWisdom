@@ -45,6 +45,13 @@ interface AgentExecutionArtifactRow {
   readonly created_at: string;
 }
 
+interface ExistsRow {
+  readonly present: 1;
+}
+
+const SQLITE_CONSTRAINT_PRIMARYKEY = 1555;
+const SQLITE_CONSTRAINT_UNIQUE = 2067;
+
 export class SqliteAgentExecutionArtifactStore implements AgentExecutionArtifactStorePort {
   readonly #db: HallDatabase;
 
@@ -109,10 +116,10 @@ export class SqliteAgentExecutionArtifactStore implements AgentExecutionArtifact
             record.finalSummaryTruncated ? 1 : 0,
             record.createdAt,
           );
-      } catch {
-        throw new AgentExecutionArtifactConflictError(
-          "Agent execution artifact creation conflicts with an existing artifact record.",
-        );
+      } catch (error) {
+        const conflict = classifyCreateConflict(this.#db, record, error);
+        if (conflict !== undefined) throw conflict;
+        throw error;
       }
       return this.get(record.artifactId);
     });
@@ -146,20 +153,64 @@ export class SqliteAgentExecutionArtifactStore implements AgentExecutionArtifact
 
   list(): readonly AgentExecutionArtifactRecord[] {
     const rows = this.#db
-      .prepare("SELECT * FROM agent_execution_artifacts ORDER BY created_at ASC, artifact_id ASC")
+      .prepare(
+        "SELECT * FROM agent_execution_artifacts ORDER BY created_at COLLATE BINARY ASC, artifact_id COLLATE BINARY ASC",
+      )
       .all() as unknown as AgentExecutionArtifactRow[];
     return rows.map(rowToRecord);
   }
+}
+
+function classifyCreateConflict(
+  db: HallDatabase,
+  record: AgentExecutionArtifactRecord,
+  error: unknown,
+): AgentExecutionArtifactConflictError | undefined {
+  if (!isDuplicateConstraintError(error)) return undefined;
+
+  try {
+    const existingArtifact = db
+      .prepare("SELECT 1 AS present FROM agent_execution_artifacts WHERE artifact_id = ?")
+      .get(record.artifactId) as ExistsRow | undefined;
+    if (existingArtifact !== undefined) {
+      return new AgentExecutionArtifactConflictError(
+        "Agent execution artifact creation conflicts with an existing artifact ID.",
+      );
+    }
+
+    const existingRun = db
+      .prepare("SELECT 1 AS present FROM agent_execution_artifacts WHERE hall_agent_run_id = ?")
+      .get(record.hallAgentRunId) as ExistsRow | undefined;
+    if (existingRun !== undefined) {
+      return new AgentExecutionArtifactConflictError(
+        "Agent execution artifact creation conflicts with an existing Hall agent run artifact.",
+      );
+    }
+  } catch {
+    return undefined;
+  }
+
+  return undefined;
+}
+
+function isDuplicateConstraintError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const maybeSqliteError = error as { readonly code?: unknown; readonly errcode?: unknown };
+  return (
+    maybeSqliteError.code === "ERR_SQLITE_ERROR" &&
+    (maybeSqliteError.errcode === SQLITE_CONSTRAINT_PRIMARYKEY ||
+      maybeSqliteError.errcode === SQLITE_CONSTRAINT_UNIQUE)
+  );
 }
 
 function rowToRecord(row: AgentExecutionArtifactRow): AgentExecutionArtifactRecord {
   let changedFiles: unknown;
   try {
     changedFiles = JSON.parse(row.changed_files_json) as unknown;
-  } catch (error) {
+  } catch {
     throw new AgentExecutionArtifactCorruptRecordError(
       row.artifact_id,
-      `changedFiles JSON is malformed: ${error instanceof Error ? error.message : String(error)}`,
+      "changedFiles JSON is malformed",
     );
   }
 

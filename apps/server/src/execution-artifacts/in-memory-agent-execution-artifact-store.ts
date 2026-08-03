@@ -5,6 +5,7 @@ import {
 } from "./agent-execution-artifact-errors.js";
 import {
   cloneArtifact,
+  compareArtifactStrings,
   createAgentExecutionArtifactRecord,
   parseStoredAgentExecutionArtifactRecord,
   type AgentExecutionArtifactRecord,
@@ -70,5 +71,5 @@ export function compareArtifacts(
   b: AgentExecutionArtifactRecord,
 ): number {
   if (a.createdAt !== b.createdAt) return a.createdAt < b.createdAt ? -1 : 1;
-  return a.artifactId.localeCompare(b.artifactId);
+  return compareArtifactStrings(a.artifactId, b.artifactId);
 }
