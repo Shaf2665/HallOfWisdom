@@ -111,8 +111,10 @@ orchestration stores continue to own lifecycle, retries, cleanup decisions, and 
 Artifacts are immutable. The port supports create, get/find by artifact id, get/find by Hall
 agent-run id, and deterministic listing only. There are no update, delete, append, revision, or CAS
 methods. List order is `createdAt ASC, artifactId ASC` in both in-memory and SQLite stores, using
-fixed binary/string comparison rather than locale-dependent collation. SQLite list queries spell
-this out with `COLLATE BINARY`.
+fixed UTF-8 byte comparison rather than locale-dependent collation or JavaScript's UTF-16 code-unit
+ordering. SQLite list queries spell this out with `COLLATE BINARY`, which also compares stored text
+by its UTF-8 byte representation. This keeps in-memory and SQLite ordering identical for ASCII,
+mixed case, BMP non-ASCII, and supplementary Unicode.
 
 Central domain construction and stored-record parsing enforce the terminal invariants:
 
@@ -129,10 +131,14 @@ Central domain construction and stored-record parsing enforce the terminal invar
   retained changed-file count;
 - zero changed files require zero insertions and zero deletions.
 
-Safe terminal summaries are whitespace-normalized and bounded to 500 characters. Final summaries are
-bounded to 8,000 characters; oversized input is truncated deterministically, the truncation flag is
-set, and truncation avoids splitting UTF-16 surrogate pairs. Unsupported control characters are
-normalized before storage.
+Persisted artifact strings must be valid Unicode scalar sequences. Lone UTF-16 high or low
+surrogate code units are rejected before UTF-8 byte comparison or persistence, so Node's UTF-8
+encoder never has to replace invalid input ambiguously. Persisted identifiers and changed paths
+also reject Unicode control characters in the C0 and C1 ranges. Safe terminal summaries are
+whitespace-normalized and bounded to 500 characters. Final summaries are bounded to 8,000
+characters; oversized input is truncated deterministically, the truncation flag is set, and
+truncation avoids splitting valid UTF-16 surrogate pairs. Unsupported C0/C1 controls in summaries
+are normalized before storage rather than stored raw.
 
 Changed files are stored as repository-relative paths using `/`. Validation is lexical only and does
 not call the filesystem. It accepts either slash style as input, rejects empty paths, NUL/control
@@ -146,8 +152,9 @@ Stored SQLite rows are parsed back through the same domain rules. Corrupt outcom
 or wrongly typed changed-file JSON, invalid booleans, impossible terminal combinations, invalid
 changed-file/diff counter combinations, commits, invalid timestamps, and unsafe changed paths fail
 closed with typed corruption errors; no partial artifact is returned. Public-safe corruption
-messages use bounded sanitized labels and fixed details, so malformed JSON, control characters, SQL,
-path-like stored ids, and long corrupt values are not echoed back to callers.
+messages use bounded sanitized labels and fixed details, replacing C0/C1 controls and lone
+surrogates before display, so malformed JSON, control characters, SQL, path-like stored ids, and
+long corrupt values are not echoed back to callers.
 
 SQLite creation distinguishes duplicate immutable keys from unrelated database failures. Only
 confirmed duplicate `artifact_id` or `hall_agent_run_id` failures become typed artifact conflicts;

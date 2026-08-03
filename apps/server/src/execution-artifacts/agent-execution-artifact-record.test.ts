@@ -133,13 +133,14 @@ describe("AgentExecutionArtifact domain model", () => {
       input({
         outcome: "failed",
         terminalReasonCode: "FAILED",
-        safeTerminalSummary: ` ${"x".repeat(600)}\n\nraw-ish text `,
+        safeTerminalSummary: ` raw-ish\u0085text ${"x".repeat(600)}\n\nmore text `,
       }),
     );
     expect(record.safeTerminalSummary).toHaveLength(
       AGENT_EXECUTION_ARTIFACT_LIMITS.safeTerminalSummary,
     );
     expect(record.safeTerminalSummary).not.toContain("\n");
+    expect(record.safeTerminalSummary).not.toContain("\u0085");
   });
 
   it("truncates oversized final summaries and sets the flag", () => {
@@ -177,8 +178,50 @@ describe("AgentExecutionArtifact domain model", () => {
     ).toThrow(AgentExecutionArtifactCorruptRecordError);
   });
 
-  it("uses fixed binary string ordering instead of locale-dependent ordering", () => {
-    expect(["z", "A", "a", "Z"].sort(compareArtifactStrings)).toEqual(["A", "Z", "a", "z"]);
+  it("uses fixed UTF-8 binary ordering instead of locale-dependent or UTF-16 ordering", () => {
+    expect(["\uE000", "😀", "Ω", "É", "é", "A", "a"].sort(compareArtifactStrings)).toEqual([
+      "A",
+      "a",
+      "É",
+      "é",
+      "Ω",
+      "\uE000",
+      "😀",
+    ]);
+  });
+
+  it("accepts valid supplementary Unicode in persisted identifiers", () => {
+    const record = createAgentExecutionArtifactRecord(input({ artifactId: "artifact-😀" }));
+    expect(record.artifactId).toBe("artifact-😀");
+  });
+
+  it.each([
+    ["artifact-\uD800", "lone high surrogate"],
+    ["artifact-\uDC00", "lone low surrogate"],
+  ])("rejects %s as an ID with %s", (artifactId) => {
+    expect(() => createAgentExecutionArtifactRecord(input({ artifactId }))).toThrow(
+      AgentExecutionArtifactValidationError,
+    );
+  });
+
+  it("rejects C1 controls in identifiers", () => {
+    expect(() =>
+      createAgentExecutionArtifactRecord(input({ artifactId: "artifact-\u0085" })),
+    ).toThrow(AgentExecutionArtifactValidationError);
+  });
+
+  it("rejects corrupt stored values containing lone surrogates", () => {
+    let error: unknown;
+    try {
+      parseStoredAgentExecutionArtifactRecord({
+        ...createAgentExecutionArtifactRecord(input()),
+        artifactId: "artifact-\uD800",
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(AgentExecutionArtifactCorruptRecordError);
+    expect((error as Error).message).not.toContain("\uD800");
   });
 
   it("rejects changed-file and diff-summary count mismatches", () => {
@@ -256,6 +299,35 @@ describe("AgentExecutionArtifact changed-file normalization", () => {
     expect(record.changedFiles).toEqual(["A.ts", "b.ts", "folder/Space Name.ts"]);
   });
 
+  it("sorts changed files by UTF-8 bytes", () => {
+    const record = createAgentExecutionArtifactRecord(
+      input({
+        changedFiles: ["😀.ts", "\uE000.ts", "Ω.ts", "é.ts", "a.ts", "A.ts"],
+        diffSummary: { filesChanged: 6, insertions: 2, deletions: 3 },
+      }),
+    );
+    expect(record.changedFiles).toEqual(["A.ts", "a.ts", "é.ts", "Ω.ts", "\uE000.ts", "😀.ts"]);
+  });
+
+  it("rejects stored changed files sorted by UTF-16 but not UTF-8 bytes", () => {
+    const record = createAgentExecutionArtifactRecord(
+      input({
+        changedFiles: ["A.ts", "a.ts", "é.ts", "Ω.ts", "\uE000.ts", "😀.ts"],
+        diffSummary: { filesChanged: 6, insertions: 2, deletions: 3 },
+      }),
+    );
+    expect(() =>
+      parseStoredAgentExecutionArtifactRecord({
+        ...record,
+        changedFiles: ["A.ts", "a.ts", "é.ts", "Ω.ts", "😀.ts", "\uE000.ts"],
+      }),
+    ).toThrow(AgentExecutionArtifactCorruptRecordError);
+  });
+
+  it("accepts valid supplementary Unicode in changed paths", () => {
+    expect(normalizeChangedPath("src/😀.ts")).toBe("src/😀.ts");
+  });
+
   it("allows spaces and .gitignore", () => {
     const record = createAgentExecutionArtifactRecord(
       input({
@@ -282,8 +354,21 @@ describe("AgentExecutionArtifact changed-file normalization", () => {
     [".Git/config", "Git internals with mixed case"],
     [".GIT/config", "Git internals with uppercase"],
     ["src/\u0000file.ts", "NUL/control"],
+    ["src/\u009Ffile.ts", "C1 control"],
+    ["src/\uD800file.ts", "lone high surrogate"],
+    ["src/\uDC00file.ts", "lone low surrogate"],
   ])("rejects %s as %s", (changedPath) => {
     expect(() => normalizeChangedPath(changedPath)).toThrow(AgentExecutionArtifactValidationError);
+  });
+
+  it("accepts printable Unicode letters and symbols in changed paths", () => {
+    const record = createAgentExecutionArtifactRecord(
+      input({
+        changedFiles: ["தமிழ்/مرحبا-é-Ω-😀.ts"],
+        diffSummary: { filesChanged: 1, insertions: 2, deletions: 3 },
+      }),
+    );
+    expect(record.changedFiles).toEqual(["தமிழ்/مرحبا-é-Ω-😀.ts"]);
   });
 
   it("enforces per-path length", () => {
@@ -315,6 +400,38 @@ describe("AgentExecutionArtifact changed-file normalization", () => {
     const record = createAgentExecutionArtifactRecord(input({ changedFiles: ["a.ts", "a.ts"] }));
     expect(record.changedFiles).toEqual(["a.ts"]);
     expect(record.changedFilesTruncated).toBe(false);
+  });
+});
+
+describe("AgentExecutionArtifact corruption message safety", () => {
+  it("removes C1 controls from corruption labels and details", () => {
+    const error = new AgentExecutionArtifactCorruptRecordError(
+      "artifact\u0085label",
+      "bad\u009Fdetail",
+    );
+    expect(error.message).not.toContain("\u0085");
+    expect(error.message).not.toContain("\u009F");
+    expect(error.message).toContain("artifact label");
+    expect(error.message).toContain("bad detail");
+  });
+
+  it("does not emit lone surrogate code units in corruption errors", () => {
+    const error = new AgentExecutionArtifactCorruptRecordError("artifact-\uD800", "detail-\uDC00");
+    expect(error.message).not.toContain("\uD800");
+    expect(error.message).not.toContain("\uDC00");
+    expect(error.message).toContain("\uFFFD");
+  });
+
+  it("bounds oversized labels and keeps path-like labels redacted", () => {
+    const oversized = new AgentExecutionArtifactCorruptRecordError(
+      `artifact-${"x".repeat(300)}`,
+      "bad",
+    );
+    expect(oversized.message.length).toBeLessThan(180);
+
+    const pathLike = new AgentExecutionArtifactCorruptRecordError("C:\\outside\\artifact", "bad");
+    expect(pathLike.message).toContain('"redacted-path"');
+    expect(pathLike.message).not.toContain("C:\\outside");
   });
 });
 

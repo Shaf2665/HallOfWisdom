@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import {
   AgentExecutionArtifactCorruptRecordError,
   AgentExecutionArtifactValidationError,
@@ -118,7 +119,7 @@ function corruptError(artifactId: string): ErrorFactory {
 
 export function compareArtifactStrings(a: string, b: string): number {
   if (a === b) return 0;
-  return a < b ? -1 : 1;
+  return Buffer.compare(Buffer.from(a, "utf8"), Buffer.from(b, "utf8"));
 }
 
 export function createAgentExecutionArtifactRecord(
@@ -340,6 +341,7 @@ function normalizeIdentifier(
   fail: ErrorFactory,
 ): string {
   if (typeof value !== "string") throw fail(`${field} must be a string`);
+  assertValidUnicodeScalars(value, field, fail);
   if (value.length === 0) throw fail(`${field} is required`);
   if (value.length > maxLength) throw fail(`${field} exceeds ${String(maxLength)} characters`);
   if (containsUnsafeControl(value))
@@ -348,6 +350,7 @@ function normalizeIdentifier(
 }
 
 function normalizeOutcome(value: string, fail: ErrorFactory): AgentExecutionArtifactOutcome {
+  assertValidUnicodeScalars(value, "outcome", fail);
   if (AGENT_EXECUTION_ARTIFACT_OUTCOMES.includes(value as AgentExecutionArtifactOutcome)) {
     return value as AgentExecutionArtifactOutcome;
   }
@@ -368,11 +371,13 @@ function normalizeTerminalReasonCode(value: string, fail: ErrorFactory): string 
 }
 
 function normalizeSafeTerminalSummary(value: string): string {
+  assertValidUnicodeScalars(value, "safeTerminalSummary", validationError);
   const normalized = normalizeUnsupportedControls(value).replace(/\s+/gu, " ").trim();
   return truncateUtf16(normalized, AGENT_EXECUTION_ARTIFACT_LIMITS.safeTerminalSummary);
 }
 
 function normalizeStoredSafeTerminalSummary(value: string, fail: ErrorFactory): string {
+  assertValidUnicodeScalars(value, "safeTerminalSummary", fail);
   const normalized = normalizeSafeTerminalSummary(value);
   if (normalized !== value) {
     throw fail("safeTerminalSummary is not normalized");
@@ -387,6 +392,7 @@ function normalizeFinalSummary(value: string | undefined): {
   if (value === undefined) {
     return { finalSummary: undefined, finalSummaryTruncated: false };
   }
+  assertValidUnicodeScalars(value, "finalSummary", validationError);
   const normalized = normalizeUnsupportedControls(value).replace(/\r\n?/gu, "\n");
   const truncated = normalized.length > AGENT_EXECUTION_ARTIFACT_LIMITS.finalSummary;
   return {
@@ -396,6 +402,7 @@ function normalizeFinalSummary(value: string | undefined): {
 }
 
 function normalizeStoredFinalSummary(value: string, fail: ErrorFactory): string {
+  assertValidUnicodeScalars(value, "finalSummary", fail);
   if (value.length > AGENT_EXECUTION_ARTIFACT_LIMITS.finalSummary) {
     throw fail("finalSummary exceeds maximum length");
   }
@@ -408,6 +415,7 @@ function normalizeStoredFinalSummary(value: string, fail: ErrorFactory): string 
 
 function normalizeIsoTimestamp(value: string, field: string, fail: ErrorFactory): string {
   if (typeof value !== "string") throw fail(`${field} must be a string`);
+  assertValidUnicodeScalars(value, field, fail);
   const time = Date.parse(value);
   if (!Number.isFinite(time) || new Date(time).toISOString() !== value) {
     throw fail(`${field} must be a canonical ISO-8601 UTC timestamp`);
@@ -416,6 +424,7 @@ function normalizeIsoTimestamp(value: string, field: string, fail: ErrorFactory)
 }
 
 function normalizeCommit(value: string, field: string, fail: ErrorFactory): string {
+  assertValidUnicodeScalars(value, field, fail);
   if (!FULL_GIT_OBJECT_ID_PATTERN.test(value)) {
     throw fail(`${field} must be a full Git object ID`);
   }
@@ -519,6 +528,7 @@ export function normalizeChangedPath(
   fail: ErrorFactory = validationError,
 ): string {
   if (typeof pathValue !== "string") throw fail("changed path must be a string");
+  assertValidUnicodeScalars(pathValue, "changed path", fail);
   if (pathValue.length === 0) throw fail("changed path is required");
   if (pathValue.length > AGENT_EXECUTION_ARTIFACT_LIMITS.changedPath) {
     throw fail("changed path exceeds maximum length");
@@ -602,7 +612,7 @@ function normalizeUnsupportedControls(value: string): string {
       normalized += "\n";
     } else if (code === 10) {
       normalized += "\n";
-    } else if (code < 32 || code === 127) {
+    } else if (isControlCodeUnit(code)) {
       normalized += " ";
     } else {
       normalized += value[index] ?? "";
@@ -614,16 +624,43 @@ function normalizeUnsupportedControls(value: string): string {
 function containsUnsafeControl(value: string): boolean {
   for (let index = 0; index < value.length; index += 1) {
     const code = value.charCodeAt(index);
-    if (code < 32 || code === 127) return true;
+    if (isControlCodeUnit(code)) return true;
   }
   return false;
+}
+
+function assertValidUnicodeScalars(value: string, field: string, fail: ErrorFactory): void {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (isHighSurrogate(code)) {
+      const next = value.charCodeAt(index + 1);
+      if (!isLowSurrogate(next)) {
+        throw fail(`${field} contains an invalid Unicode surrogate`);
+      }
+      index += 1;
+    } else if (isLowSurrogate(code)) {
+      throw fail(`${field} contains an invalid Unicode surrogate`);
+    }
+  }
+}
+
+function isControlCodeUnit(code: number): boolean {
+  return (code >= 0x00 && code <= 0x1f) || (code >= 0x7f && code <= 0x9f);
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
 }
 
 function truncateUtf16(value: string, maxLength: number): string {
   if (value.length <= maxLength) return value;
   let end = maxLength;
   const last = value.charCodeAt(end - 1);
-  if (last >= 0xd800 && last <= 0xdbff) end -= 1;
+  if (isHighSurrogate(last)) end -= 1;
   return value.slice(0, end);
 }
 

@@ -66,31 +66,29 @@ export function runAgentExecutionArtifactStoreContractTests(
 
     it("lists deterministically by createdAt then artifactId", () => {
       const store = buildStore();
-      store.create(
-        artifactInput({
-          artifactId: "artifact-a",
-          hallAgentRunId: "run-c",
-          createdAt: "2026-08-03T10:01:02.000Z",
-        }),
-      );
-      store.create(
-        artifactInput({
-          artifactId: "artifact-z",
-          hallAgentRunId: "run-b",
-          createdAt: "2026-08-03T10:01:01.000Z",
-        }),
-      );
-      store.create(
-        artifactInput({
-          artifactId: "artifact-A",
-          hallAgentRunId: "run-a",
-          createdAt: "2026-08-03T10:01:01.000Z",
-        }),
-      );
+      for (const [index, artifactId] of [
+        "artifact-\uE000",
+        "artifact-😀",
+        "artifact-Ω",
+        "artifact-é",
+        "artifact-a",
+        "artifact-A",
+      ].entries()) {
+        store.create(
+          artifactInput({
+            artifactId,
+            hallAgentRunId: `run-order-${String(index)}`,
+            createdAt: "2026-08-03T10:01:01.000Z",
+          }),
+        );
+      }
       expect(store.list().map((record) => record.artifactId)).toEqual([
         "artifact-A",
-        "artifact-z",
         "artifact-a",
+        "artifact-é",
+        "artifact-Ω",
+        "artifact-\uE000",
+        "artifact-😀",
       ]);
     });
 
