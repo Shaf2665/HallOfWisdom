@@ -572,6 +572,59 @@ const MIGRATION_7: Migration = {
   },
 };
 
+/**
+ * Migration 8 — Phase 16.2's provider-neutral, immutable execution
+ * artifact table. This table stores one bounded terminal snapshot per Hall
+ * agent run. It is deliberately not authoritative task/run state, contains
+ * no raw provider output or absolute filesystem paths, and does not foreign
+ * key to `agent_worktrees`: Phase 16.3's orchestration layer will validate
+ * any worktree relationship before writing an artifact.
+ */
+const MIGRATION_8: Migration = {
+  version: 8,
+  description: "Phase 16.2: bounded agent execution artifact persistence.",
+  up(db) {
+    db.exec(`
+      CREATE TABLE agent_execution_artifacts (
+        artifact_id TEXT PRIMARY KEY,
+        hall_task_id TEXT NOT NULL,
+        hall_agent_run_id TEXT NOT NULL UNIQUE,
+        adapter_id TEXT NOT NULL,
+        worktree_id TEXT,
+        provider_execution_ref TEXT,
+        terminal_outcome TEXT NOT NULL CHECK (
+          terminal_outcome IN ('completed', 'failed', 'cancelled', 'abandoned')
+        ),
+        terminal_reason_code TEXT,
+        safe_terminal_summary TEXT,
+        started_at TEXT NOT NULL,
+        finished_at TEXT NOT NULL,
+        duration_ms INTEGER NOT NULL CHECK (duration_ms >= 0),
+        exit_code INTEGER CHECK (
+          exit_code IS NULL OR (exit_code >= -2147483648 AND exit_code <= 2147483647)
+        ),
+        base_commit TEXT,
+        final_commit TEXT,
+        changed_files_json TEXT NOT NULL,
+        changed_files_truncated INTEGER NOT NULL CHECK (changed_files_truncated IN (0, 1)),
+        diff_files_changed INTEGER NOT NULL CHECK (diff_files_changed >= 0),
+        diff_insertions INTEGER NOT NULL CHECK (diff_insertions >= 0),
+        diff_deletions INTEGER NOT NULL CHECK (diff_deletions >= 0),
+        final_summary TEXT,
+        final_summary_truncated INTEGER NOT NULL CHECK (final_summary_truncated IN (0, 1)),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_agent_execution_artifacts_created
+        ON agent_execution_artifacts (created_at, artifact_id);
+      CREATE INDEX idx_agent_execution_artifacts_task
+        ON agent_execution_artifacts (hall_task_id);
+      CREATE INDEX idx_agent_execution_artifacts_worktree
+        ON agent_execution_artifacts (worktree_id)
+        WHERE worktree_id IS NOT NULL;
+    `);
+  },
+};
+
 /** Ordered by `version`, ascending — `migration-runner.ts` applies whichever ones a given database hasn't recorded yet, one transaction each. */
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -581,6 +634,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_5,
   MIGRATION_6,
   MIGRATION_7,
+  MIGRATION_8,
 ];
 
 export const HIGHEST_KNOWN_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;
