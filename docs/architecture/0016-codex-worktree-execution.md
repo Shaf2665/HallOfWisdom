@@ -1,14 +1,15 @@
 # 0016 — Durable Isolated Codex Execution
 
-Status: Phase 16.2 foundation implemented. Codex does **not** use these worktrees or execution
-artifacts yet.
+Status: Phase 16.3 orchestration integration implemented. Codex adapter hardening and real Codex
+execution remain deferred.
 
-Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 builds
-only the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and
-SQLite stores, a narrow Git command runner, and a manager that can create and explicitly clean up a
-detached worktree by internal worktree id. Phase 16.2 adds a provider-neutral, bounded terminal
-execution-artifact model and stores for future orchestration to write after an agent run reaches a
-terminal outcome.
+Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 built
+the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and SQLite
+stores, a narrow Git command runner, and a manager that can create and explicitly clean up a
+detached worktree by internal worktree id. Phase 16.2 added a provider-neutral, bounded terminal
+execution-artifact model and stores. Phase 16.3 wires those foundations into the canonical
+TaskOrchestrator execution path through provider-neutral internal services, but it does not change
+Codex launch arguments or run a real Codex task.
 
 ## Ownership boundary
 
@@ -19,7 +20,7 @@ already live.
 Dependency direction is:
 
 ```text
-future routes / orchestration / scheduler integration
+TaskOrchestrator / future routes / scheduler integration
                   ↓
         AgentWorktreeManager
                   ↓
@@ -33,14 +34,14 @@ future routes / orchestration / scheduler integration
 ```
 
 The Codex adapter, Agent Adapter SDK, protocol package, and Hall Runner do not create or manage
-worktrees. A future integration will pass a ready worktree path to the adapter as an ordinary
-working directory.
+worktrees. Phase 16.3 passes a ready worktree path to an explicitly isolated adapter as the ordinary
+provider-neutral `workingDirectory` field.
 
 Execution artifacts live under `apps/server/src/execution-artifacts/`. They are owned by Hall Core
 and remain server-internal in Phase 16.2. Dependency direction is:
 
 ```text
-future orchestration / terminalization
+TaskOrchestrator terminalization / future reconciliation
                   ↓
       AgentExecutionArtifactRecord
                   ↓
@@ -51,7 +52,7 @@ future orchestration / terminalization
 
 The artifact store does not launch providers, create worktrees, transition tasks, retry runs,
 cleanup worktrees, stream events, or reconcile restarts. It records only one bounded immutable
-terminal snapshot after some future owner has already classified the run outcome.
+terminal snapshot after TaskOrchestrator has already classified and persisted the run outcome.
 
 ## Data model
 
@@ -168,6 +169,117 @@ safe terminal outcome, IDs, timestamps, exit code, commits, changed files, diff 
 summary, and truncation flags. It deliberately excludes the provider execution reference, internal
 worktree id, absolute paths, environment data, raw output, and any future internal-only fields. The
 projection is not exported through `packages/protocol` and no route consumes it in this phase.
+
+## Phase 16.3 orchestration integration
+
+TaskOrchestrator remains the canonical execution owner. It still performs eligibility checks,
+assignment, ownership fencing, adapter selection, normalized event handling, cancellation, timeout
+behavior, and authoritative task/run/event terminalization. The new orchestration dependency
+direction is:
+
+```text
+TaskOrchestrator
+       ↓
+IsolatedAgentExecutionCoordinator
+  ↙        ↓          ↘
+worktree  adapter   terminalizer
+                     ↓
+             GitArtifactCollector
+                     ↓
+       AgentExecutionArtifactStorePort
+```
+
+Isolation is activated only by an injected server-internal policy configured at the composition
+root. TaskOrchestrator has no Codex-specific adapter branch, and task title, task description,
+adapter output, and untrusted metadata cannot opt into isolation. Unknown adapters keep the
+existing non-isolated execution path. The production composition currently configures the Codex
+adapter id for future isolated execution, but Phase 16.3 does not change Codex CLI arguments,
+permission profiles, or adapter behavior.
+
+For isolated executions, TaskOrchestrator completes the existing launch gates before it asks
+`IsolatedAgentExecutionCoordinator` to prepare a worktree. The coordinator uses the approved
+canonical source working directory associated with the task, calls `AgentWorktreeManager` with the
+Hall task id and Hall agent-run id, and requires a durable `ready` worktree before adapter launch.
+Only the adapter input `workingDirectory` is replaced, with the manager-produced path corresponding
+to the source-relative subdirectory inside the Hall-owned worktree. The primary source checkout is
+not passed to the isolated adapter. The adapter cannot choose the worktree root or path, and the
+path is never derived from task text, provider output, or repository names.
+
+If a worktree already exists for the same Hall agent run, the coordinator reuses it only when the
+durable record matches the exact task id, run id, approved source location, canonical worktree path,
+and `ready` status. Conflicting records fail closed before adapter launch, and no second active
+worktree is created for that run. If worktree preparation fails, the adapter is not launched; the
+existing authoritative infrastructure-failure path records a bounded `WORKTREE_PREPARATION_FAILED`
+failure and artifact terminalization may record a failed non-authoritative summary when enough safe
+state exists.
+
+Terminal artifact creation is deliberately ordered after authoritative terminal state. The
+orchestrator first receives or derives the terminal outcome from normalized Hall event semantics,
+persists the existing task/run/event terminal state, and only then invokes the artifact
+terminalizer. Artifact write failures are reported through the internal execution-error diagnostic
+hook and stderr logging, but they do not roll back terminal state, change the outcome, reopen a
+task, trigger retry, relaunch the provider, or clean the worktree.
+
+Outcome mapping is provider-neutral:
+
+- normalized `run.completed` becomes `completed`;
+- normalized `run.failed` becomes `failed`;
+- normalized `run.cancelled` becomes `cancelled`;
+- future authoritative abandoned classification will map to `abandoned`.
+
+Phase 16.3 does not add startup abandonment detection. Completed artifacts contain no terminal
+reason code or terminal failure summary. Failed and cancelled artifacts use stable bounded reason
+codes from authoritative Hall failure/cancellation fields and never copy raw stderr automatically.
+Authoritative task timestamps provide `startedAt`, `finishedAt`, and `durationMs`; the terminalizer
+uses its clock only for artifact `createdAt`.
+
+When an artifact includes a worktree id, Git evidence is collected only by internal worktree id.
+`GitArtifactCollector` loads the durable worktree record, requires `ready`, revalidates the
+canonical Hall-owned root and canonical worktree path, rejects symlink or non-directory
+replacement, and verifies the path remains inside the Hall-owned root before any Git command. The
+terminalizer then requires the collected worktree id, Hall task id, and Hall agent-run id to match
+the authoritative execution before insertion. The artifact stores only the worktree id, base
+commit, final commit, relative changed paths, and diff counters; it never stores the absolute source
+or worktree path and Phase 16.3 intentionally does not add a database foreign key to
+`agent_worktrees`.
+
+The Git evidence collector is read-only and uses a fixed Git command family with structured argv,
+`shell: false`, bounded output, timeouts, `core.fsmonitor=false`, `--no-ext-diff`, and
+`--no-textconv`:
+
+```text
+git -c core.fsmonitor=false rev-parse --verify HEAD^{commit}
+git -c core.fsmonitor=false diff --name-only -z --no-renames --no-ext-diff --no-textconv <base> --
+git -c core.fsmonitor=false ls-files --others --exclude-standard -z --
+git -c core.fsmonitor=false diff --numstat -z --no-renames --no-ext-diff --no-textconv <base> --
+```
+
+It does not run checkout, reset, clean, merge, rebase, submodule update, remote operations, hooks,
+external diff helpers, or textconv commands. Path output is parsed as strict UTF-8, NUL-delimited
+records. Invalid UTF-8, malformed NUL framing, malformed `--numstat`, unsafe paths, duplicate
+numstat records, numeric overflow, or output truncation fail closed and leave the authoritative
+terminal state intact with no partial artifact.
+
+Changed files represent the final worktree state relative to the recorded base commit, including
+committed changes after the base, staged changes, unstaged changes, deletions, and untracked
+non-ignored files. Ignored files are excluded. Paths are normalized through the Phase 16.2
+repository-relative changed-path rules, deduplicated, and sorted with the artifact UTF-8
+comparator. `filesChanged` equals the normalized unique path count before artifact path retention
+truncation. Insertions and deletions come from `git diff --numstat` for tracked differences;
+binary entries contribute zero line counts, and untracked files are not opened to estimate line
+counts, so untracked files may add to `filesChanged` while contributing zero insertions and
+deletions.
+
+Artifact terminalization is idempotent by Hall agent-run id. The terminalizer queries before
+creation, returns an existing artifact only when its immutable semantic contents match the
+authoritative terminal state, and handles uniqueness races by refetching and accepting only an
+equivalent record. It never updates, deletes, recreates, or appends to an artifact, and replay does
+not relaunch the provider.
+
+Phase 16.3 intentionally retains worktrees after terminal execution. Completed, failed, and
+cancelled worktrees remain available in `ready` state when creation succeeded. Artifact persistence
+does not request cleanup, age-based cleanup, startup cleanup, recursive deletion, or any cleanup
+worker. Restart-safe cleanup and reconciliation belong to Phase 16.5.
 
 ## Lifecycle
 
@@ -332,11 +444,12 @@ preserves enough evidence for that future reconciler to fail closed.
 If Git fails during creation, the record transitions to `creation_failed` with bounded safe failure
 fields. If cleanup fails, the record transitions to `cleanup_failed`.
 
-Phase 16.2 does not collect Git artifacts, infer terminal status, reconcile restarts, or write an
-artifact automatically. Future terminalization may create an artifact after it has already decided a
-run is `completed`, `failed`, `cancelled`, or `abandoned`. If a process crashes before that future
-write, authoritative lifecycle remains in the existing task/run/event stores; the missing artifact is
-evidence to be handled by a later reconciliation phase, not a lifecycle source of truth.
+Phase 16.3 collects Git evidence and writes an execution artifact only after TaskOrchestrator has
+persisted authoritative terminal task/run/event state. A crash after authoritative terminalization
+but before artifact creation leaves a terminal run with a missing artifact. Phase 16.3 does not
+reconcile that state, relaunch the provider, or infer retry eligibility from the missing artifact.
+Phase 16.5 will reconcile missing artifacts without provider relaunch. The artifact remains
+evidence for later inspection and reconciliation, not a lifecycle source of truth.
 
 ## Windows considerations
 
@@ -349,10 +462,7 @@ host platform can exercise it.
 
 Deferred to later Phase 16 subphases:
 
-- Codex adapter integration;
-- TaskOrchestrator launch integration;
-- orchestration integration that creates execution artifacts;
-- Git artifact collection;
+- Codex adapter hardening and any Codex-specific launch argument changes;
 - routes and UI;
 - startup reconciliation and cleanup workers;
 - automatic retry/relaunch behavior;

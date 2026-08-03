@@ -2,8 +2,13 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import type { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import { validateWorkspace } from "@hall-of-wisdom/hall-runner";
-import { RunnerError, runTask } from "@hall-of-wisdom/hall-runner";
-import { parseAgentTaskInput, type AgentAdapter } from "@hall-of-wisdom/agent-adapter-sdk";
+import { isTerminalEventType, RunnerError, runTask } from "@hall-of-wisdom/hall-runner";
+import type { RunTaskResult } from "@hall-of-wisdom/hall-runner";
+import {
+  parseAgentTaskInput,
+  type AgentAdapter,
+  type AgentTaskInput,
+} from "@hall-of-wisdom/agent-adapter-sdk";
 import {
   parseHallTask,
   type ExecutionTrust,
@@ -53,6 +58,9 @@ import {
   evaluateRouting,
   type RoutingCandidate,
 } from "../routing/routing-policy.js";
+import { AgentExecutionOrchestrationError } from "../agent-execution/agent-execution-errors.js";
+import type { IsolatedAgentExecutionCoordinator } from "../agent-execution/isolated-agent-execution-coordinator.js";
+import type { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
 
 function formatUnknownError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -67,6 +75,8 @@ export interface TaskOrchestratorOptions {
   /** Canonical, already-validated workspace root — see `server.ts` / `validateWorkspace`. */
   readonly workspaceRoot: string;
   readonly onExecutionError?: ((taskId: string, error: unknown) => void) | undefined;
+  readonly executionCoordinator?: IsolatedAgentExecutionCoordinator | undefined;
+  readonly artifactTerminalizer?: AgentExecutionArtifactTerminalizer | undefined;
 }
 
 export interface CreateTaskResult {
@@ -113,6 +123,8 @@ export class TaskOrchestrator {
   readonly #registry: AgentRegistry;
   readonly #workspaceRoot: string;
   readonly #onExecutionError: ((taskId: string, error: unknown) => void) | undefined;
+  readonly #executionCoordinator: IsolatedAgentExecutionCoordinator | undefined;
+  readonly #artifactTerminalizer: AgentExecutionArtifactTerminalizer | undefined;
 
   readonly #activeControllers = new Map<string, AbortController>();
   readonly #activeExecutions = new Map<string, Promise<void>>();
@@ -159,6 +171,8 @@ export class TaskOrchestrator {
     this.#registry = options.registry;
     this.#workspaceRoot = options.workspaceRoot;
     this.#onExecutionError = options.onExecutionError;
+    this.#executionCoordinator = options.executionCoordinator;
+    this.#artifactTerminalizer = options.artifactTerminalizer;
   }
 
   createTask(rawRequest: unknown): CreateTaskResult {
@@ -407,7 +421,7 @@ export class TaskOrchestrator {
     // continuing past a prior attempt's events for a governed retry.
     this.#runSequenceBase.set(taskId, this.#eventStore.nextSequence(taskId));
 
-    this.#beginExecution(taskId, adapter.descriptor.adapterId, taskInput);
+    this.#beginExecution(taskId, adapter.descriptor.adapterId, taskInput, workingDirectory);
 
     return { task: record.task, runId };
   }
@@ -700,7 +714,7 @@ export class TaskOrchestrator {
       workingDirectory: resolvedWorkingDirectory,
     });
 
-    this.#beginExecution(taskId, adapter.descriptor.adapterId, taskInput);
+    this.#beginExecution(taskId, adapter.descriptor.adapterId, taskInput, resolvedWorkingDirectory);
 
     return { task: hallTask, runId };
   }
@@ -771,20 +785,22 @@ export class TaskOrchestrator {
   #beginExecution(
     taskId: string,
     adapterId: string,
-    taskInput: Parameters<typeof runTask>[0]["taskInput"],
+    taskInput: AgentTaskInput,
+    approvedSourceWorkingDirectory: string,
   ): void {
     const controller = new AbortController();
     this.#activeControllers.set(taskId, controller);
 
-    const execution = this.#execute(taskId, adapterId, taskInput, controller.signal)
-      .catch((error: unknown) => {
-        this.#onExecutionError?.(taskId, error);
-        this.#failTaskOnUnhandledExecutionError(taskId, error);
-      })
-      .finally(() => {
-        this.#activeControllers.delete(taskId);
-        this.#activeExecutions.delete(taskId);
-      });
+    const execution = this.#execute(
+      taskId,
+      adapterId,
+      taskInput,
+      approvedSourceWorkingDirectory,
+      controller.signal,
+    ).finally(() => {
+      this.#activeControllers.delete(taskId);
+      this.#activeExecutions.delete(taskId);
+    });
     this.#activeExecutions.set(taskId, execution);
   }
 
@@ -880,18 +896,109 @@ export class TaskOrchestrator {
   async #execute(
     taskId: string,
     adapterId: string,
-    taskInput: Parameters<typeof runTask>[0]["taskInput"],
+    taskInput: AgentTaskInput,
+    approvedSourceWorkingDirectory: string,
     signal: AbortSignal,
   ): Promise<void> {
-    await runTask({
-      registry: this.#registry,
-      adapterId,
+    let preparedWorktreeId: string | undefined;
+    let terminalEvent: NormalizedAgentEvent | undefined;
+    try {
+      const prepared = await this.#prepareExecution(
+        adapterId,
+        taskInput,
+        approvedSourceWorkingDirectory,
+        signal,
+      );
+      preparedWorktreeId = prepared.worktreeId;
+      const runResult = await runTask({
+        registry: this.#registry,
+        adapterId,
+        taskInput: prepared.taskInput,
+        options: { signal },
+        onEvent: (event) => {
+          this.#handleEvent(taskId, event);
+          if (isTerminalEventType(event.type)) terminalEvent = event;
+        },
+      });
+      if (terminalEvent === undefined && runResult.terminalEventType === "run.failed") {
+        terminalEvent = this.#failTaskWithInfrastructureFailure(
+          taskId,
+          this.#taskStore.get(taskId),
+          runResult.failure?.code ?? "TASK_EXECUTION_FAILED",
+          runResult.failure?.message ??
+            "Hall Core could not complete this task due to an unexpected internal error.",
+          "Hall Runner returned a failed result without a normalized terminal event.",
+        );
+      }
+      await this.#terminalizeExecution({
+        taskId,
+        adapterId,
+        runId: taskInput.runId,
+        worktreeId: preparedWorktreeId,
+        terminalEvent,
+        runResult,
+        signal,
+      });
+    } catch (error) {
+      this.#onExecutionError?.(taskId, error);
+      const syntheticTerminalEvent = this.#failTaskOnUnhandledExecutionError(taskId, error);
+      await this.#terminalizeExecution({
+        taskId,
+        adapterId,
+        runId: taskInput.runId,
+        worktreeId: preparedWorktreeId,
+        terminalEvent: terminalEvent ?? syntheticTerminalEvent,
+        signal,
+      });
+    }
+  }
+
+  async #prepareExecution(
+    adapterId: string,
+    taskInput: AgentTaskInput,
+    approvedSourceWorkingDirectory: string,
+    signal: AbortSignal,
+  ): Promise<{ readonly taskInput: AgentTaskInput; readonly worktreeId: string | undefined }> {
+    if (this.#executionCoordinator === undefined) {
+      return { taskInput, worktreeId: undefined };
+    }
+    const prepared = await this.#executionCoordinator.prepare({
       taskInput,
-      options: { signal },
-      onEvent: (event) => {
-        this.#handleEvent(taskId, event);
-      },
+      adapterId,
+      approvedSourceWorkingDirectory,
+      signal,
     });
+    return { taskInput: prepared.taskInput, worktreeId: prepared.worktreeId };
+  }
+
+  async #terminalizeExecution(input: {
+    readonly taskId: string;
+    readonly adapterId: string;
+    readonly runId: string;
+    readonly worktreeId: string | undefined;
+    readonly terminalEvent: NormalizedAgentEvent | undefined;
+    readonly runResult?: RunTaskResult | undefined;
+    readonly signal: AbortSignal;
+  }): Promise<void> {
+    if (this.#artifactTerminalizer === undefined) return;
+    try {
+      const taskRecord = this.#taskStore.get(input.taskId);
+      if (!isTerminalTaskStatus(taskRecord.task.status)) return;
+      await this.#artifactTerminalizer.terminalize({
+        taskRecord,
+        adapterId: input.adapterId,
+        runId: input.runId,
+        worktreeId: input.worktreeId,
+        terminalEvent: input.terminalEvent,
+        runResult: input.runResult,
+        signal: input.signal,
+      });
+    } catch (error) {
+      this.#onExecutionError?.(input.taskId, error);
+      console.error(
+        `Task "${input.taskId}": artifact terminalization failed after authoritative terminal state was recorded: ${formatUnknownError(error)}`,
+      );
+    }
   }
 
   #handleEvent(taskId: string, rawEvent: NormalizedAgentEvent): void {
@@ -1031,21 +1138,26 @@ export class TaskOrchestrator {
    * `#handleEventStoreFailure` above) before `runTask()`'s promise
    * settled, this is a no-op — the first terminal outcome still wins.
    */
-  #failTaskOnUnhandledExecutionError(taskId: string, error: unknown): void {
+  #failTaskOnUnhandledExecutionError(
+    taskId: string,
+    error: unknown,
+  ): NormalizedAgentEvent | undefined {
     try {
       const record = this.#taskStore.get(taskId);
-      if (isTerminalTaskStatus(record.task.status)) return;
-      this.#failTaskWithInfrastructureFailure(
+      if (isTerminalTaskStatus(record.task.status)) return undefined;
+      const failure = infrastructureFailureFromError(error);
+      return this.#failTaskWithInfrastructureFailure(
         taskId,
         record,
-        "TASK_EXECUTION_FAILED",
-        "Hall Core could not complete this task due to an unexpected internal error.",
+        failure.code,
+        failure.clientSafeMessage,
         formatUnknownError(error),
       );
     } catch (unexpected) {
       console.error(
         `Hall Core failed to finalize task "${taskId}" after an unhandled execution error: ${formatUnknownError(unexpected)}`,
       );
+      return undefined;
     }
   }
 
@@ -1066,12 +1178,12 @@ export class TaskOrchestrator {
     code: string,
     clientSafeMessage: string,
     serverLogDetail: string,
-  ): void {
+  ): NormalizedAgentEvent | undefined {
     if (record.runId === undefined || record.agentId === undefined) {
       console.error(
         `Hall Core cannot record an infrastructure failure for task "${taskId}": it has no run recorded.`,
       );
-      return;
+      return undefined;
     }
 
     // Stop accepting normal events for this task and signal the adapter to
@@ -1115,12 +1227,27 @@ export class TaskOrchestrator {
       );
     }
 
-    this.#taskStore.updateStatus(taskId, "failed");
     this.#taskStore.setCompleted(
       taskId,
       failureEvent.timestamp,
       "run.failed",
       failureEvent.payload.failure,
     );
+    this.#taskStore.updateStatus(taskId, "failed");
+    return failureEvent;
   }
+}
+
+function infrastructureFailureFromError(error: unknown): {
+  readonly code: string;
+  readonly clientSafeMessage: string;
+} {
+  if (error instanceof AgentExecutionOrchestrationError) {
+    return { code: error.safeFailureCode, clientSafeMessage: error.safeFailureSummary };
+  }
+  return {
+    code: "TASK_EXECUTION_FAILED",
+    clientSafeMessage:
+      "Hall Core could not complete this task due to an unexpected internal error.",
+  };
 }
