@@ -18,6 +18,7 @@ import {
 } from "./agent-execution-errors.js";
 import {
   assertTerminalSnapshotMatchesRunResult,
+  enrichTerminalSnapshotWithRunResult,
   type AgentExecutionTerminalSnapshot,
 } from "./agent-execution-terminal-snapshot.js";
 
@@ -52,11 +53,18 @@ export class AgentExecutionArtifactTerminalizer {
 
   async terminalize(input: TerminalizeAgentExecutionInput): Promise<AgentExecutionArtifactRecord> {
     assertTerminalSnapshotMatchesRunResult(input.snapshot, input.runResult);
-    const existing = this.#store.findByHallAgentRunId(input.snapshot.hallAgentRunId);
+    const terminalInput =
+      input.runResult === undefined
+        ? input
+        : {
+            ...input,
+            snapshot: enrichTerminalSnapshotWithRunResult(input.snapshot, input.runResult),
+          };
+    const existing = this.#store.findByHallAgentRunId(terminalInput.snapshot.hallAgentRunId);
     if (existing !== undefined) {
       const expected = createAgentExecutionArtifactRecord(
         buildArtifactInput({
-          input,
+          input: terminalInput,
           evidence: evidenceFromExisting(existing),
           artifactId: existing.artifactId,
           createdAt: existing.createdAt,
@@ -68,9 +76,9 @@ export class AgentExecutionArtifactTerminalizer {
       return existing;
     }
 
-    const evidence = await this.#collectEvidence(input);
+    const evidence = await this.#collectEvidence(terminalInput);
     const existingAwareInput = buildArtifactInput({
-      input,
+      input: terminalInput,
       evidence,
       artifactId: this.#artifactIdFactory(),
       createdAt: this.#now(),
@@ -83,7 +91,7 @@ export class AgentExecutionArtifactTerminalizer {
       if (!(error instanceof AgentExecutionArtifactConflictError)) {
         throw toTerminalizationError(error);
       }
-      const raced = this.#store.findByHallAgentRunId(input.snapshot.hallAgentRunId);
+      const raced = this.#store.findByHallAgentRunId(terminalInput.snapshot.hallAgentRunId);
       if (raced !== undefined && semanticallyEquivalent(raced, expected)) return raced;
       throw new AgentExecutionArtifactMismatchError();
     }

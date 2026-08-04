@@ -419,6 +419,7 @@ export class TaskStore implements TaskStorePort {
     record.runId = undefined;
     record.terminalEventType = undefined;
     record.failure = undefined;
+    record.cancellationRequested = false;
     record.completedAt = undefined;
     record.startedAt = undefined;
     record.task = { ...record.task, status: "assigned", updatedAt: now };

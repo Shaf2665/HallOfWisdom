@@ -48,6 +48,7 @@ function buildDurableComposition() {
     mockStepDelayMs: 0,
     limits: DEFAULT_LIMITS,
     db,
+    agentWorktreeRoot: path.join(dataDir, "agent-worktrees"),
   });
 }
 

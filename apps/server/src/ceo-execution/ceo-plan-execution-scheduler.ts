@@ -1758,7 +1758,7 @@ export class CeoPlanExecutionScheduler {
     const outcomes: EmergencyStopOutcome[] = [];
     for (const step of activeSteps) {
       try {
-        const result = this.#taskOrchestrator.requestCancellation(step.childTaskId);
+        const result = this.#taskOrchestrator.requestCancellation(step.childTaskId, "orchestrator");
         outcomes.push({
           planStepId: step.planStepId,
           childTaskId: step.childTaskId,

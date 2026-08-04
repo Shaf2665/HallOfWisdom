@@ -929,6 +929,7 @@ describe("CEO plan-run execution REST routes", () => {
       mockStepDelayMs: 0,
       limits: DEFAULT_LIMITS,
       db,
+      agentWorktreeRoot: path.join(tempRoot, "agent-worktrees"),
     });
     composition.activateAutonomousScheduling();
     const app = await createHallCoreApp({

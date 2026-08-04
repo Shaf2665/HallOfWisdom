@@ -135,6 +135,14 @@ export function assertTerminalSnapshotMatchesRunResult(
   }
 }
 
+export function enrichTerminalSnapshotWithRunResult(
+  snapshot: AgentExecutionTerminalSnapshot,
+  runResult: RunTaskResult,
+): AgentExecutionTerminalSnapshot {
+  assertTerminalSnapshotMatchesRunResult(snapshot, runResult);
+  return { ...snapshot, exitCode: runResult.exitCode };
+}
+
 function validateRunResultIdentity(
   runResult: RunTaskResult | undefined,
   input: BuildTerminalSnapshotInput,

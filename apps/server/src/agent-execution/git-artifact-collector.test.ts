@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { InMemoryAgentWorktreeStore } from "../agent-worktrees/in-memory-agent-worktree-store.js";
+import type { ValidatedAgentWorktreeHandle } from "../agent-worktrees/agent-worktree-manager.js";
 import type {
   GitCommandResult,
   GitCommandRunner,
@@ -23,6 +24,16 @@ afterEach(() => {
 });
 
 describe("GitArtifactCollector", () => {
+  it("requires a strong worktree validator", () => {
+    expect(
+      () =>
+        new GitArtifactCollector({
+          gitRunner: new ScriptedGitRunner([]),
+          worktreeValidator: undefined,
+        }),
+    ).toThrow(GitArtifactCollectionError);
+  });
+
   it("collects final real-Git evidence without external diff or textconv execution", async () => {
     const ownedRoot = makeTempDir("hall owned ");
     const worktreePath = path.join(ownedRoot, "wt_worktree-1");
@@ -84,9 +95,8 @@ describe("GitArtifactCollector", () => {
 
     const store = createReadyWorktreeStore({ worktreePath, baseCommit });
     const collector = new GitArtifactCollector({
-      worktreeStore: store,
       gitRunner: new NodeGitCommandRunner(),
-      ownedRoot,
+      worktreeValidator: validatorForStore(store, ownedRoot, worktreePath),
     });
 
     const evidence = await collector.collect("worktree-1");
@@ -125,9 +135,8 @@ describe("GitArtifactCollector", () => {
       okBytes(nul("2\t1\tsrc/a.ts", "-\t-\t😀.ts")),
     ]);
     const collector = new GitArtifactCollector({
-      worktreeStore: fixture.store,
       gitRunner: runner,
-      ownedRoot: fixture.ownedRoot,
+      worktreeValidator: fixture.validator,
     });
 
     const evidence = await collector.collect("worktree-1");
@@ -169,48 +178,42 @@ describe("GitArtifactCollector", () => {
     const malformed = createReadyWorktree();
     await expect(
       new GitArtifactCollector({
-        worktreeStore: malformed.store,
         gitRunner: new ScriptedGitRunner([
           ok(`${FINAL_COMMIT}\n`),
           okBytes(Buffer.alloc(0)),
           okBytes(Buffer.alloc(0)),
           okBytes(nul("not-a-num\t0\tsrc/a.ts")),
         ]),
-        ownedRoot: malformed.ownedRoot,
+        worktreeValidator: malformed.validator,
       }).collect("worktree-1"),
     ).rejects.toThrow(GitArtifactCollectionError);
 
     const invalidUtf8 = createReadyWorktree();
     await expect(
       new GitArtifactCollector({
-        worktreeStore: invalidUtf8.store,
         gitRunner: new ScriptedGitRunner([
           ok(`${FINAL_COMMIT}\n`),
           okBytes(Buffer.from([0xff, 0x00])),
           okBytes(Buffer.alloc(0)),
           okBytes(Buffer.alloc(0)),
         ]),
-        ownedRoot: invalidUtf8.ownedRoot,
+        worktreeValidator: invalidUtf8.validator,
       }).collect("worktree-1"),
     ).rejects.toThrow(GitArtifactCollectionError);
 
     const overflow = createReadyWorktree();
     await expect(
       new GitArtifactCollector({
-        worktreeStore: overflow.store,
         gitRunner: new ScriptedGitRunner([{ ...ok(`${FINAL_COMMIT}\n`), stdoutTruncated: true }]),
-        ownedRoot: overflow.ownedRoot,
+        worktreeValidator: overflow.validator,
       }).collect("worktree-1"),
     ).rejects.toThrow(GitArtifactCollectionError);
   });
 
   it("does not invoke Git when manager-owned worktree validation rejects identity or containment", async () => {
-    const fixture = createReadyWorktree();
     const runner = new ScriptedGitRunner([ok(`${FINAL_COMMIT}\n`)]);
     const collector = new GitArtifactCollector({
-      worktreeStore: fixture.store,
       gitRunner: runner,
-      ownedRoot: fixture.ownedRoot,
       worktreeValidator: {
         validateReadyWorktree() {
           return Promise.reject(
@@ -228,11 +231,38 @@ describe("GitArtifactCollector", () => {
 function createReadyWorktree(): {
   readonly store: InMemoryAgentWorktreeStore;
   readonly ownedRoot: string;
+  readonly worktreePath: string;
+  readonly validator: {
+    readonly validateReadyWorktree: () => Promise<ValidatedAgentWorktreeHandle>;
+  };
 } {
   const ownedRoot = makeTempDir("hall-owned ");
   const worktreePath = path.join(ownedRoot, "wt_worktree-1");
   fs.mkdirSync(worktreePath, { recursive: true });
-  return { store: createReadyWorktreeStore({ worktreePath, baseCommit: BASE_COMMIT }), ownedRoot };
+  const store = createReadyWorktreeStore({ worktreePath, baseCommit: BASE_COMMIT });
+  return {
+    store,
+    ownedRoot,
+    worktreePath,
+    validator: validatorForStore(store, ownedRoot, worktreePath),
+  };
+}
+
+function validatorForStore(
+  store: InMemoryAgentWorktreeStore,
+  ownedRoot: string,
+  worktreePath: string,
+): { readonly validateReadyWorktree: () => Promise<ValidatedAgentWorktreeHandle> } {
+  return {
+    validateReadyWorktree() {
+      return Promise.resolve({
+        record: store.get("worktree-1"),
+        canonicalOwnedRoot: fs.realpathSync.native(ownedRoot),
+        canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+        agentWorkingDirectory: fs.realpathSync.native(worktreePath),
+      });
+    },
+  };
 }
 
 function createReadyWorktreeStore(input: {

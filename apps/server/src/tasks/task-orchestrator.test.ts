@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
+import { AgentRegistry, EXIT_CODES } from "@hall-of-wisdom/hall-runner";
 import { MockAgentAdapter } from "@hall-of-wisdom/mock-agent";
 import {
   EventFactory,
@@ -20,7 +20,7 @@ import {
   TaskStateConflictError,
   WorkspaceValidationFailedError,
 } from "../errors/app-error.js";
-import { validCreateTaskBody, waitUntil } from "../test-support.js";
+import { buildTestApp, validCreateTaskBody, waitUntil } from "../test-support.js";
 import { HallDatabase } from "../persistence/database.js";
 import { runMigrations } from "../persistence/migration-runner.js";
 import { SqliteTaskStore } from "./sqlite-task-store.js";
@@ -317,6 +317,25 @@ describe("TaskOrchestrator cancellation", () => {
     expect(taskStore.get(task.taskId).task.status).toBe("cancelled");
   });
 
+  it("repeated cancellation preserves the first actor", async () => {
+    const { orchestrator, taskStore, eventStore } = buildOrchestrator({
+      workspaceRoot: tempRoot,
+      scenario: "cancellable",
+      progressMessageCount: 5,
+      stepDelayMs: 20,
+    });
+    const { task } = orchestrator.createTask(validCreateTaskBody());
+    await waitUntil(() => taskStore.get(task.taskId).eventCount >= 1);
+    orchestrator.requestCancellation(task.taskId, "user");
+    expect(orchestrator.requestCancellation(task.taskId, "system").alreadyRequested).toBe(true);
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+    const cancelledEvent = eventStore
+      .list(task.taskId)
+      .find((event) => event.type === "run.cancelled");
+    expect(cancelledEvent?.payload.cancelledBy).toBe("user");
+  });
+
   it("cancelling an unknown task raises TaskNotFoundError-derived behavior via the store", () => {
     const { orchestrator } = buildOrchestrator({ workspaceRoot: tempRoot });
     expect(() => orchestrator.requestCancellation("nonexistent")).toThrow();
@@ -389,6 +408,39 @@ describe("TaskOrchestrator cancellation", () => {
       .filter((event) => event.type === "run.cancelled");
     expect(cancelledEvents).toHaveLength(1);
   });
+
+  it("REST cancellation records user actor and a user cancellation artifact", async () => {
+    const { app, harness } = await buildTestApp({
+      workspaceRoot: tempRoot,
+      mockAgentConfig: { scenario: "cancellable", progressMessageCount: 5, stepDelayMs: 30 },
+    });
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      payload: validCreateTaskBody(),
+    });
+    const created = JSON.parse(create.body) as { task: { taskId: string }; runId: string };
+    await waitUntil(() => harness.taskStore.get(created.task.taskId).eventCount >= 1);
+
+    const cancel = await app.inject({
+      method: "POST",
+      url: `/api/v1/tasks/${created.task.taskId}/cancel`,
+    });
+
+    expect(cancel.statusCode).toBe(202);
+    await waitUntil(() => harness.taskStore.get(created.task.taskId).task.status === "cancelled");
+    await waitUntil(
+      () => harness.agentExecutionArtifactStore.findByHallAgentRunId(created.runId) !== undefined,
+    );
+    const cancelledEvent = harness.eventStore
+      .list(created.task.taskId)
+      .find((event) => event.type === "run.cancelled");
+    expect(cancelledEvent?.payload.cancelledBy).toBe("user");
+    const artifact = harness.agentExecutionArtifactStore.getByHallAgentRunId(created.runId);
+    expect(artifact.terminalReasonCode).toBe("CANCELLED_BY_USER");
+    expect(artifact.exitCode).toBe(EXIT_CODES.cancelled);
+    await app.close();
+  });
 });
 
 describe("TaskOrchestrator shutdown", () => {
@@ -414,6 +466,25 @@ describe("TaskOrchestrator shutdown", () => {
     const start = Date.now();
     await orchestrator.shutdown(1000);
     expect(Date.now() - start).toBeLessThan(1200);
+  });
+
+  it("shutdown cancellation records the system actor", async () => {
+    const { orchestrator, taskStore, eventStore } = buildOrchestrator({
+      workspaceRoot: tempRoot,
+      scenario: "cancellable",
+      progressMessageCount: 20,
+      stepDelayMs: 50,
+    });
+    const { task } = orchestrator.createTask(validCreateTaskBody());
+    await waitUntil(() => taskStore.get(task.taskId).eventCount >= 1);
+
+    await orchestrator.shutdown(1000);
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+    const cancelledEvent = eventStore
+      .list(task.taskId)
+      .find((event) => event.type === "run.cancelled");
+    expect(cancelledEvent?.payload.cancelledBy).toBe("system");
   });
 
   it("shutdown() resolves immediately when there are no active runs", async () => {

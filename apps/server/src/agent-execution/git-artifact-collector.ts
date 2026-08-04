@@ -1,30 +1,19 @@
 import { TextDecoder } from "node:util";
-import fs from "node:fs";
-import path from "node:path";
 import type { AgentExecutionArtifactDiffSummary } from "../execution-artifacts/agent-execution-artifact-record.js";
 import {
   compareArtifactStrings,
   normalizeChangedPath,
 } from "../execution-artifacts/agent-execution-artifact-record.js";
-import type { AgentWorktreeRecord } from "../agent-worktrees/agent-worktree-record.js";
-import type { AgentWorktreeStorePort } from "../agent-worktrees/agent-worktree-store-port.js";
 import type { ValidatedAgentWorktreeHandle } from "../agent-worktrees/agent-worktree-manager.js";
 import {
   assertGitSuccess,
   type GitCommandResult,
   type GitCommandRunner,
 } from "../agent-worktrees/git-command-runner.js";
-import {
-  assertContainedPath,
-  canonicalizeExistingDirectory,
-  samePath,
-} from "../agent-worktrees/path-safety.js";
 import { GitArtifactCollectionError } from "./agent-execution-errors.js";
 
 export interface GitArtifactCollectorOptions {
-  readonly worktreeStore: AgentWorktreeStorePort;
   readonly gitRunner: GitCommandRunner;
-  readonly ownedRoot: string;
   readonly worktreeValidator?: GitArtifactWorktreeValidator | undefined;
   readonly gitTimeoutMs?: number | undefined;
   readonly maxOutputBytes?: number | undefined;
@@ -49,17 +38,16 @@ export interface GitArtifactEvidence {
 }
 
 export class GitArtifactCollector {
-  readonly #worktreeStore: AgentWorktreeStorePort;
   readonly #gitRunner: GitCommandRunner;
-  readonly #ownedRoot: string;
-  readonly #worktreeValidator: GitArtifactWorktreeValidator | undefined;
+  readonly #worktreeValidator: GitArtifactWorktreeValidator;
   readonly #gitTimeoutMs: number;
   readonly #maxOutputBytes: number;
 
   constructor(options: GitArtifactCollectorOptions) {
-    this.#worktreeStore = options.worktreeStore;
+    if (options.worktreeValidator === undefined) {
+      throw new GitArtifactCollectionError("A strong worktree validator is required.");
+    }
     this.#gitRunner = options.gitRunner;
-    this.#ownedRoot = options.ownedRoot;
     this.#worktreeValidator = options.worktreeValidator;
     this.#gitTimeoutMs = options.gitTimeoutMs ?? 10_000;
     this.#maxOutputBytes = options.maxOutputBytes ?? 200_000;
@@ -148,54 +136,11 @@ export class GitArtifactCollector {
     worktreeId: string,
     signal: AbortSignal | undefined,
   ): Promise<ValidatedAgentWorktreeHandle> {
-    if (this.#worktreeValidator !== undefined) {
-      return this.#worktreeValidator.validateReadyWorktree({
-        worktreeId,
-        requireHeadAtBase: false,
-        signal,
-      });
-    }
-    const record = this.#worktreeStore.get(worktreeId);
-    const worktreePath = this.#validatedReadyWorktreePath(record);
-    return {
-      record,
-      canonicalOwnedRoot: canonicalizeExistingDirectory(
-        this.#ownedRoot,
-        "Hall-owned worktree root",
-      ),
-      canonicalWorktreePath: worktreePath,
-      agentWorkingDirectory: worktreePath,
-    };
-  }
-
-  #validatedReadyWorktreePath(record: AgentWorktreeRecord): string {
-    if (record.status !== "ready") {
-      throw new GitArtifactCollectionError("Worktree is not ready for artifact collection.");
-    }
-    const ownedRoot = canonicalizeExistingDirectory(this.#ownedRoot, "Hall-owned worktree root");
-    const worktreePath = canonicalizeExistingDirectory(record.canonicalWorktreePath, "worktree");
-    if (!samePath(worktreePath, record.canonicalWorktreePath)) {
-      throw new GitArtifactCollectionError("Worktree path is not canonical.");
-    }
-    try {
-      assertContainedPath({
-        rootPath: ownedRoot,
-        candidatePath: worktreePath,
-        description: "worktree",
-      });
-    } catch {
-      throw new GitArtifactCollectionError("Worktree path is outside the Hall-owned root.");
-    }
-    const stats = fs.lstatSync(worktreePath);
-    if (stats.isSymbolicLink() || !stats.isDirectory()) {
-      throw new GitArtifactCollectionError("Worktree path is not a safe directory.");
-    }
-    assertContainedPath({
-      rootPath: worktreePath,
-      candidatePath: path.join(worktreePath, ".git"),
-      description: "worktree Git metadata",
+    return this.#worktreeValidator.validateReadyWorktree({
+      worktreeId,
+      requireHeadAtBase: false,
+      signal,
     });
-    return worktreePath;
   }
 
   async #runGitText(

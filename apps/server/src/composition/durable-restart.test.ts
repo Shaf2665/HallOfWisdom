@@ -113,6 +113,7 @@ describe("durable restart via the real composition roots", () => {
       limits: DEFAULT_LIMITS,
       comparisonRoot: input.comparisonRoot,
       db,
+      agentWorktreeRoot: path.join(dataDir, "agent-worktrees"),
     });
     return { db, composition };
   }

@@ -105,6 +105,7 @@ export interface TestHarnessOptions {
   readonly armAutonomousScheduling?: boolean | undefined;
   readonly agentWorktreeRoot?: string | undefined;
   readonly isolatedAgentAdapterIds?: readonly string[] | undefined;
+  readonly allowInMemoryAgentIsolation?: boolean | undefined;
 }
 
 export interface TestHarness {
@@ -174,21 +175,29 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
   const eventBus = new EventBus({ maxSubscribersPerTask: limits.maxSubscribersPerTask });
   const agentWorktreeStore = new InMemoryAgentWorktreeStore();
   const agentExecutionArtifactStore = new InMemoryAgentExecutionArtifactStore();
-  const agentWorktreeRoot =
-    options.agentWorktreeRoot ??
-    path.join(path.dirname(options.workspaceRoot), ".hall-agent-worktrees");
+  const isolatedAgentAdapterIds = options.isolatedAgentAdapterIds ?? [];
+  if (isolatedAgentAdapterIds.length > 0 && options.agentWorktreeRoot === undefined) {
+    throw new Error("Test isolated execution requires an explicit agentWorktreeRoot.");
+  }
+  if (isolatedAgentAdapterIds.length > 0 && options.allowInMemoryAgentIsolation !== true) {
+    throw new Error("Test isolated execution requires allowInMemoryAgentIsolation.");
+  }
   const gitRunner = new NodeGitCommandRunner();
-  const agentWorktreeManager = new AgentWorktreeManager({
-    store: agentWorktreeStore,
-    gitRunner,
-    ownedRoot: agentWorktreeRoot,
-  });
-  const gitArtifactCollector = new GitArtifactCollector({
-    worktreeStore: agentWorktreeStore,
-    gitRunner,
-    ownedRoot: agentWorktreeRoot,
-    worktreeValidator: agentWorktreeManager,
-  });
+  const agentWorktreeManager =
+    isolatedAgentAdapterIds.length > 0 && options.agentWorktreeRoot !== undefined
+      ? new AgentWorktreeManager({
+          store: agentWorktreeStore,
+          gitRunner,
+          ownedRoot: options.agentWorktreeRoot,
+        })
+      : undefined;
+  const gitArtifactCollector =
+    agentWorktreeManager !== undefined
+      ? new GitArtifactCollector({
+          gitRunner,
+          worktreeValidator: agentWorktreeManager,
+        })
+      : undefined;
 
   const orchestrator = new TaskOrchestrator({
     taskStore,
@@ -197,12 +206,15 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     registry,
     workspaceRoot: options.workspaceRoot,
     onExecutionError: options.onExecutionError,
-    executionCoordinator: new IsolatedAgentExecutionCoordinator({
-      isolationPolicy: new ExplicitAdapterIsolationPolicy(options.isolatedAgentAdapterIds ?? []),
-      worktreeManager: agentWorktreeManager,
-      worktreeStore: agentWorktreeStore,
-      worktreeValidator: agentWorktreeManager,
-    }),
+    executionCoordinator:
+      agentWorktreeManager !== undefined
+        ? new IsolatedAgentExecutionCoordinator({
+            isolationPolicy: new ExplicitAdapterIsolationPolicy(isolatedAgentAdapterIds),
+            worktreeManager: agentWorktreeManager,
+            worktreeStore: agentWorktreeStore,
+            worktreeValidator: agentWorktreeManager,
+          })
+        : undefined,
     artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
       store: agentExecutionArtifactStore,
       gitArtifactCollector,

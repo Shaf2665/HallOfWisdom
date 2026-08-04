@@ -40,7 +40,7 @@ export function registerTaskRoutes(app: FastifyInstance, deps: TaskRoutesDeps): 
   });
 
   app.post<{ Params: TaskIdParams }>("/api/v1/tasks/:taskId/cancel", async (request, reply) => {
-    const result = deps.orchestrator.requestCancellation(request.params.taskId);
+    const result = deps.orchestrator.requestCancellation(request.params.taskId, "user");
     await reply.status(202).send({
       taskId: request.params.taskId,
       cancellationRequested: true,

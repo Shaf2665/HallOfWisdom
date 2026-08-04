@@ -1,4 +1,3 @@
-import path from "node:path";
 import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import {
   MockAgentAdapter,
@@ -186,13 +185,15 @@ export function createCoreStoresComposition(
 ): CoreStoresComposition {
   const db = options.db;
   const isolatedAgentAdapterIds = options.isolatedAgentAdapterIds ?? [];
-  if (
-    db === undefined &&
-    isolatedAgentAdapterIds.length > 0 &&
-    options.allowInMemoryAgentIsolation !== true
-  ) {
+  const isolationEnabled = isolatedAgentAdapterIds.length > 0;
+  if (db === undefined && isolationEnabled && options.allowInMemoryAgentIsolation !== true) {
     throw new ServerCliError(
       "Isolated agent execution requires durable SQLite storage in this composition.",
+    );
+  }
+  if (isolationEnabled && options.agentWorktreeRoot === undefined) {
+    throw new ServerCliError(
+      "Isolated agent execution requires an explicit Hall-owned agent worktree root.",
     );
   }
 
@@ -219,27 +220,31 @@ export function createCoreStoresComposition(
     db !== undefined
       ? new SqliteAgentExecutionArtifactStore({ db })
       : new InMemoryAgentExecutionArtifactStore();
-  const agentWorktreeRoot =
-    options.agentWorktreeRoot ??
-    path.join(path.dirname(options.workspaceRoot), ".hall-agent-worktrees");
   const gitRunner = new NodeGitCommandRunner();
-  const agentWorktreeManager = new AgentWorktreeManager({
-    store: agentWorktreeStore,
-    gitRunner,
-    ownedRoot: agentWorktreeRoot,
-  });
-  const gitArtifactCollector = new GitArtifactCollector({
-    worktreeStore: agentWorktreeStore,
-    gitRunner,
-    ownedRoot: agentWorktreeRoot,
-    worktreeValidator: agentWorktreeManager,
-  });
-  const executionCoordinator = new IsolatedAgentExecutionCoordinator({
-    isolationPolicy: new ExplicitAdapterIsolationPolicy(isolatedAgentAdapterIds),
-    worktreeManager: agentWorktreeManager,
-    worktreeStore: agentWorktreeStore,
-    worktreeValidator: agentWorktreeManager,
-  });
+  const agentWorktreeManager =
+    isolationEnabled && options.agentWorktreeRoot !== undefined
+      ? new AgentWorktreeManager({
+          store: agentWorktreeStore,
+          gitRunner,
+          ownedRoot: options.agentWorktreeRoot,
+        })
+      : undefined;
+  const gitArtifactCollector =
+    agentWorktreeManager !== undefined
+      ? new GitArtifactCollector({
+          gitRunner,
+          worktreeValidator: agentWorktreeManager,
+        })
+      : undefined;
+  const executionCoordinator =
+    agentWorktreeManager !== undefined
+      ? new IsolatedAgentExecutionCoordinator({
+          isolationPolicy: new ExplicitAdapterIsolationPolicy(isolatedAgentAdapterIds),
+          worktreeManager: agentWorktreeManager,
+          worktreeStore: agentWorktreeStore,
+          worktreeValidator: agentWorktreeManager,
+        })
+      : undefined;
   const artifactTerminalizer = new AgentExecutionArtifactTerminalizer({
     store: agentExecutionArtifactStore,
     gitArtifactCollector,
@@ -340,6 +345,7 @@ export function createMockAgentServerComposition(
     limits: options.limits,
     onExecutionError: options.onExecutionError,
     db: options.db,
+    agentWorktreeRoot: options.agentWorktreeRoot,
     isolatedAgentAdapterIds: options.isolatedAgentAdapterIds,
     allowInMemoryAgentIsolation: options.allowInMemoryAgentIsolation,
     onTaskMutated: (taskId) => {

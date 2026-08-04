@@ -198,6 +198,13 @@ durable production composition configures the Codex adapter id for future isolat
 when durable stores are present, but Phase 16.3 does not change Codex CLI arguments, permission
 profiles, or adapter behavior.
 
+Isolated execution also requires an explicit Hall-owned worktree root in composition. Hall does not
+derive a sibling fallback root from the source repository, because an implicit durable path would
+make worktree ownership depend on deployment layout rather than operator configuration. Tests that
+exercise isolated execution with in-memory stores must opt in explicitly and supply a temporary
+Hall-owned root; ordinary non-isolated test and ephemeral server composition continues without
+creating any worktree root.
+
 For isolated executions, TaskOrchestrator completes the existing launch gates before it asks
 `IsolatedAgentExecutionCoordinator` to prepare a worktree. TaskOrchestrator rechecks the selected
 adapter with `detect()` before worktree preparation, re-reads the committed task assignment, and
@@ -225,6 +232,21 @@ that run. If worktree preparation fails, the adapter is not launched; the existi
 infrastructure-failure path records a bounded `WORKTREE_PREPARATION_FAILED` failure and artifact
 terminalization may record a failed non-authoritative summary when enough safe state exists.
 
+The coordinator does not contain a path-only validation fallback. If isolated execution is enabled
+without the manager, store, or strong manager-owned validator, it fails closed before launch. The
+Git evidence collector has the same boundary: it accepts only a worktree id, calls the strong
+validator before any read-only Git evidence command, and cannot be configured to trust a persisted
+or lexical path by itself.
+
+Cancellation is run-local. A cancellation request is persisted on the exact task run before the
+active abort signal is triggered, and the first cancellation actor wins for that run. REST
+cancellation records `user`, CEO emergency stop records `orchestrator`, and server shutdown records
+`system`; later duplicate cancellation attempts do not overwrite the actor. If cancellation wins
+while worktree preparation is still pending, or after the worktree manager has durably recorded a
+`creation_failed` worktree but before provider launch, TaskOrchestrator records a synthetic
+`run.cancelled` terminal event and does not launch the adapter. Any raw preparation exception text
+remains internal and is not used as the cancellation reason.
+
 Terminal artifact creation is deliberately ordered after authoritative terminal state. The
 orchestrator first receives or derives the terminal outcome from normalized Hall event semantics,
 persists the existing task/run/event terminal state, and only then invokes the artifact
@@ -236,6 +258,13 @@ If Hall Runner also returns a terminal result, the result identity must match th
 artifact creation. Artifact write failures are reported through the internal execution-error
 diagnostic hook and stderr logging, but they do not roll back terminal state, change the outcome,
 reopen a task, trigger retry, relaunch the provider, or clean the worktree.
+
+When the authoritative terminal event has a matching Hall Runner result, Phase 16.3 enriches the
+immutable artifact snapshot with the bounded process exit code from that same result. A mismatched
+or later result is ignored instead of changing the artifact. Infrastructure failures after a ready
+worktree has been prepared, including event-store failures while persisting provider events, pass
+the prepared worktree id into terminal artifact creation so Git evidence can still be collected by
+the strong worktree validator.
 
 Outcome mapping is provider-neutral:
 

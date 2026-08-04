@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
+import { AgentRegistry, EXIT_CODES, type RunTaskResult } from "@hall-of-wisdom/hall-runner";
 import {
   EventFactory,
   parseAgentAdapterDescriptor,
@@ -24,7 +24,10 @@ import { AgentExecutionArtifactMismatchError } from "./agent-execution-errors.js
 import { ExplicitAdapterIsolationPolicy } from "./isolation-policy.js";
 import { IsolatedAgentExecutionCoordinator } from "./isolated-agent-execution-coordinator.js";
 import { AgentExecutionArtifactTerminalizer } from "./agent-execution-artifact-terminalizer.js";
-import { buildAgentExecutionTerminalSnapshot } from "./agent-execution-terminal-snapshot.js";
+import {
+  buildAgentExecutionTerminalSnapshot,
+  enrichTerminalSnapshotWithRunResult,
+} from "./agent-execution-terminal-snapshot.js";
 
 const NOW = "2026-08-03T10:00:00.000Z";
 const BASE_COMMIT = "a".repeat(40);
@@ -46,6 +49,7 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
     const coordinator = new IsolatedAgentExecutionCoordinator({
       isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
       worktreeStore: store,
+      worktreeValidator: unusedWorktreeValidator(),
       worktreeManager: {
         createWorktree(input) {
           createCalls += 1;
@@ -81,6 +85,61 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
     expect(createCalls).toBe(1);
   });
 
+  it("fails closed when isolated execution is configured without all worktree services", async () => {
+    const source = makeTempDir("hall-source ");
+    const baseInput = {
+      adapterId: "hall.isolated-agent",
+      approvedSourceWorkingDirectory: source,
+      taskInput: taskInput("task-missing-services"),
+    };
+
+    await expect(
+      new IsolatedAgentExecutionCoordinator({
+        isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+        worktreeStore: new InMemoryAgentWorktreeStore(),
+        worktreeValidator: unusedWorktreeValidator(),
+      }).prepare(baseInput),
+    ).rejects.toThrow("worktree services are not available");
+
+    await expect(
+      new IsolatedAgentExecutionCoordinator({
+        isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+        worktreeManager: {
+          createWorktree() {
+            throw new Error("must not create without store");
+          },
+        },
+        worktreeValidator: unusedWorktreeValidator(),
+      }).prepare(baseInput),
+    ).rejects.toThrow("worktree services are not available");
+
+    await expect(
+      new IsolatedAgentExecutionCoordinator({
+        isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+        worktreeStore: new InMemoryAgentWorktreeStore(),
+        worktreeManager: {
+          createWorktree() {
+            throw new Error("must not create without validator");
+          },
+        },
+      }).prepare(baseInput),
+    ).rejects.toThrow("worktree services are not available");
+  });
+
+  it("allows non-isolated execution without worktree services", async () => {
+    const source = makeTempDir("hall-source ");
+    const input = taskInput("task-non-isolated");
+    const prepared = await new IsolatedAgentExecutionCoordinator({
+      isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.other-agent"]),
+    }).prepare({
+      adapterId: "hall.plain-agent",
+      approvedSourceWorkingDirectory: source,
+      taskInput: input,
+    });
+
+    expect(prepared).toEqual({ taskInput: input, isolation: "none", worktreeId: undefined });
+  });
+
   it("passes the mapped Hall-owned worktree directory to the adapter and persists a worktree artifact", async () => {
     const workspaceRoot = makeTempDir("hall workspace ");
     const sourceSubdir = path.join(workspaceRoot, "apps", "server");
@@ -107,6 +166,7 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
       executionCoordinator: new IsolatedAgentExecutionCoordinator({
         isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
         worktreeStore,
+        worktreeValidator: unusedWorktreeValidator(),
         worktreeManager: {
           createWorktree(input) {
             preparedHallTaskId = input.hallTaskId;
@@ -170,6 +230,115 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
     expect(artifact.finalCommit).toBe(FINAL_COMMIT);
   });
 
+  it("retains isolated worktree evidence when event storage fails after provider work", async () => {
+    const workspaceRoot = makeTempDir("hall workspace ");
+    const ownedRoot = makeTempDir("hall owned ");
+    const worktreePath = path.join(ownedRoot, "wt_capacity-worktree");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const registry = new AgentRegistry();
+    let startCalls = 0;
+    registry.register({
+      descriptor: agentDescriptor("hall.isolated-agent", "Capacity Agent"),
+      detect: () =>
+        Promise.resolve({
+          installed: true,
+          availability: "available",
+          executionTrust: "isolated",
+        }),
+      startTask(input) {
+        startCalls += 1;
+        const factory = new EventFactory({
+          runId: input.runId,
+          taskId: input.hallTask.taskId,
+          agentId: input.agentIdentity.agentId,
+        });
+        async function* events() {
+          await Promise.resolve();
+          yield factory.runStarted();
+          yield factory.messageDelta("capacity-triggering progress");
+        }
+        return Promise.resolve({
+          runId: input.runId,
+          events: events(),
+          completion: new Promise(() => {
+            // Hall Runner consumes the event stream.
+          }),
+          currentState: "running" as const,
+          cancel(): void {
+            // The synthetic failure wins.
+          },
+        });
+      },
+    });
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const worktreeStore = new InMemoryAgentWorktreeStore();
+    const artifactStore = new InMemoryAgentExecutionArtifactStore();
+    let preparedHallTaskId = "";
+    let preparedHallAgentRunId = "";
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 2 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot,
+      executionCoordinator: new IsolatedAgentExecutionCoordinator({
+        isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+        worktreeStore,
+        worktreeValidator: unusedWorktreeValidator(),
+        worktreeManager: {
+          createWorktree(input) {
+            preparedHallTaskId = input.hallTaskId;
+            preparedHallAgentRunId = input.hallAgentRunId;
+            return Promise.resolve({
+              record: readyWorktreeRecord({
+                worktreeId: "capacity-worktree",
+                hallTaskId: input.hallTaskId,
+                hallAgentRunId: input.hallAgentRunId,
+                source: workspaceRoot,
+                worktreePath,
+              }),
+              agentWorkingDirectory: fs.realpathSync.native(worktreePath),
+            });
+          },
+        },
+      }),
+      artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+        store: artifactStore,
+        artifactIdFactory: () => "artifact-capacity-worktree",
+        now: () => "2026-08-03T10:00:05.000Z",
+        gitArtifactCollector: {
+          collect(worktreeId) {
+            return Promise.resolve({
+              worktreeId,
+              hallTaskId: preparedHallTaskId,
+              hallAgentRunId: preparedHallAgentRunId,
+              baseCommit: BASE_COMMIT,
+              finalCommit: FINAL_COMMIT,
+              changedFiles: ["src/capacity.ts"],
+              diffSummary: { filesChanged: 1, insertions: 3, deletions: 1 },
+            });
+          },
+        },
+      }),
+    });
+
+    const { task, runId } = orchestrator.createTask({
+      projectId: "project-1",
+      title: "Capacity worktree evidence",
+      adapterId: "hall.isolated-agent",
+    });
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "failed");
+    await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
+    const artifact = artifactStore.getByHallAgentRunId(runId ?? "");
+    expect(startCalls).toBe(1);
+    expect(artifact.terminalReasonCode).toBe("EVENT_CAPACITY_REACHED");
+    expect(artifact.worktreeId).toBe("capacity-worktree");
+    expect(artifact.baseCommit).toBe(BASE_COMMIT);
+    expect(artifact.finalCommit).toBe(FINAL_COMMIT);
+    expect(artifact.changedFiles).toEqual(["src/capacity.ts"]);
+  });
+
   it("creates a non-isolated terminal artifact without a worktree id", async () => {
     const workspaceRoot = makeTempDir("hall workspace ");
     const capturedInputs: AgentTaskInput[] = [];
@@ -203,9 +372,75 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
     await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
     const artifact = artifactStore.getByHallAgentRunId(runId ?? "");
     expect(artifact.outcome).toBe("completed");
+    expect(artifact.exitCode).toBe(EXIT_CODES.completed);
     expect(artifact.worktreeId).toBeUndefined();
     expect(artifact.changedFiles).toEqual([]);
     expect(capturedInputs[0]?.workingDirectory).toBe(fs.realpathSync.native(workspaceRoot));
+  });
+
+  it("persists the validated failed exit code", async () => {
+    const workspaceRoot = makeTempDir("hall workspace ");
+    const registry = new AgentRegistry();
+    registry.register({
+      descriptor: agentDescriptor("hall.failing-agent", "Failing Agent"),
+      detect: () =>
+        Promise.resolve({
+          installed: true,
+          availability: "available",
+          executionTrust: "isolated",
+        }),
+      startTask(input) {
+        const factory = new EventFactory({
+          runId: input.runId,
+          taskId: input.hallTask.taskId,
+          agentId: input.agentIdentity.agentId,
+        });
+        async function* events() {
+          await Promise.resolve();
+          yield factory.runStarted();
+          yield factory.runFailed({
+            code: "CONTROLLED_FAILURE",
+            message: "Controlled safe failure.",
+            retryable: false,
+          });
+        }
+        return Promise.resolve({
+          runId: input.runId,
+          events: events(),
+          completion: new Promise(() => {
+            // Hall Runner consumes the event stream.
+          }),
+          currentState: "running" as const,
+          cancel(): void {
+            // Already terminal in this fixture.
+          },
+        });
+      },
+    });
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const artifactStore = new InMemoryAgentExecutionArtifactStore();
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 100 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot,
+      artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+        store: artifactStore,
+        artifactIdFactory: () => "artifact-failed-exit",
+        now: () => "2026-08-03T10:00:05.000Z",
+      }),
+    });
+
+    const { task, runId } = orchestrator.createTask({
+      projectId: "project-1",
+      title: "Failed exit code",
+      adapterId: "hall.failing-agent",
+    });
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "failed");
+    await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
+    expect(artifactStore.getByHallAgentRunId(runId ?? "").exitCode).toBe(EXIT_CODES.failed);
   });
 
   it("fails isolated execution before worktree creation when adapter preflight is unavailable", async () => {
@@ -239,6 +474,7 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
       executionCoordinator: new IsolatedAgentExecutionCoordinator({
         isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
         worktreeStore: new InMemoryAgentWorktreeStore(),
+        worktreeValidator: unusedWorktreeValidator(),
         worktreeManager: {
           createWorktree() {
             createCalls += 1;
@@ -299,6 +535,7 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
       executionCoordinator: new IsolatedAgentExecutionCoordinator({
         isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
         worktreeStore: new InMemoryAgentWorktreeStore(),
+        worktreeValidator: unusedWorktreeValidator(),
         worktreeManager: {
           createWorktree() {
             createCalls += 1;
@@ -333,6 +570,179 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
     expect(startCalls).toBe(0);
     expect(artifact.outcome).toBe("cancelled");
     expect(artifact.worktreeId).toBeUndefined();
+  });
+
+  it("honors cancellation while isolated worktree preparation is pending", async () => {
+    const workspaceRoot = makeTempDir("hall workspace ");
+    const registry = new AgentRegistry();
+    let startCalls = 0;
+    registry.register(
+      controlledAdapter({
+        adapterId: "hall.isolated-agent",
+        detect: () =>
+          Promise.resolve({
+            installed: true,
+            availability: "available",
+            executionTrust: "isolated",
+          }),
+        startTask() {
+          startCalls += 1;
+          throw new Error("provider launch must not run after preparation cancellation");
+        },
+      }),
+    );
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const worktreeStore = new InMemoryAgentWorktreeStore();
+    const artifactStore = new InMemoryAgentExecutionArtifactStore();
+    const createGate = deferred<CreateAgentWorktreeResult>();
+    let createCalls = 0;
+    const worktreePath = path.join(makeTempDir("hall owned "), "wt_creating");
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 100 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot,
+      executionCoordinator: new IsolatedAgentExecutionCoordinator({
+        isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+        worktreeStore,
+        worktreeValidator: unusedWorktreeValidator(),
+        worktreeManager: {
+          createWorktree(input) {
+            createCalls += 1;
+            worktreeStore.createCreating({
+              worktreeId: "creating",
+              hallTaskId: input.hallTaskId,
+              hallAgentRunId: input.hallAgentRunId,
+              canonicalSourceRepositoryRoot: fs.realpathSync.native(workspaceRoot),
+              sourceWorkingDirectoryRelativePath: ".",
+              baseCommit: BASE_COMMIT,
+              canonicalWorktreePath: worktreePath,
+              createdAt: NOW,
+            });
+            return createGate.promise;
+          },
+        },
+      }),
+      artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+        store: artifactStore,
+        artifactIdFactory: () => "artifact-cancel-during-prep",
+        now: () => "2026-08-03T10:00:05.000Z",
+      }),
+    });
+
+    const { task, runId } = orchestrator.createTask({
+      projectId: "project-1",
+      title: "Cancelled during worktree preparation",
+      adapterId: "hall.isolated-agent",
+    });
+    await waitUntil(() => createCalls === 1);
+    orchestrator.requestCancellation(task.taskId, "user");
+    createGate.reject(new Error("synthetic preparation abort text must not leak"));
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+    await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
+    const artifact = artifactStore.getByHallAgentRunId(runId ?? "");
+    expect(startCalls).toBe(0);
+    expect(artifact.outcome).toBe("cancelled");
+    expect(artifact.terminalReasonCode).toBe("CANCELLED_BY_USER");
+    expect(artifact.safeTerminalSummary).not.toContain("synthetic preparation abort text");
+    expect(artifact.worktreeId).toBeUndefined();
+    expect(worktreeStore.get("creating").status).toBe("creating");
+  });
+
+  it("cancels instead of failing when cancellation wins after a creation-failed worktree record exists", async () => {
+    const workspaceRoot = makeTempDir("hall workspace ");
+    const ownedRoot = makeTempDir("hall owned ");
+    const worktreePath = path.join(ownedRoot, "wt_creation-failed");
+    const registry = new AgentRegistry();
+    let startCalls = 0;
+    registry.register(
+      controlledAdapter({
+        adapterId: "hall.isolated-agent",
+        detect: () =>
+          Promise.resolve({
+            installed: true,
+            availability: "available",
+            executionTrust: "isolated",
+          }),
+        startTask() {
+          startCalls += 1;
+          throw new Error("provider launch must not run");
+        },
+      }),
+    );
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const worktreeStore = new InMemoryAgentWorktreeStore();
+    const artifactStore = new InMemoryAgentExecutionArtifactStore();
+    let createdHallTaskId = "";
+    let createdHallAgentRunId = "";
+    let createCalls = 0;
+    const throwGate = deferred<undefined>();
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 100 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot,
+      executionCoordinator: new IsolatedAgentExecutionCoordinator({
+        isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+        worktreeStore,
+        worktreeValidator: unusedWorktreeValidator(),
+        worktreeManager: {
+          async createWorktree(input) {
+            createCalls += 1;
+            createdHallTaskId = input.hallTaskId;
+            createdHallAgentRunId = input.hallAgentRunId;
+            const creating = worktreeStore.createCreating({
+              worktreeId: "creation-failed",
+              hallTaskId: input.hallTaskId,
+              hallAgentRunId: input.hallAgentRunId,
+              canonicalSourceRepositoryRoot: fs.realpathSync.native(workspaceRoot),
+              sourceWorkingDirectoryRelativePath: ".",
+              baseCommit: BASE_COMMIT,
+              canonicalWorktreePath: worktreePath,
+              createdAt: NOW,
+            });
+            worktreeStore.markCreationFailed({
+              worktreeId: creating.worktreeId,
+              expectedRevision: creating.revision,
+              safeFailureCode: "AGENT_WORKTREE_UNEXPECTED_FAILURE",
+              safeFailureSummary: "Preparation was aborted safely.",
+              now: NOW,
+            });
+            await throwGate.promise;
+            throw new Error("synthetic failed preparation text must not leak");
+          },
+        },
+      }),
+      artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+        store: artifactStore,
+        artifactIdFactory: () => "artifact-cancel-after-creation-failed",
+        now: () => "2026-08-03T10:00:05.000Z",
+      }),
+    });
+
+    const { task, runId } = orchestrator.createTask({
+      projectId: "project-1",
+      title: "Cancelled after creation failed",
+      adapterId: "hall.isolated-agent",
+    });
+    await waitUntil(() => createCalls === 1);
+    await waitUntil(() => worktreeStore.get("creation-failed").status === "creation_failed");
+    orchestrator.requestCancellation(task.taskId, "user");
+    throwGate.resolve(undefined);
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+    await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
+    expect(startCalls).toBe(0);
+    expect(worktreeStore.get("creation-failed").status).toBe("creation_failed");
+    expect(worktreeStore.get("creation-failed").hallTaskId).toBe(createdHallTaskId);
+    expect(worktreeStore.get("creation-failed").hallAgentRunId).toBe(createdHallAgentRunId);
+    const artifact = artifactStore.getByHallAgentRunId(runId ?? "");
+    expect(artifact.outcome).toBe("cancelled");
+    expect(artifact.worktreeId).toBeUndefined();
+    expect(artifact.safeTerminalSummary).not.toContain("synthetic failed preparation text");
   });
 
   it("honors cancellation after isolated worktree preparation before provider launch", async () => {
@@ -373,6 +783,7 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
       executionCoordinator: new IsolatedAgentExecutionCoordinator({
         isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
         worktreeStore,
+        worktreeValidator: unusedWorktreeValidator(),
         worktreeManager: {
           createWorktree(input) {
             createCalls += 1;
@@ -475,6 +886,39 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
 
     expect(second).toEqual(first);
     expect(collectCalls).toBe(1);
+  });
+
+  it("enriches a terminal snapshot with a validated exit code without mutating the original", () => {
+    const terminalEvent = new EventFactory({
+      runId: "run-exit",
+      taskId: "task-exit",
+      agentId: "hall.test-agent",
+    }).runCompleted("safe final summary");
+    const snapshot = buildAgentExecutionTerminalSnapshot({
+      preTerminalRecord: terminalTaskRecord({
+        taskId: "task-exit",
+        runId: "run-exit",
+        adapterId: "hall.test-agent",
+        terminalEventType: "run.completed",
+        status: "completed",
+      }),
+      adapterId: "hall.test-agent",
+      event: terminalEvent,
+    });
+    const result: RunTaskResult = {
+      runId: "run-exit",
+      taskId: "task-exit",
+      agentId: "hall.test-agent",
+      terminalEventType: "run.completed",
+      exitCode: 0,
+      eventCount: 2,
+    };
+
+    const enriched = enrichTerminalSnapshotWithRunResult(snapshot, result);
+
+    expect(snapshot.exitCode).toBeUndefined();
+    expect(enriched.exitCode).toBe(0);
+    expect(enriched).toEqual({ ...snapshot, exitCode: 0 });
   });
 
   it("rejects a mismatched existing artifact without overwriting it", async () => {
@@ -649,6 +1093,16 @@ function readyWorktreeRecord(input: {
     cleanedAt: undefined,
     safeFailureCode: undefined,
     safeFailureSummary: undefined,
+  };
+}
+
+function unusedWorktreeValidator(): {
+  readonly validateReadyWorktree: () => Promise<never>;
+} {
+  return {
+    validateReadyWorktree() {
+      return Promise.reject(new Error("worktree validator should not be used in this test"));
+    },
   };
 }
 

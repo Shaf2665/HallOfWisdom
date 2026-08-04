@@ -83,6 +83,7 @@ describe("CEO plan execution durable restart via the real composition root (Phas
         : {}),
       limits: DEFAULT_LIMITS,
       db,
+      agentWorktreeRoot: path.join(dataDir, "agent-worktrees"),
     });
     return { db, composition };
   }
