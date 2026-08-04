@@ -44,6 +44,22 @@ export interface CreateAgentWorktreeResult {
   readonly agentWorkingDirectory: string;
 }
 
+export interface ValidateReadyAgentWorktreeInput {
+  readonly worktreeId: string;
+  readonly hallTaskId?: string | undefined;
+  readonly hallAgentRunId?: string | undefined;
+  readonly sourceWorkingDirectory?: string | undefined;
+  readonly requireHeadAtBase?: boolean | undefined;
+  readonly signal?: AbortSignal | undefined;
+}
+
+export interface ValidatedAgentWorktreeHandle {
+  readonly record: AgentWorktreeRecord;
+  readonly canonicalOwnedRoot: string;
+  readonly canonicalWorktreePath: string;
+  readonly agentWorkingDirectory: string;
+}
+
 export class AgentWorktreeManager {
   readonly #store: AgentWorktreeStorePort;
   readonly #gitRunner: GitCommandRunner;
@@ -226,6 +242,98 @@ export class AgentWorktreeManager {
     }
   }
 
+  async validateReadyWorktree(
+    input: ValidateReadyAgentWorktreeInput,
+  ): Promise<ValidatedAgentWorktreeHandle> {
+    assertSafePathToken(input.worktreeId, "worktree id");
+    const record = this.#store.get(input.worktreeId);
+    if (record.status !== "ready") {
+      throw new AgentWorktreePathError("worktree is not ready.");
+    }
+    if (
+      (input.hallTaskId !== undefined && record.hallTaskId !== input.hallTaskId) ||
+      (input.hallAgentRunId !== undefined && record.hallAgentRunId !== input.hallAgentRunId)
+    ) {
+      throw new AgentWorktreePathError("worktree record does not match the requested run.");
+    }
+    const ownedRoot = canonicalizeOwnedRoot({
+      rawOwnedRoot: this.#ownedRoot,
+      canonicalSourceRepositoryRoot: record.canonicalSourceRepositoryRoot,
+    });
+    const checked = this.#validateCleanupTarget(record, ownedRoot);
+    if (!checked.pathExists) {
+      throw new AgentWorktreePathError("worktree path is missing.");
+    }
+    const worktreePath = checked.expectedPath;
+    await this.#assertWorktreeRegistered(
+      record.canonicalSourceRepositoryRoot,
+      worktreePath,
+      input.signal,
+    );
+    const topLevel = canonicalizeExistingDirectory(
+      (
+        await this.#runGit(
+          ["rev-parse", "--show-toplevel"],
+          worktreePath,
+          "GIT_WORKTREE_TOPLEVEL_FAILED",
+          input.signal,
+        )
+      ).trim(),
+      "worktree top-level",
+    );
+    if (!samePath(topLevel, worktreePath)) {
+      throw new AgentWorktreePathError("worktree top-level does not match the recorded path.");
+    }
+    const commonDir = await this.#resolveGitCommonDirectory(worktreePath, input.signal);
+    const sourceCommonDir = await this.#resolveGitCommonDirectory(
+      record.canonicalSourceRepositoryRoot,
+      input.signal,
+    );
+    if (!samePath(commonDir, sourceCommonDir)) {
+      throw new AgentWorktreePathError("worktree Git common directory does not match the source.");
+    }
+    if (input.requireHeadAtBase === true) {
+      const actualHead = await this.#resolveHeadCommit(worktreePath, input.signal);
+      if (actualHead.toLowerCase() !== record.baseCommit.toLowerCase()) {
+        throw new AgentWorktreeGitOperationError(
+          "GIT_WORKTREE_HEAD_MISMATCH",
+          "Worktree HEAD did not match the recorded base commit.",
+        );
+      }
+      await this.#assertDetachedHead(worktreePath, input.signal);
+    }
+    if (input.sourceWorkingDirectory !== undefined) {
+      const sourceWorkingDirectory = canonicalizeExistingDirectory(
+        input.sourceWorkingDirectory,
+        "source working directory",
+      );
+      const expectedSourceDirectory =
+        record.sourceWorkingDirectoryRelativePath === "."
+          ? record.canonicalSourceRepositoryRoot
+          : path.join(
+              record.canonicalSourceRepositoryRoot,
+              record.sourceWorkingDirectoryRelativePath,
+            );
+      const canonicalExpectedSource = canonicalizeExistingDirectory(
+        expectedSourceDirectory,
+        "recorded source working directory",
+      );
+      if (!samePath(canonicalExpectedSource, sourceWorkingDirectory)) {
+        throw new AgentWorktreePathError("worktree source directory does not match.");
+      }
+    }
+    const agentWorkingDirectory = this.#resolveEquivalentWorkingDirectory(
+      worktreePath,
+      record.sourceWorkingDirectoryRelativePath,
+    );
+    return {
+      record,
+      canonicalOwnedRoot: ownedRoot,
+      canonicalWorktreePath: worktreePath,
+      agentWorkingDirectory,
+    };
+  }
+
   #validateCleanupTarget(
     record: AgentWorktreeRecord,
     ownedRoot: string,
@@ -392,6 +500,18 @@ export class AgentWorktreeManager {
     if (result.exitCode !== 0 && result.exitCode !== 1) {
       assertGitSuccess(result, "GIT_WORKTREE_DETACH_CHECK_FAILED");
     }
+  }
+
+  async #resolveGitCommonDirectory(cwd: string, signal: AbortSignal | undefined): Promise<string> {
+    const stdout = await this.#runGit(
+      ["rev-parse", "--git-common-dir"],
+      cwd,
+      "GIT_WORKTREE_COMMON_DIR_FAILED",
+      signal,
+    );
+    const raw = stdout.trim();
+    const resolved = path.isAbsolute(raw) ? raw : path.resolve(cwd, raw);
+    return canonicalizeExistingDirectory(resolved, "Git common directory");
   }
 
   #resolveEquivalentWorkingDirectory(worktreePath: string, relativePath: string): string {

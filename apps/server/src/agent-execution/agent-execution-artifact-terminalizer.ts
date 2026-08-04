@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type { RunTaskResult } from "@hall-of-wisdom/hall-runner";
-import type { NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
-import type { TaskRecord } from "../tasks/task-record.js";
 import {
   AgentExecutionArtifactConflictError,
   AgentExecutionArtifactError,
@@ -18,6 +16,10 @@ import {
   AgentExecutionArtifactMismatchError,
   AgentExecutionArtifactTerminalizationError,
 } from "./agent-execution-errors.js";
+import {
+  assertTerminalSnapshotMatchesRunResult,
+  type AgentExecutionTerminalSnapshot,
+} from "./agent-execution-terminal-snapshot.js";
 
 export interface AgentExecutionArtifactTerminalizerOptions {
   readonly store: AgentExecutionArtifactStorePort;
@@ -31,13 +33,8 @@ export interface GitArtifactEvidenceCollector {
 }
 
 export interface TerminalizeAgentExecutionInput {
-  readonly taskRecord: TaskRecord;
-  readonly adapterId: string;
-  readonly runId: string;
-  readonly worktreeId?: string | undefined;
-  readonly terminalEvent?: NormalizedAgentEvent | undefined;
+  readonly snapshot: AgentExecutionTerminalSnapshot;
   readonly runResult?: RunTaskResult | undefined;
-  readonly signal?: AbortSignal | undefined;
 }
 
 export class AgentExecutionArtifactTerminalizer {
@@ -54,7 +51,8 @@ export class AgentExecutionArtifactTerminalizer {
   }
 
   async terminalize(input: TerminalizeAgentExecutionInput): Promise<AgentExecutionArtifactRecord> {
-    const existing = this.#store.findByHallAgentRunId(input.runId);
+    assertTerminalSnapshotMatchesRunResult(input.snapshot, input.runResult);
+    const existing = this.#store.findByHallAgentRunId(input.snapshot.hallAgentRunId);
     if (existing !== undefined) {
       const expected = createAgentExecutionArtifactRecord(
         buildArtifactInput({
@@ -85,7 +83,7 @@ export class AgentExecutionArtifactTerminalizer {
       if (!(error instanceof AgentExecutionArtifactConflictError)) {
         throw toTerminalizationError(error);
       }
-      const raced = this.#store.findByHallAgentRunId(input.runId);
+      const raced = this.#store.findByHallAgentRunId(input.snapshot.hallAgentRunId);
       if (raced !== undefined && semanticallyEquivalent(raced, expected)) return raced;
       throw new AgentExecutionArtifactMismatchError();
     }
@@ -94,21 +92,21 @@ export class AgentExecutionArtifactTerminalizer {
   async #collectEvidence(
     input: TerminalizeAgentExecutionInput,
   ): Promise<GitArtifactEvidence | undefined> {
-    if (input.worktreeId === undefined) return undefined;
+    if (input.snapshot.worktreeId === undefined) return undefined;
     if (this.#gitArtifactCollector === undefined) {
       throw new AgentExecutionArtifactTerminalizationError(
         "Worktree artifact evidence is required, but no Git collector is configured.",
       );
     }
-    const evidence = await this.#gitArtifactCollector.collect(input.worktreeId, input.signal);
-    if (evidence.worktreeId !== input.worktreeId) {
+    const evidence = await this.#gitArtifactCollector.collect(input.snapshot.worktreeId);
+    if (evidence.worktreeId !== input.snapshot.worktreeId) {
       throw new AgentExecutionArtifactTerminalizationError(
         "Collected Git evidence did not match the expected worktree.",
       );
     }
     if (
-      evidence.hallTaskId !== input.taskRecord.task.taskId ||
-      evidence.hallAgentRunId !== input.runId
+      evidence.hallTaskId !== input.snapshot.hallTaskId ||
+      evidence.hallAgentRunId !== input.snapshot.hallAgentRunId
     ) {
       throw new AgentExecutionArtifactTerminalizationError(
         "Collected Git evidence did not match the authoritative task run.",
@@ -142,37 +140,29 @@ function buildArtifactInput(options: {
 }): CreateAgentExecutionArtifactInput {
   const { input, evidence } = options;
   const outcome = outcomeFromTerminal(input);
-  const finishedAt = input.taskRecord.completedAt ?? input.terminalEvent?.timestamp;
-  if (finishedAt === undefined) {
-    throw new AgentExecutionArtifactTerminalizationError(
-      "Task has no authoritative terminal timestamp.",
-    );
-  }
-  const startedAt = input.taskRecord.startedAt ?? finishedAt;
   return {
     artifactId: options.artifactId,
-    hallTaskId: input.taskRecord.task.taskId,
-    hallAgentRunId: input.runId,
-    adapterId: input.adapterId,
-    ...(input.worktreeId !== undefined ? { worktreeId: input.worktreeId } : {}),
+    hallTaskId: input.snapshot.hallTaskId,
+    hallAgentRunId: input.snapshot.hallAgentRunId,
+    adapterId: input.snapshot.adapterId,
+    ...(input.snapshot.worktreeId !== undefined ? { worktreeId: input.snapshot.worktreeId } : {}),
     outcome,
     ...terminalFailureFields(outcome, input),
-    startedAt,
-    finishedAt,
-    durationMs: durationMs(startedAt, finishedAt),
-    ...(input.runResult?.exitCode !== undefined ? { exitCode: input.runResult.exitCode } : {}),
+    startedAt: input.snapshot.startedAt,
+    finishedAt: input.snapshot.finishedAt,
+    durationMs: durationMs(input.snapshot.startedAt, input.snapshot.finishedAt),
+    ...(input.snapshot.exitCode !== undefined ? { exitCode: input.snapshot.exitCode } : {}),
     ...(evidence?.baseCommit !== undefined ? { baseCommit: evidence.baseCommit } : {}),
     ...(evidence?.finalCommit !== undefined ? { finalCommit: evidence.finalCommit } : {}),
     changedFiles: evidence?.changedFiles ?? [],
     diffSummary: evidence?.diffSummary ?? { filesChanged: 0, insertions: 0, deletions: 0 },
-    ...finalSummaryFields(input.terminalEvent),
+    ...finalSummaryFields(input.snapshot),
     createdAt: options.createdAt,
   };
 }
 
 function outcomeFromTerminal(input: TerminalizeAgentExecutionInput): AgentExecutionArtifactOutcome {
-  const type = input.taskRecord.terminalEventType ?? input.terminalEvent?.type;
-  switch (type) {
+  switch (input.snapshot.terminalEvent.type) {
     case "run.completed":
       return "completed";
     case "run.failed":
@@ -195,24 +185,26 @@ function terminalFailureFields(
 } {
   if (outcome === "completed") return {};
   if (outcome === "failed") {
+    const failure = input.snapshot.failure;
     return {
-      terminalReasonCode: input.taskRecord.failure?.code ?? "TASK_EXECUTION_FAILED",
-      safeTerminalSummary: input.taskRecord.failure?.message,
+      terminalReasonCode: failure?.code ?? "TASK_EXECUTION_FAILED",
+      safeTerminalSummary: failure?.message,
     };
   }
-  const cancelled = input.terminalEvent?.type === "run.cancelled" ? input.terminalEvent : undefined;
-  const by = cancelled?.payload.cancelledBy.toUpperCase() ?? "SYSTEM";
+  const by = input.snapshot.cancellation?.cancelledBy.toUpperCase() ?? "SYSTEM";
   return {
     terminalReasonCode: `CANCELLED_BY_${by}`,
-    safeTerminalSummary: cancelled?.payload.reason,
+    safeTerminalSummary: input.snapshot.cancellation?.reason,
   };
 }
 
-function finalSummaryFields(event: NormalizedAgentEvent | undefined): {
+function finalSummaryFields(snapshot: AgentExecutionTerminalSnapshot): {
   readonly finalSummary?: string | undefined;
 } {
-  if (event?.type !== "run.completed" || event.payload.summary === undefined) return {};
-  return { finalSummary: event.payload.summary };
+  if (snapshot.terminalEvent.type !== "run.completed" || snapshot.finalSummary === undefined) {
+    return {};
+  }
+  return { finalSummary: snapshot.finalSummary };
 }
 
 function durationMs(startedAt: string, finishedAt: string): number {

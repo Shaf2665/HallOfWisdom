@@ -1,7 +1,7 @@
 # 0016 — Durable Isolated Codex Execution
 
-Status: Phase 16.3 orchestration integration implemented. Codex adapter hardening and real Codex
-execution remain deferred.
+Status: Phase 16.3 orchestration integration implemented and hardened. Codex adapter hardening and
+real Codex execution remain deferred.
 
 Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 built
 the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and SQLite
@@ -192,33 +192,50 @@ worktree  adapter   terminalizer
 Isolation is activated only by an injected server-internal policy configured at the composition
 root. TaskOrchestrator has no Codex-specific adapter branch, and task title, task description,
 adapter output, and untrusted metadata cannot opt into isolation. Unknown adapters keep the
-existing non-isolated execution path. The production composition currently configures the Codex
-adapter id for future isolated execution, but Phase 16.3 does not change Codex CLI arguments,
-permission profiles, or adapter behavior.
+existing non-isolated execution path. Production-like isolation wiring requires durable SQLite
+stores; in-memory isolation is available only through an explicit test-only composition opt-in. The
+durable production composition configures the Codex adapter id for future isolated execution only
+when durable stores are present, but Phase 16.3 does not change Codex CLI arguments, permission
+profiles, or adapter behavior.
 
 For isolated executions, TaskOrchestrator completes the existing launch gates before it asks
-`IsolatedAgentExecutionCoordinator` to prepare a worktree. The coordinator uses the approved
-canonical source working directory associated with the task, calls `AgentWorktreeManager` with the
-Hall task id and Hall agent-run id, and requires a durable `ready` worktree before adapter launch.
-Only the adapter input `workingDirectory` is replaced, with the manager-produced path corresponding
-to the source-relative subdirectory inside the Hall-owned worktree. The primary source checkout is
-not passed to the isolated adapter. The adapter cannot choose the worktree root or path, and the
-path is never derived from task text, provider output, or repository names.
+`IsolatedAgentExecutionCoordinator` to prepare a worktree. TaskOrchestrator rechecks the selected
+adapter with `detect()` before worktree preparation, re-reads the committed task assignment, and
+fails closed before creating a worktree if the adapter is unavailable or no longer satisfies the
+task's execution requirements. Cancellation is also checked before adapter preflight, after adapter
+preflight, and after worktree preparation but before provider launch. A cancellation at any of
+those boundaries records an authoritative synthetic `run.cancelled` event and does not invoke the
+adapter. The coordinator uses the approved canonical source working directory associated with the
+task, calls `AgentWorktreeManager` with the Hall task id and Hall agent-run id, and requires a
+durable `ready` worktree before adapter launch. Only the adapter input `workingDirectory` is
+replaced, with the manager-produced path corresponding to the source-relative subdirectory inside
+the Hall-owned worktree. The primary source checkout is not passed to the isolated adapter. The
+adapter cannot choose the worktree root or path, and the path is never derived from task text,
+provider output, or repository names.
 
 If a worktree already exists for the same Hall agent run, the coordinator reuses it only when the
 durable record matches the exact task id, run id, approved source location, canonical worktree path,
-and `ready` status. Conflicting records fail closed before adapter launch, and no second active
-worktree is created for that run. If worktree preparation fails, the adapter is not launched; the
-existing authoritative infrastructure-failure path records a bounded `WORKTREE_PREPARATION_FAILED`
-failure and artifact terminalization may record a failed non-authoritative summary when enough safe
-state exists.
+and `ready` status. Reuse goes through `AgentWorktreeManager.validateReadyWorktree`, which
+reconstructs the expected lexical path from the canonical owned root and fixed `wt_` prefix,
+rejects symlink or junction replacement with `lstat`/`realpath`, verifies Git registration,
+verifies the worktree top-level, verifies the source and worktree share the same common Git
+directory, and, for execution reuse, requires detached `HEAD` to equal the recorded base commit.
+Conflicting records fail closed before adapter launch, and no second active worktree is created for
+that run. If worktree preparation fails, the adapter is not launched; the existing authoritative
+infrastructure-failure path records a bounded `WORKTREE_PREPARATION_FAILED` failure and artifact
+terminalization may record a failed non-authoritative summary when enough safe state exists.
 
 Terminal artifact creation is deliberately ordered after authoritative terminal state. The
 orchestrator first receives or derives the terminal outcome from normalized Hall event semantics,
 persists the existing task/run/event terminal state, and only then invokes the artifact
-terminalizer. Artifact write failures are reported through the internal execution-error diagnostic
-hook and stderr logging, but they do not roll back terminal state, change the outcome, reopen a
-task, trigger retry, relaunch the provider, or clean the worktree.
+terminalizer. The terminalizer receives an immutable `AgentExecutionTerminalSnapshot` captured from
+the committed pre-terminal task assignment and exact terminal event identity; it does not re-read a
+mutable task record after terminalization, so later retry, reassignment, or repair mutations cannot
+change the artifact's task id, run id, adapter id, agent id, outcome, timestamps, or worktree id.
+If Hall Runner also returns a terminal result, the result identity must match the snapshot before
+artifact creation. Artifact write failures are reported through the internal execution-error
+diagnostic hook and stderr logging, but they do not roll back terminal state, change the outcome,
+reopen a task, trigger retry, relaunch the provider, or clean the worktree.
 
 Outcome mapping is provider-neutral:
 
@@ -234,14 +251,17 @@ Authoritative task timestamps provide `startedAt`, `finishedAt`, and `durationMs
 uses its clock only for artifact `createdAt`.
 
 When an artifact includes a worktree id, Git evidence is collected only by internal worktree id.
-`GitArtifactCollector` loads the durable worktree record, requires `ready`, revalidates the
-canonical Hall-owned root and canonical worktree path, rejects symlink or non-directory
-replacement, and verifies the path remains inside the Hall-owned root before any Git command. The
-terminalizer then requires the collected worktree id, Hall task id, and Hall agent-run id to match
-the authoritative execution before insertion. The artifact stores only the worktree id, base
-commit, final commit, relative changed paths, and diff counters; it never stores the absolute source
-or worktree path and Phase 16.3 intentionally does not add a database foreign key to
-`agent_worktrees`.
+`GitArtifactCollector` delegates ready-worktree identity checks to
+`AgentWorktreeManager.validateReadyWorktree`, requires `ready`, revalidates the canonical
+Hall-owned root and canonical worktree path, rejects symlink or non-directory replacement, verifies
+the path remains inside the Hall-owned root, and verifies Git still sees that same worktree before
+any Git evidence command. Post-terminal evidence collection is not controlled by the provider
+execution abort signal; a late cancellation cannot truncate the immutable terminal snapshot after
+authoritative task state has already landed. The terminalizer then requires the collected worktree
+id, Hall task id, and Hall agent-run id to match the authoritative execution before insertion. The
+artifact stores only the worktree id, base commit, final commit, relative changed paths, and diff
+counters; it never stores the absolute source or worktree path and Phase 16.3 intentionally does
+not add a database foreign key to `agent_worktrees`.
 
 The Git evidence collector is read-only and uses a fixed Git command family with structured argv,
 `shell: false`, bounded output, timeouts, `core.fsmonitor=false`, `--no-ext-diff`, and
@@ -407,6 +427,10 @@ then filters are detected from effective configuration before any repository fil
 then checkout runs with an empty Hall-owned hooks path and filesystem-monitor suppression.
 Phase 16.1 accepts only an already-approved local repository and does not initialize or update
 submodules.
+
+If a Git runner receives an already-aborted signal, it returns a bounded aborted result without
+spawning a child process. If a signal aborts after spawn, the runner kills the child and still
+settles through bounded stdout/stderr collection.
 
 ## Cleanup behavior
 

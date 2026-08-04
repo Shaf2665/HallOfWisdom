@@ -63,6 +63,30 @@ describe("NodeGitCommandRunner", () => {
     );
   });
 
+  it("does not spawn Git when the caller signal is already aborted", async () => {
+    let spawnCalls = 0;
+    const controller = new AbortController();
+    controller.abort();
+    const runner = new NodeGitCommandRunner({
+      spawner: {
+        spawn() {
+          spawnCalls += 1;
+          return completedProcess("", "", 0);
+        },
+      },
+    });
+
+    const result = await runner.run({
+      args: ["status"],
+      cwd: "C:\\Repo",
+      timeoutMs: 1000,
+      signal: controller.signal,
+    });
+
+    expect(spawnCalls).toBe(0);
+    expect(result.spawnError).toBe("aborted");
+  });
+
   it("caps stdout and stderr", async () => {
     const runner = new NodeGitCommandRunner({
       spawner: {

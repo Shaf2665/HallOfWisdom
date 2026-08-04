@@ -8,6 +8,7 @@ import {
 } from "../execution-artifacts/agent-execution-artifact-record.js";
 import type { AgentWorktreeRecord } from "../agent-worktrees/agent-worktree-record.js";
 import type { AgentWorktreeStorePort } from "../agent-worktrees/agent-worktree-store-port.js";
+import type { ValidatedAgentWorktreeHandle } from "../agent-worktrees/agent-worktree-manager.js";
 import {
   assertGitSuccess,
   type GitCommandResult,
@@ -24,8 +25,17 @@ export interface GitArtifactCollectorOptions {
   readonly worktreeStore: AgentWorktreeStorePort;
   readonly gitRunner: GitCommandRunner;
   readonly ownedRoot: string;
+  readonly worktreeValidator?: GitArtifactWorktreeValidator | undefined;
   readonly gitTimeoutMs?: number | undefined;
   readonly maxOutputBytes?: number | undefined;
+}
+
+export interface GitArtifactWorktreeValidator {
+  validateReadyWorktree(input: {
+    readonly worktreeId: string;
+    readonly requireHeadAtBase?: boolean | undefined;
+    readonly signal?: AbortSignal | undefined;
+  }): Promise<ValidatedAgentWorktreeHandle>;
 }
 
 export interface GitArtifactEvidence {
@@ -42,6 +52,7 @@ export class GitArtifactCollector {
   readonly #worktreeStore: AgentWorktreeStorePort;
   readonly #gitRunner: GitCommandRunner;
   readonly #ownedRoot: string;
+  readonly #worktreeValidator: GitArtifactWorktreeValidator | undefined;
   readonly #gitTimeoutMs: number;
   readonly #maxOutputBytes: number;
 
@@ -49,13 +60,15 @@ export class GitArtifactCollector {
     this.#worktreeStore = options.worktreeStore;
     this.#gitRunner = options.gitRunner;
     this.#ownedRoot = options.ownedRoot;
+    this.#worktreeValidator = options.worktreeValidator;
     this.#gitTimeoutMs = options.gitTimeoutMs ?? 10_000;
     this.#maxOutputBytes = options.maxOutputBytes ?? 200_000;
   }
 
   async collect(worktreeId: string, signal?: AbortSignal): Promise<GitArtifactEvidence> {
-    const record = this.#worktreeStore.get(worktreeId);
-    const worktreePath = this.#validatedReadyWorktreePath(record);
+    const handle = await this.#validatedReadyWorktree(worktreeId, signal);
+    const record = handle.record;
+    const worktreePath = handle.canonicalWorktreePath;
     const finalCommit = (
       await this.#runGitText(["rev-parse", "--verify", "HEAD^{commit}"], worktreePath, signal)
     ).trim();
@@ -128,6 +141,30 @@ export class GitArtifactCollector {
         insertions,
         deletions,
       },
+    };
+  }
+
+  async #validatedReadyWorktree(
+    worktreeId: string,
+    signal: AbortSignal | undefined,
+  ): Promise<ValidatedAgentWorktreeHandle> {
+    if (this.#worktreeValidator !== undefined) {
+      return this.#worktreeValidator.validateReadyWorktree({
+        worktreeId,
+        requireHeadAtBase: false,
+        signal,
+      });
+    }
+    const record = this.#worktreeStore.get(worktreeId);
+    const worktreePath = this.#validatedReadyWorktreePath(record);
+    return {
+      record,
+      canonicalOwnedRoot: canonicalizeExistingDirectory(
+        this.#ownedRoot,
+        "Hall-owned worktree root",
+      ),
+      canonicalWorktreePath: worktreePath,
+      agentWorkingDirectory: worktreePath,
     };
   }
 

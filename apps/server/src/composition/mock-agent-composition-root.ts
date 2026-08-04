@@ -82,6 +82,7 @@ export interface ServerCompositionOptions {
   readonly db?: HallDatabase | undefined;
   readonly agentWorktreeRoot?: string | undefined;
   readonly isolatedAgentAdapterIds?: readonly string[] | undefined;
+  readonly allowInMemoryAgentIsolation?: boolean | undefined;
 }
 
 export interface ServerComposition {
@@ -137,6 +138,7 @@ export interface CoreStoresCompositionOptions {
   readonly db?: HallDatabase | undefined;
   readonly agentWorktreeRoot?: string | undefined;
   readonly isolatedAgentAdapterIds?: readonly string[] | undefined;
+  readonly allowInMemoryAgentIsolation?: boolean | undefined;
   /**
    * Phase 14.1 — an optional generic hook fired after every status-changing
    * `taskStore` mutation, regardless of which caller performed it. This
@@ -183,6 +185,16 @@ export function createCoreStoresComposition(
   options: CoreStoresCompositionOptions,
 ): CoreStoresComposition {
   const db = options.db;
+  const isolatedAgentAdapterIds = options.isolatedAgentAdapterIds ?? [];
+  if (
+    db === undefined &&
+    isolatedAgentAdapterIds.length > 0 &&
+    options.allowInMemoryAgentIsolation !== true
+  ) {
+    throw new ServerCliError(
+      "Isolated agent execution requires durable SQLite storage in this composition.",
+    );
+  }
 
   const rawTaskStore: TaskStorePort =
     db !== undefined
@@ -220,11 +232,13 @@ export function createCoreStoresComposition(
     worktreeStore: agentWorktreeStore,
     gitRunner,
     ownedRoot: agentWorktreeRoot,
+    worktreeValidator: agentWorktreeManager,
   });
   const executionCoordinator = new IsolatedAgentExecutionCoordinator({
-    isolationPolicy: new ExplicitAdapterIsolationPolicy(options.isolatedAgentAdapterIds ?? []),
+    isolationPolicy: new ExplicitAdapterIsolationPolicy(isolatedAgentAdapterIds),
     worktreeManager: agentWorktreeManager,
     worktreeStore: agentWorktreeStore,
+    worktreeValidator: agentWorktreeManager,
   });
   const artifactTerminalizer = new AgentExecutionArtifactTerminalizer({
     store: agentExecutionArtifactStore,
@@ -326,6 +340,8 @@ export function createMockAgentServerComposition(
     limits: options.limits,
     onExecutionError: options.onExecutionError,
     db: options.db,
+    isolatedAgentAdapterIds: options.isolatedAgentAdapterIds,
+    allowInMemoryAgentIsolation: options.allowInMemoryAgentIsolation,
     onTaskMutated: (taskId) => {
       ceoOrchestratorRef.current?.onChildTaskMutated(taskId);
       const scheduler = schedulerRef.current;

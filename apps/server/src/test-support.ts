@@ -187,6 +187,7 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     worktreeStore: agentWorktreeStore,
     gitRunner,
     ownedRoot: agentWorktreeRoot,
+    worktreeValidator: agentWorktreeManager,
   });
 
   const orchestrator = new TaskOrchestrator({
@@ -200,6 +201,7 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
       isolationPolicy: new ExplicitAdapterIsolationPolicy(options.isolatedAgentAdapterIds ?? []),
       worktreeManager: agentWorktreeManager,
       worktreeStore: agentWorktreeStore,
+      worktreeValidator: agentWorktreeManager,
     }),
     artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
       store: agentExecutionArtifactStore,

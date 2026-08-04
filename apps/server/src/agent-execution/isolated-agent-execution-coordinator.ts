@@ -5,6 +5,7 @@ import {
   AgentWorktreePathError,
 } from "../agent-worktrees/agent-worktree-errors.js";
 import type { CreateAgentWorktreeResult } from "../agent-worktrees/agent-worktree-manager.js";
+import type { ValidatedAgentWorktreeHandle } from "../agent-worktrees/agent-worktree-manager.js";
 import type { AgentWorktreeRecord } from "../agent-worktrees/agent-worktree-record.js";
 import type { AgentWorktreeStorePort } from "../agent-worktrees/agent-worktree-store-port.js";
 import {
@@ -22,6 +23,7 @@ export interface IsolatedAgentExecutionCoordinatorOptions {
   readonly isolationPolicy?: AgentExecutionIsolationPolicy | undefined;
   readonly worktreeManager?: AgentWorktreeCreator | undefined;
   readonly worktreeStore?: AgentWorktreeStorePort | undefined;
+  readonly worktreeValidator?: AgentWorktreeValidator | undefined;
 }
 
 export interface AgentWorktreeCreator {
@@ -31,6 +33,17 @@ export interface AgentWorktreeCreator {
     readonly sourceWorkingDirectory: string;
     readonly signal?: AbortSignal | undefined;
   }): Promise<CreateAgentWorktreeResult>;
+}
+
+export interface AgentWorktreeValidator {
+  validateReadyWorktree(input: {
+    readonly worktreeId: string;
+    readonly hallTaskId?: string | undefined;
+    readonly hallAgentRunId?: string | undefined;
+    readonly sourceWorkingDirectory?: string | undefined;
+    readonly requireHeadAtBase?: boolean | undefined;
+    readonly signal?: AbortSignal | undefined;
+  }): Promise<ValidatedAgentWorktreeHandle>;
 }
 
 export interface PrepareAgentExecutionInput {
@@ -50,11 +63,13 @@ export class IsolatedAgentExecutionCoordinator {
   readonly #isolationPolicy: AgentExecutionIsolationPolicy;
   readonly #worktreeManager: AgentWorktreeCreator | undefined;
   readonly #worktreeStore: AgentWorktreeStorePort | undefined;
+  readonly #worktreeValidator: AgentWorktreeValidator | undefined;
 
   constructor(options: IsolatedAgentExecutionCoordinatorOptions = {}) {
     this.#isolationPolicy = options.isolationPolicy ?? noAgentExecutionIsolationPolicy;
     this.#worktreeManager = options.worktreeManager;
     this.#worktreeStore = options.worktreeStore;
+    this.#worktreeValidator = options.worktreeValidator;
   }
 
   async prepare(input: PrepareAgentExecutionInput): Promise<PreparedAgentExecution> {
@@ -80,7 +95,7 @@ export class IsolatedAgentExecutionCoordinator {
     const prepared =
       existing === undefined
         ? await this.#createWorktree(this.#worktreeManager, input, sourceWorkingDirectory)
-        : this.#reuseWorktree(existing, input, sourceWorkingDirectory);
+        : await this.#reuseWorktree(existing, input, sourceWorkingDirectory);
 
     return {
       taskInput: {
@@ -113,7 +128,7 @@ export class IsolatedAgentExecutionCoordinator {
     record: AgentWorktreeRecord,
     input: PrepareAgentExecutionInput,
     sourceWorkingDirectory: string,
-  ): CreateAgentWorktreeResult {
+  ): Promise<CreateAgentWorktreeResult> {
     if (
       record.hallTaskId !== input.taskInput.hallTask.taskId ||
       record.hallAgentRunId !== input.taskInput.runId ||
@@ -122,6 +137,24 @@ export class IsolatedAgentExecutionCoordinator {
       throw new AgentExecutionWorktreePreparationError(
         "Existing worktree record does not match this execution.",
       );
+    }
+    if (this.#worktreeValidator !== undefined) {
+      return this.#worktreeValidator
+        .validateReadyWorktree({
+          worktreeId: record.worktreeId,
+          hallTaskId: input.taskInput.hallTask.taskId,
+          hallAgentRunId: input.taskInput.runId,
+          sourceWorkingDirectory,
+          requireHeadAtBase: true,
+          signal: input.signal,
+        })
+        .then((handle) => ({
+          record: handle.record,
+          agentWorkingDirectory: handle.agentWorkingDirectory,
+        }))
+        .catch((error: unknown) => {
+          throw toPreparationError(error);
+        });
     }
     const expectedSourceDirectory =
       record.sourceWorkingDirectoryRelativePath === "."
@@ -159,7 +192,7 @@ export class IsolatedAgentExecutionCoordinator {
       candidatePath: canonicalAgentWorkingDirectory,
       description: "recorded agent working directory",
     });
-    return { record, agentWorkingDirectory: canonicalAgentWorkingDirectory };
+    return Promise.resolve({ record, agentWorkingDirectory: canonicalAgentWorkingDirectory });
   }
 }
 

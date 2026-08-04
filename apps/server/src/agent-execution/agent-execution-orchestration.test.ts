@@ -17,12 +17,14 @@ import { EventStore } from "../events/event-store.js";
 import { EventBus } from "../events/event-bus.js";
 import { InMemoryAgentWorktreeStore } from "../agent-worktrees/in-memory-agent-worktree-store.js";
 import type { AgentWorktreeRecord } from "../agent-worktrees/agent-worktree-record.js";
+import type { CreateAgentWorktreeResult } from "../agent-worktrees/agent-worktree-manager.js";
 import { InMemoryAgentExecutionArtifactStore } from "../execution-artifacts/in-memory-agent-execution-artifact-store.js";
 import type { TaskRecord } from "../tasks/task-record.js";
 import { AgentExecutionArtifactMismatchError } from "./agent-execution-errors.js";
 import { ExplicitAdapterIsolationPolicy } from "./isolation-policy.js";
 import { IsolatedAgentExecutionCoordinator } from "./isolated-agent-execution-coordinator.js";
 import { AgentExecutionArtifactTerminalizer } from "./agent-execution-artifact-terminalizer.js";
+import { buildAgentExecutionTerminalSnapshot } from "./agent-execution-terminal-snapshot.js";
 
 const NOW = "2026-08-03T10:00:00.000Z";
 const BASE_COMMIT = "a".repeat(40);
@@ -206,6 +208,226 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
     expect(capturedInputs[0]?.workingDirectory).toBe(fs.realpathSync.native(workspaceRoot));
   });
 
+  it("fails isolated execution before worktree creation when adapter preflight is unavailable", async () => {
+    const workspaceRoot = makeTempDir("hall workspace ");
+    const registry = new AgentRegistry();
+    let startCalls = 0;
+    registry.register(
+      controlledAdapter({
+        adapterId: "hall.isolated-agent",
+        detect: () =>
+          Promise.resolve({
+            installed: false,
+            availability: "unavailable",
+            executionTrust: "isolated",
+          }),
+        startTask() {
+          startCalls += 1;
+          throw new Error("provider launch must not run after unavailable preflight");
+        },
+      }),
+    );
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const artifactStore = new InMemoryAgentExecutionArtifactStore();
+    let createCalls = 0;
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 100 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot,
+      executionCoordinator: new IsolatedAgentExecutionCoordinator({
+        isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+        worktreeStore: new InMemoryAgentWorktreeStore(),
+        worktreeManager: {
+          createWorktree() {
+            createCalls += 1;
+            throw new Error("worktree creation must not run after unavailable preflight");
+          },
+        },
+      }),
+      artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+        store: artifactStore,
+        artifactIdFactory: () => "artifact-unavailable",
+        now: () => "2026-08-03T10:00:05.000Z",
+      }),
+    });
+
+    const { task, runId } = orchestrator.createTask({
+      projectId: "project-1",
+      title: "Unavailable isolated task",
+      adapterId: "hall.isolated-agent",
+    });
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "failed");
+    await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
+    expect(createCalls).toBe(0);
+    expect(startCalls).toBe(0);
+    expect(artifactStore.getByHallAgentRunId(runId ?? "").terminalReasonCode).toBe(
+      "ADAPTER_UNAVAILABLE",
+    );
+  });
+
+  it("honors cancellation after adapter preflight before creating an isolated worktree", async () => {
+    const workspaceRoot = makeTempDir("hall workspace ");
+    const registry = new AgentRegistry();
+    const detectGate = deferred<AgentDetectionResult>();
+    let detectCalls = 0;
+    let startCalls = 0;
+    registry.register(
+      controlledAdapter({
+        adapterId: "hall.isolated-agent",
+        detect() {
+          detectCalls += 1;
+          return detectGate.promise;
+        },
+        startTask() {
+          startCalls += 1;
+          throw new Error("provider launch must not run after cancellation");
+        },
+      }),
+    );
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const artifactStore = new InMemoryAgentExecutionArtifactStore();
+    let createCalls = 0;
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 100 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot,
+      executionCoordinator: new IsolatedAgentExecutionCoordinator({
+        isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+        worktreeStore: new InMemoryAgentWorktreeStore(),
+        worktreeManager: {
+          createWorktree() {
+            createCalls += 1;
+            throw new Error("worktree creation must not run after cancellation");
+          },
+        },
+      }),
+      artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+        store: artifactStore,
+        artifactIdFactory: () => "artifact-cancel-before-worktree",
+        now: () => "2026-08-03T10:00:05.000Z",
+      }),
+    });
+
+    const { task, runId } = orchestrator.createTask({
+      projectId: "project-1",
+      title: "Cancelled before worktree",
+      adapterId: "hall.isolated-agent",
+    });
+    await waitUntil(() => detectCalls === 1);
+    orchestrator.requestCancellation(task.taskId);
+    detectGate.resolve({
+      installed: true,
+      availability: "available",
+      executionTrust: "isolated",
+    });
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+    await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
+    const artifact = artifactStore.getByHallAgentRunId(runId ?? "");
+    expect(createCalls).toBe(0);
+    expect(startCalls).toBe(0);
+    expect(artifact.outcome).toBe("cancelled");
+    expect(artifact.worktreeId).toBeUndefined();
+  });
+
+  it("honors cancellation after isolated worktree preparation before provider launch", async () => {
+    const workspaceRoot = makeTempDir("hall workspace ");
+    const ownedRoot = makeTempDir("hall owned ");
+    const worktreePath = path.join(ownedRoot, "wt_cancel-after-prep");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const registry = new AgentRegistry();
+    let startCalls = 0;
+    registry.register(
+      controlledAdapter({
+        adapterId: "hall.isolated-agent",
+        detect: () =>
+          Promise.resolve({
+            installed: true,
+            availability: "available",
+            executionTrust: "isolated",
+          }),
+        startTask() {
+          startCalls += 1;
+          throw new Error("provider launch must not run after cancellation");
+        },
+      }),
+    );
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const worktreeStore = new InMemoryAgentWorktreeStore();
+    const artifactStore = new InMemoryAgentExecutionArtifactStore();
+    const createGate = deferred<CreateAgentWorktreeResult>();
+    let createCalls = 0;
+    let createdHallTaskId = "";
+    let createdHallAgentRunId = "";
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 100 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot,
+      executionCoordinator: new IsolatedAgentExecutionCoordinator({
+        isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+        worktreeStore,
+        worktreeManager: {
+          createWorktree(input) {
+            createCalls += 1;
+            createdHallTaskId = input.hallTaskId;
+            createdHallAgentRunId = input.hallAgentRunId;
+            return createGate.promise;
+          },
+        },
+      }),
+      artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+        store: artifactStore,
+        artifactIdFactory: () => "artifact-cancel-after-prep",
+        now: () => "2026-08-03T10:00:05.000Z",
+        gitArtifactCollector: {
+          collect(worktreeId) {
+            return Promise.resolve({
+              worktreeId,
+              hallTaskId: createdHallTaskId,
+              hallAgentRunId: createdHallAgentRunId,
+              baseCommit: BASE_COMMIT,
+              finalCommit: BASE_COMMIT,
+              changedFiles: [],
+              diffSummary: { filesChanged: 0, insertions: 0, deletions: 0 },
+            });
+          },
+        },
+      }),
+    });
+
+    const { task, runId } = orchestrator.createTask({
+      projectId: "project-1",
+      title: "Cancelled after worktree",
+      adapterId: "hall.isolated-agent",
+    });
+    await waitUntil(() => createCalls === 1);
+    orchestrator.requestCancellation(task.taskId);
+    createGate.resolve({
+      record: readyWorktreeRecord({
+        worktreeId: "cancel-after-prep",
+        hallTaskId: createdHallTaskId,
+        hallAgentRunId: createdHallAgentRunId,
+        source: workspaceRoot,
+        worktreePath,
+      }),
+      agentWorkingDirectory: fs.realpathSync.native(worktreePath),
+    });
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+    await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
+    const artifact = artifactStore.getByHallAgentRunId(runId ?? "");
+    expect(startCalls).toBe(0);
+    expect(artifact.outcome).toBe("cancelled");
+    expect(artifact.worktreeId).toBe("cancel-after-prep");
+  });
+
   it("replayed terminalization reuses an equivalent artifact without recollecting Git evidence", async () => {
     const store = new InMemoryAgentExecutionArtifactStore();
     let collectCalls = 0;
@@ -229,6 +451,11 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
         },
       },
     });
+    const terminalEvent = new EventFactory({
+      runId: "run-replay",
+      taskId: "task-replay",
+      agentId: "hall.isolated-agent",
+    }).runCompleted("safe final summary");
     const taskRecord = terminalTaskRecord({
       taskId: "task-replay",
       runId: "run-replay",
@@ -236,26 +463,15 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
       terminalEventType: "run.completed",
       status: "completed",
     });
-    const terminalEvent = new EventFactory({
-      runId: "run-replay",
-      taskId: "task-replay",
-      agentId: "hall.isolated-agent",
-    }).runCompleted("safe final summary");
+    const snapshot = buildAgentExecutionTerminalSnapshot({
+      preTerminalRecord: taskRecord,
+      adapterId: "hall.isolated-agent",
+      event: terminalEvent,
+      worktreeId: "worktree-replay",
+    });
 
-    const first = await terminalizer.terminalize({
-      taskRecord,
-      adapterId: "hall.isolated-agent",
-      runId: "run-replay",
-      worktreeId: "worktree-replay",
-      terminalEvent,
-    });
-    const second = await terminalizer.terminalize({
-      taskRecord,
-      adapterId: "hall.isolated-agent",
-      runId: "run-replay",
-      worktreeId: "worktree-replay",
-      terminalEvent,
-    });
+    const first = await terminalizer.terminalize({ snapshot });
+    const second = await terminalizer.terminalize({ snapshot });
 
     expect(second).toEqual(first);
     expect(collectCalls).toBe(1);
@@ -283,6 +499,11 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
       artifactIdFactory: () => "artifact-new",
       now: () => "2026-08-03T10:00:07.000Z",
     });
+    const terminalEvent = new EventFactory({
+      runId: "run-mismatch",
+      taskId: "task-mismatch",
+      agentId: "hall.test-agent",
+    }).runCompleted("safe final summary");
     const taskRecord = terminalTaskRecord({
       taskId: "task-mismatch",
       runId: "run-mismatch",
@@ -290,20 +511,15 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
       terminalEventType: "run.completed",
       status: "completed",
     });
-    const terminalEvent = new EventFactory({
-      runId: "run-mismatch",
-      taskId: "task-mismatch",
-      agentId: "hall.test-agent",
-    }).runCompleted("safe final summary");
+    const snapshot = buildAgentExecutionTerminalSnapshot({
+      preTerminalRecord: taskRecord,
+      adapterId: "hall.test-agent",
+      event: terminalEvent,
+    });
 
-    await expect(
-      terminalizer.terminalize({
-        taskRecord,
-        adapterId: "hall.test-agent",
-        runId: "run-mismatch",
-        terminalEvent,
-      }),
-    ).rejects.toThrow(AgentExecutionArtifactMismatchError);
+    await expect(terminalizer.terminalize({ snapshot })).rejects.toThrow(
+      AgentExecutionArtifactMismatchError,
+    );
     expect(store.list()).toHaveLength(1);
     expect(store.getByHallAgentRunId("run-mismatch").outcome).toBe("failed");
   });
@@ -334,33 +550,8 @@ function taskInput(taskId: string): AgentTaskInput {
 }
 
 function capturingAdapter(adapterId: string, capturedInputs: AgentTaskInput[]): AgentAdapter {
-  const descriptor: AgentAdapterDescriptor = parseAgentAdapterDescriptor({
-    adapterId,
-    displayName: "Capturing Agent",
-    adapterVersion: "0.0.0",
-    integrationLevel: "native",
-    supportedOperatingSystems: ["windows", "macos", "linux"],
-    supportedAgent: {
-      agentId: adapterId,
-      displayName: "Capturing Agent",
-      adapterId,
-      adapterVersion: "0.0.0",
-    },
-    capabilities: {
-      streaming: true,
-      cancellation: true,
-      sessionResume: false,
-      toolEvents: true,
-      fileEditing: true,
-      shellExecution: false,
-      subagents: false,
-      mcp: false,
-      acp: false,
-    },
-    declaredCapabilities: [],
-  });
   return {
-    descriptor,
+    descriptor: agentDescriptor(adapterId, "Capturing Agent"),
     detect(): Promise<AgentDetectionResult> {
       return Promise.resolve({
         installed: true,
@@ -393,6 +584,46 @@ function capturingAdapter(adapterId: string, capturedInputs: AgentTaskInput[]): 
       });
     },
   };
+}
+
+function controlledAdapter(input: {
+  readonly adapterId: string;
+  readonly detect: () => Promise<AgentDetectionResult>;
+  readonly startTask: AgentAdapter["startTask"];
+}): AgentAdapter {
+  return {
+    descriptor: agentDescriptor(input.adapterId, "Controlled Agent"),
+    detect: input.detect,
+    startTask: input.startTask,
+  };
+}
+
+function agentDescriptor(adapterId: string, displayName: string): AgentAdapterDescriptor {
+  return parseAgentAdapterDescriptor({
+    adapterId,
+    displayName,
+    adapterVersion: "0.0.0",
+    integrationLevel: "native",
+    supportedOperatingSystems: ["windows", "macos", "linux"],
+    supportedAgent: {
+      agentId: adapterId,
+      displayName,
+      adapterId,
+      adapterVersion: "0.0.0",
+    },
+    capabilities: {
+      streaming: true,
+      cancellation: true,
+      sessionResume: false,
+      toolEvents: true,
+      fileEditing: true,
+      shellExecution: false,
+      subagents: false,
+      mcp: false,
+      acp: false,
+    },
+    declaredCapabilities: [],
+  });
 }
 
 function readyWorktreeRecord(input: {
@@ -467,4 +698,22 @@ async function waitUntil(check: () => boolean, timeoutMs = 2000): Promise<void> 
     if (Date.now() - start > timeoutMs) throw new Error("condition not met");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+function deferred<T>(): {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (error: unknown) => void;
+} {
+  let resolveValue: (value: T) => void = () => {
+    throw new Error("deferred promise was not initialized");
+  };
+  let rejectValue: (error: unknown) => void = () => {
+    throw new Error("deferred promise was not initialized");
+  };
+  const promise = new Promise<T>((resolve, reject) => {
+    resolveValue = resolve;
+    rejectValue = reject;
+  });
+  return { promise, resolve: resolveValue, reject: rejectValue };
 }

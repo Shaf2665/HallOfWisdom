@@ -373,6 +373,48 @@ describe("AgentWorktreeManager", () => {
     ).resolves.toMatchObject({ record: { status: "ready" } });
   });
 
+  it("rejects ready-worktree validation when the worktree directory is replaced by a symlink", async () => {
+    const fixture = createFixtureRepository("validate symlink repo");
+    const ownedRoot = makeTempDir("hall owned worktrees ");
+    const store = new InMemoryAgentWorktreeStore();
+    const manager = new AgentWorktreeManager({
+      store,
+      gitRunner: testGitRunner(),
+      ownedRoot,
+      idGenerator: () => "validate-symlink",
+    });
+    const created = await manager.createWorktree({
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      sourceWorkingDirectory: fixture.repo,
+    });
+    const originalSibling = path.join(ownedRoot, "validate-original");
+    fs.renameSync(created.record.canonicalWorktreePath, originalSibling);
+    const outside = makeTempDir("outside validate target ");
+    const sentinel = path.join(outside, "sentinel.txt");
+    fs.writeFileSync(sentinel, "do not touch\n");
+    try {
+      fs.symlinkSync(outside, created.record.canonicalWorktreePath, "dir");
+    } catch {
+      return undefined;
+    }
+    const runner = new RecordingGitRunner(testGitRunner());
+    const validationManager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    await expect(
+      validationManager.validateReadyWorktree({
+        worktreeId: created.record.worktreeId,
+        hallTaskId: "task-1",
+        hallAgentRunId: "run-1",
+        sourceWorkingDirectory: fixture.repo,
+        requireHeadAtBase: true,
+      }),
+    ).rejects.toThrow(AgentWorktreePathError);
+    expect(runner.calls).toHaveLength(0);
+    expect(fs.readFileSync(sentinel, "utf8")).toBe("do not touch\n");
+    expect(fs.existsSync(originalSibling)).toBe(true);
+  });
+
   it("treats a malformed effective filter config query as a safe creation failure", async () => {
     const source = makeTempDir("fake filter query source ");
     const ownedRoot = makeTempDir("fake filter query owned ");

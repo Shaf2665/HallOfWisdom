@@ -319,13 +319,14 @@ describe("TaskOrchestrator.startTask() — launch-time-eligibility TOCTOU guard"
     // `TaskOrchestrator.startTask()`'s own eligibility `detect()` (just
     // released above) is NOT the only call this run makes against the
     // adapter: `#beginExecution()` kicks off `#execute()` fire-and-forget
-    // on the next microtask after `startTask()` itself already resolved,
-    // and hall-runner's own `runTask()` (runners/hall-runner/src/runner-service.ts)
-    // performs a SECOND, independent `detect()` preflight against the
-    // same adapter instance immediately before actually starting the run
-    // — a real, legitimate second call this barrier adapter also parks,
-    // not a bug. Release it too before the run can make any further
-    // progress.
+    // on the next microtask after `startTask()` itself already resolved.
+    // Phase 16.3 then performs a second hardened TaskOrchestrator preflight
+    // before any isolated worktree can be created, and Hall Runner's own
+    // `runTask()` performs a third, independent `detect()` preflight
+    // immediately before actually starting the run. Release both gates
+    // before the run can make any further progress.
+    await barrier.controller.waitForParked(1);
+    barrier.controller.release();
     await barrier.controller.waitForParked(1);
     barrier.controller.release();
 

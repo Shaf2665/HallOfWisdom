@@ -25,6 +25,8 @@ import { HallDatabase } from "../persistence/database.js";
 import { runMigrations } from "../persistence/migration-runner.js";
 import { SqliteTaskStore } from "./sqlite-task-store.js";
 import { SqliteEventStore } from "../events/sqlite-event-store.js";
+import { InMemoryAgentExecutionArtifactStore } from "../execution-artifacts/in-memory-agent-execution-artifact-store.js";
+import { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
 
 /**
  * A deliberately non-cooperative fake adapter: its generator never checks
@@ -479,6 +481,41 @@ describe("TaskOrchestrator event-capacity failure", () => {
     const record = taskStore.get(task.taskId);
     expect(record.failure?.code).toBe("EVENT_CAPACITY_REACHED");
     expect(record.terminalEventType).toBe("run.failed");
+  });
+
+  it("terminalizes an event-capacity infrastructure failure from its committed synthetic event snapshot", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      new MockAgentAdapter({
+        scenario: "success",
+        progressMessageCount: 5,
+        stepDelayMs: 0,
+      }),
+    );
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const artifactStore = new InMemoryAgentExecutionArtifactStore();
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 2 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot: tempRoot,
+      artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+        store: artifactStore,
+        artifactIdFactory: () => "artifact-capacity-failure",
+        now: () => "2026-08-03T10:00:05.000Z",
+      }),
+    });
+
+    const { task, runId } = orchestrator.createTask(validCreateTaskBody());
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "failed");
+    await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
+    const artifact = artifactStore.getByHallAgentRunId(runId ?? "");
+    expect(artifact.outcome).toBe("failed");
+    expect(artifact.terminalReasonCode).toBe("EVENT_CAPACITY_REACHED");
+    expect(artifact.hallTaskId).toBe(task.taskId);
+    expect(artifact.hallAgentRunId).toBe(runId);
   });
 
   it("the task ends in failed state and does not remain running", async () => {

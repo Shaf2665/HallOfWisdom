@@ -203,6 +203,26 @@ describe("GitArtifactCollector", () => {
       }).collect("worktree-1"),
     ).rejects.toThrow(GitArtifactCollectionError);
   });
+
+  it("does not invoke Git when manager-owned worktree validation rejects identity or containment", async () => {
+    const fixture = createReadyWorktree();
+    const runner = new ScriptedGitRunner([ok(`${FINAL_COMMIT}\n`)]);
+    const collector = new GitArtifactCollector({
+      worktreeStore: fixture.store,
+      gitRunner: runner,
+      ownedRoot: fixture.ownedRoot,
+      worktreeValidator: {
+        validateReadyWorktree() {
+          return Promise.reject(
+            new GitArtifactCollectionError("Worktree path is outside the Hall-owned root."),
+          );
+        },
+      },
+    });
+
+    await expect(collector.collect("worktree-1")).rejects.toThrow(GitArtifactCollectionError);
+    expect(runner.calls).toEqual([]);
+  });
 });
 
 function createReadyWorktree(): {

@@ -55,6 +55,25 @@ describe("createMockAgentServerComposition", () => {
     expect(descriptor?.adapterId).toBe("hall.mock-agent");
   });
 
+  it("rejects isolated execution policy when only in-memory stores are configured", () => {
+    expect(() =>
+      createMockAgentServerComposition({
+        ...buildOptions("success"),
+        isolatedAgentAdapterIds: ["hall.mock-agent"],
+      }),
+    ).toThrow(ServerCliError);
+  });
+
+  it("allows explicit test-only in-memory isolated execution opt-in", () => {
+    expect(() =>
+      createMockAgentServerComposition({
+        ...buildOptions("success"),
+        isolatedAgentAdapterIds: ["hall.mock-agent"],
+        allowInMemoryAgentIsolation: true,
+      }),
+    ).not.toThrow();
+  });
+
   /**
    * Phase 15 — proves the real wiring, not a synthetic harness: the
    * scheduler's `onChildTaskMutated` must fire automatically via

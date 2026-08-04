@@ -169,6 +169,21 @@ function runBoundedGitProcess(options: RunBoundedGitProcessOptions): Promise<Git
   const maxOutputChars = options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
 
   return new Promise((resolve) => {
+    if (options.signal?.aborted) {
+      resolve({
+        exitCode: null,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        stdoutBytes: Buffer.alloc(0),
+        stderrBytes: Buffer.alloc(0),
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        timedOut: false,
+        spawnError: "aborted",
+      });
+      return;
+    }
     let stdout: Buffer = Buffer.alloc(0);
     let stderr: Buffer = Buffer.alloc(0);
     let stdoutTruncated = false;
@@ -197,6 +212,9 @@ function runBoundedGitProcess(options: RunBoundedGitProcessOptions): Promise<Git
       handle.kill();
     }, options.timeoutMs);
     options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) {
+      onAbort();
+    }
 
     handle.stdout.on("data", (chunk: Buffer) => {
       const appended = appendBounded(stdout, chunk);
