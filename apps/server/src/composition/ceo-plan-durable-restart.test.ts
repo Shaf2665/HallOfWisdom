@@ -88,6 +88,7 @@ describe("CEO plan durable restart via the real composition root (Phase 14)", ()
       mockStepDelayMs: 0,
       limits: DEFAULT_LIMITS,
       db,
+      agentWorktreeRoot: path.join(dataDir, "agent-worktrees"),
     });
     return { db, composition };
   }

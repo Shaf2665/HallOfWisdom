@@ -26,7 +26,12 @@ export type { ComparisonComposition } from "./comparison-composition-root.js";
  * second registry, never a second source of adapters).
  */
 export function createServerComposition(options: ServerCompositionOptions): ServerComposition {
-  const composition = createMockAgentServerComposition(options);
+  const durableIsolationIds =
+    options.db === undefined ? [] : ["hall.codex", ...(options.isolatedAgentAdapterIds ?? [])];
+  const composition = createMockAgentServerComposition({
+    ...options,
+    isolatedAgentAdapterIds: durableIsolationIds,
+  });
   registerClaudeCodeAdapter(composition.registry);
   registerCodexAdapter(composition.registry, {
     workspaceRoot: options.workspaceRoot,

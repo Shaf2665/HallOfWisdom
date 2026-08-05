@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
+import { AgentRegistry, EXIT_CODES, isTerminalEventType } from "@hall-of-wisdom/hall-runner";
 import { MockAgentAdapter } from "@hall-of-wisdom/mock-agent";
 import {
   EventFactory,
@@ -20,11 +20,45 @@ import {
   TaskStateConflictError,
   WorkspaceValidationFailedError,
 } from "../errors/app-error.js";
-import { validCreateTaskBody, waitUntil } from "../test-support.js";
+import { buildTestApp, validCreateTaskBody, waitUntil } from "../test-support.js";
 import { HallDatabase } from "../persistence/database.js";
 import { runMigrations } from "../persistence/migration-runner.js";
 import { SqliteTaskStore } from "./sqlite-task-store.js";
 import { SqliteEventStore } from "../events/sqlite-event-store.js";
+import { InMemoryAgentExecutionArtifactStore } from "../execution-artifacts/in-memory-agent-execution-artifact-store.js";
+import type { AgentExecutionArtifactRecord } from "../execution-artifacts/agent-execution-artifact-record.js";
+import { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
+
+interface Deferred<T = void> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value?: T | PromiseLike<T>) => void;
+  readonly reject: (reason?: unknown) => void;
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = (value) => {
+      promiseResolve(value as T | PromiseLike<T>);
+    };
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function waitForAbort(signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    signal?.addEventListener(
+      "abort",
+      () => {
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
 
 /**
  * A deliberately non-cooperative fake adapter: its generator never checks
@@ -62,6 +96,54 @@ function buildNonCooperativeAdapter(
         currentState: "running" as const,
         cancel: (): void => {
           // Deliberately a no-op: this fake adapter never honors cancellation.
+        },
+      });
+    },
+  };
+}
+
+function buildOverlappingRetryAdapter(signals: {
+  readonly releaseFirstRunTail: Promise<void>;
+  readonly secondRunStarted: Deferred;
+  readonly secondRunAbortSeen: Deferred;
+}): AgentAdapter {
+  let startCount = 0;
+  return {
+    descriptor: new MockAgentAdapter().descriptor,
+    detect: () => Promise.resolve({ installed: true, availability: "available" }),
+    startTask: (input: AgentTaskInput, options) => {
+      startCount += 1;
+      const factory = new EventFactory({
+        runId: input.runId,
+        taskId: input.hallTask.taskId,
+        agentId: input.agentIdentity.agentId,
+      });
+      async function* firstRun(): AsyncGenerator<NormalizedAgentEvent> {
+        yield factory.runStarted();
+        yield factory.runFailed({
+          code: "FIRST_RUN_RETRYABLE_FAILURE",
+          message: "first run failed before retry",
+          retryable: true,
+        });
+        await signals.releaseFirstRunTail;
+        throw new Error("late first-run adapter tail");
+      }
+      async function* secondRun(): AsyncGenerator<NormalizedAgentEvent> {
+        yield factory.runStarted();
+        signals.secondRunStarted.resolve();
+        await waitForAbort(options?.signal);
+        signals.secondRunAbortSeen.resolve();
+        yield factory.runCancelled("user", "second run cancelled");
+      }
+      return Promise.resolve({
+        runId: input.runId,
+        events: startCount === 1 ? firstRun() : secondRun(),
+        completion: new Promise<NormalizedAgentEvent>(() => {
+          // Runner-service consumes the async iterator to terminal state.
+        }),
+        currentState: "running" as const,
+        cancel: (): void => {
+          // Cancellation is exercised through the AbortSignal in this fixture.
         },
       });
     },
@@ -315,6 +397,25 @@ describe("TaskOrchestrator cancellation", () => {
     expect(taskStore.get(task.taskId).task.status).toBe("cancelled");
   });
 
+  it("repeated cancellation preserves the first actor", async () => {
+    const { orchestrator, taskStore, eventStore } = buildOrchestrator({
+      workspaceRoot: tempRoot,
+      scenario: "cancellable",
+      progressMessageCount: 5,
+      stepDelayMs: 20,
+    });
+    const { task } = orchestrator.createTask(validCreateTaskBody());
+    await waitUntil(() => taskStore.get(task.taskId).eventCount >= 1);
+    orchestrator.requestCancellation(task.taskId, "user");
+    expect(orchestrator.requestCancellation(task.taskId, "system").alreadyRequested).toBe(true);
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+    const cancelledEvent = eventStore
+      .list(task.taskId)
+      .find((event) => event.type === "run.cancelled");
+    expect(cancelledEvent?.payload.cancelledBy).toBe("user");
+  });
+
   it("cancelling an unknown task raises TaskNotFoundError-derived behavior via the store", () => {
     const { orchestrator } = buildOrchestrator({ workspaceRoot: tempRoot });
     expect(() => orchestrator.requestCancellation("nonexistent")).toThrow();
@@ -387,6 +488,39 @@ describe("TaskOrchestrator cancellation", () => {
       .filter((event) => event.type === "run.cancelled");
     expect(cancelledEvents).toHaveLength(1);
   });
+
+  it("REST cancellation records user actor and a user cancellation artifact", async () => {
+    const { app, harness } = await buildTestApp({
+      workspaceRoot: tempRoot,
+      mockAgentConfig: { scenario: "cancellable", progressMessageCount: 5, stepDelayMs: 30 },
+    });
+    const create = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      payload: validCreateTaskBody(),
+    });
+    const created = JSON.parse(create.body) as { task: { taskId: string }; runId: string };
+    await waitUntil(() => harness.taskStore.get(created.task.taskId).eventCount >= 1);
+
+    const cancel = await app.inject({
+      method: "POST",
+      url: `/api/v1/tasks/${created.task.taskId}/cancel`,
+    });
+
+    expect(cancel.statusCode).toBe(202);
+    await waitUntil(() => harness.taskStore.get(created.task.taskId).task.status === "cancelled");
+    await waitUntil(
+      () => harness.agentExecutionArtifactStore.findByHallAgentRunId(created.runId) !== undefined,
+    );
+    const cancelledEvent = harness.eventStore
+      .list(created.task.taskId)
+      .find((event) => event.type === "run.cancelled");
+    expect(cancelledEvent?.payload.cancelledBy).toBe("user");
+    const artifact = harness.agentExecutionArtifactStore.getByHallAgentRunId(created.runId);
+    expect(artifact.terminalReasonCode).toBe("CANCELLED_BY_USER");
+    expect(artifact.exitCode).toBe(EXIT_CODES.cancelled);
+    await app.close();
+  });
 });
 
 describe("TaskOrchestrator shutdown", () => {
@@ -412,6 +546,25 @@ describe("TaskOrchestrator shutdown", () => {
     const start = Date.now();
     await orchestrator.shutdown(1000);
     expect(Date.now() - start).toBeLessThan(1200);
+  });
+
+  it("shutdown cancellation records the system actor", async () => {
+    const { orchestrator, taskStore, eventStore } = buildOrchestrator({
+      workspaceRoot: tempRoot,
+      scenario: "cancellable",
+      progressMessageCount: 20,
+      stepDelayMs: 50,
+    });
+    const { task } = orchestrator.createTask(validCreateTaskBody());
+    await waitUntil(() => taskStore.get(task.taskId).eventCount >= 1);
+
+    await orchestrator.shutdown(1000);
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+    const cancelledEvent = eventStore
+      .list(task.taskId)
+      .find((event) => event.type === "run.cancelled");
+    expect(cancelledEvent?.payload.cancelledBy).toBe("system");
   });
 
   it("shutdown() resolves immediately when there are no active runs", async () => {
@@ -455,6 +608,116 @@ describe("TaskOrchestrator shutdown", () => {
   });
 });
 
+describe("TaskOrchestrator overlapping retry run fencing", () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hall-core-run-fence-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it("old run tail errors and finally cleanup cannot fail or detach the current retry run", async () => {
+    const releaseFirstRunTail = deferred();
+    const secondRunStarted = deferred();
+    const secondRunAbortSeen = deferred();
+    const onExecutionError = vi.fn();
+    const registry = new AgentRegistry();
+    registry.register(
+      buildOverlappingRetryAdapter({
+        releaseFirstRunTail: releaseFirstRunTail.promise,
+        secondRunStarted,
+        secondRunAbortSeen,
+      }),
+    );
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const eventStore = new EventStore({ maxEventsPerTask: 100 });
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore,
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot: tempRoot,
+      onExecutionError,
+    });
+
+    const { task, runId: firstRunId } = orchestrator.createTask(validCreateTaskBody());
+    expect(firstRunId).toBeDefined();
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "failed");
+
+    orchestrator.prepareRetry(task.taskId);
+    const secondRun = await orchestrator.startTask(task.taskId);
+    expect(secondRun.runId).not.toBe(firstRunId);
+    await secondRunStarted.promise;
+
+    releaseFirstRunTail.resolve();
+    await waitUntil(() =>
+      onExecutionError.mock.calls.some(([, error]) =>
+        error instanceof Error ? error.message.includes("superseded task run") : false,
+      ),
+    );
+
+    expect(taskStore.get(task.taskId).runId).toBe(secondRun.runId);
+    expect(taskStore.get(task.taskId).task.status).toBe("running");
+
+    orchestrator.requestCancellation(task.taskId, "user");
+    await secondRunAbortSeen.promise;
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+
+    const events = eventStore.list(task.taskId);
+    expect(events.map((event) => event.sequence)).toEqual([0, 1, 2, 3]);
+    expect(events.map((event) => event.runId)).toEqual([
+      firstRunId,
+      firstRunId,
+      secondRun.runId,
+      secondRun.runId,
+    ]);
+    const terminalEvents = events.filter((event) => isTerminalEventType(event.type));
+    expect(terminalEvents.map((event) => event.type)).toEqual(["run.failed", "run.cancelled"]);
+    const cancelledEvent = terminalEvents.find((event) => event.type === "run.cancelled");
+    expect(cancelledEvent?.payload.cancelledBy).toBe("user");
+    expect(onExecutionError).not.toHaveBeenCalledWith(
+      task.taskId,
+      expect.objectContaining({ message: "late first-run adapter tail" }),
+    );
+    await expect(orchestrator.shutdown(50)).resolves.toBeUndefined();
+  });
+
+  it("artifact terminalization failures are fail-soft after the authoritative task state is terminal", async () => {
+    class ThrowingTerminalizer extends AgentExecutionArtifactTerminalizer {
+      override terminalize(): Promise<AgentExecutionArtifactRecord> {
+        return Promise.reject(new Error("simulated artifact persistence failure"));
+      }
+    }
+    const onExecutionError = vi.fn();
+    const registry = new AgentRegistry();
+    registry.register(new MockAgentAdapter({ scenario: "success", progressMessageCount: 0 }));
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 100 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot: tempRoot,
+      onExecutionError,
+      artifactTerminalizer: new ThrowingTerminalizer({
+        store: new InMemoryAgentExecutionArtifactStore(),
+      }),
+    });
+
+    const { task } = orchestrator.createTask(validCreateTaskBody());
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "completed");
+    await waitUntil(() => onExecutionError.mock.calls.length > 0);
+
+    const record = taskStore.get(task.taskId);
+    expect(record.task.status).toBe("completed");
+    expect(record.terminalEventType).toBe("run.completed");
+    expect(record.failure).toBeUndefined();
+  });
+});
+
 describe("TaskOrchestrator event-capacity failure", () => {
   let tempRoot: string;
 
@@ -479,6 +742,41 @@ describe("TaskOrchestrator event-capacity failure", () => {
     const record = taskStore.get(task.taskId);
     expect(record.failure?.code).toBe("EVENT_CAPACITY_REACHED");
     expect(record.terminalEventType).toBe("run.failed");
+  });
+
+  it("terminalizes an event-capacity infrastructure failure from its committed synthetic event snapshot", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      new MockAgentAdapter({
+        scenario: "success",
+        progressMessageCount: 5,
+        stepDelayMs: 0,
+      }),
+    );
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const artifactStore = new InMemoryAgentExecutionArtifactStore();
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 2 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot: tempRoot,
+      artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+        store: artifactStore,
+        artifactIdFactory: () => "artifact-capacity-failure",
+        now: () => "2026-08-03T10:00:05.000Z",
+      }),
+    });
+
+    const { task, runId } = orchestrator.createTask(validCreateTaskBody());
+
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "failed");
+    await waitUntil(() => artifactStore.findByHallAgentRunId(runId ?? "") !== undefined);
+    const artifact = artifactStore.getByHallAgentRunId(runId ?? "");
+    expect(artifact.outcome).toBe("failed");
+    expect(artifact.terminalReasonCode).toBe("EVENT_CAPACITY_REACHED");
+    expect(artifact.hallTaskId).toBe(task.taskId);
+    expect(artifact.hallAgentRunId).toBe(runId);
   });
 
   it("the task ends in failed state and does not remain running", async () => {

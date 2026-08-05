@@ -1,9 +1,23 @@
-import { describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_CEO_PLAN_EXECUTION_POLICY } from "@hall-of-wisdom/protocol";
 import { DEFAULT_LIMITS } from "../config/server-config.js";
 import { ServerCliError } from "../config/server-cli-args.js";
 import { waitUntil } from "../test-support.js";
+import { HallDatabase } from "../persistence/database.js";
+import { runMigrations } from "../persistence/migration-runner.js";
 import { createMockAgentServerComposition } from "./mock-agent-composition-root.js";
+import { createServerComposition } from "./server-composition.js";
+
+const tempDirs: string[] = [];
+const dbs: HallDatabase[] = [];
+
+afterEach(() => {
+  for (const db of dbs.splice(0)) db.close();
+  for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
 
 /**
  * `--mock-scenario` is parsed as an unbounded-but-length-limited string by
@@ -53,6 +67,90 @@ describe("createMockAgentServerComposition", () => {
     const composition = createMockAgentServerComposition(buildOptions("success"));
     const [descriptor] = composition.registry.listDescriptors();
     expect(descriptor?.adapterId).toBe("hall.mock-agent");
+  });
+
+  it("rejects isolated execution policy when only in-memory stores are configured", () => {
+    expect(() =>
+      createMockAgentServerComposition({
+        ...buildOptions("success"),
+        isolatedAgentAdapterIds: ["hall.mock-agent"],
+      }),
+    ).toThrow(ServerCliError);
+  });
+
+  it("allows explicit test-only in-memory isolated execution opt-in", () => {
+    expect(() =>
+      createMockAgentServerComposition({
+        ...buildOptions("success"),
+        isolatedAgentAdapterIds: ["hall.mock-agent"],
+        allowInMemoryAgentIsolation: true,
+        agentWorktreeRoot: makeTempDir("hall-test-worktrees-"),
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects in-memory isolated execution when the explicit worktree root is missing", () => {
+    expect(() =>
+      createMockAgentServerComposition({
+        ...buildOptions("success"),
+        isolatedAgentAdapterIds: ["hall.mock-agent"],
+        allowInMemoryAgentIsolation: true,
+      }),
+    ).toThrow(ServerCliError);
+  });
+
+  it("rejects SQLite isolated execution when the explicit worktree root is missing", () => {
+    expect(() =>
+      createMockAgentServerComposition({
+        ...buildOptions("success"),
+        db: openMigratedDatabase(),
+        isolatedAgentAdapterIds: ["hall.mock-agent"],
+      }),
+    ).toThrow(ServerCliError);
+  });
+
+  it("rejects durable server composition when Codex isolation would be enabled without a worktree root", () => {
+    expect(() =>
+      createServerComposition({
+        ...buildOptions("success"),
+        db: openMigratedDatabase(),
+      }),
+    ).toThrow(ServerCliError);
+  });
+
+  it("allows SQLite isolated execution with an explicit worktree root", () => {
+    expect(() =>
+      createMockAgentServerComposition({
+        ...buildOptions("success"),
+        db: openMigratedDatabase(),
+        isolatedAgentAdapterIds: ["hall.mock-agent"],
+        agentWorktreeRoot: makeTempDir("hall-sqlite-worktrees-"),
+      }),
+    ).not.toThrow();
+  });
+
+  it("keeps normal ephemeral server composition non-isolated and does not create the fallback worktree root", async () => {
+    const parent = makeTempDir("hall-ephemeral-parent-");
+    const workspaceRoot = path.join(parent, "workspace");
+    fs.mkdirSync(workspaceRoot);
+    const fallbackRoot = path.join(parent, ".hall-agent-worktrees");
+    const composition = createServerComposition({
+      workspaceRoot: fs.realpathSync.native(workspaceRoot),
+      mockScenario: "success",
+      limits: DEFAULT_LIMITS,
+    });
+
+    expect(composition.registry.resolve("hall.codex")).toBeDefined();
+    const { task, runId } = composition.orchestrator.createTask({
+      projectId: "project-1",
+      title: "Ephemeral task",
+      adapterId: "hall.mock-agent",
+    });
+    await waitUntil(() => composition.taskStore.get(task.taskId).task.status === "completed");
+    expect(
+      composition.agentExecutionArtifactStore.getByHallAgentRunId(runId ?? "").worktreeId,
+    ).toBeUndefined();
+    expect(fs.existsSync(fallbackRoot)).toBe(false);
   });
 
   /**
@@ -509,3 +607,16 @@ describe("createMockAgentServerComposition", () => {
     expect(composition.ceoExecution.planRunStore.getRun(runId).status).toBe("running");
   });
 });
+
+function makeTempDir(prefix: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  return fs.realpathSync.native(dir);
+}
+
+function openMigratedDatabase(): HallDatabase {
+  const db = HallDatabase.openInMemory();
+  runMigrations(db);
+  dbs.push(db);
+  return db;
+}

@@ -480,7 +480,8 @@ export class SqliteTaskStore implements TaskStorePort {
       const update = this.#db
         .prepare(
           `UPDATE tasks SET status = 'assigned', run_id = NULL, terminal_event_type = NULL,
-             failure_json = NULL, completed_at = NULL, started_at = NULL, updated_at = ?,
+             failure_json = NULL, cancellation_requested = 0,
+             completed_at = NULL, started_at = NULL, updated_at = ?,
              revision = revision + 1
            WHERE task_id = ? AND revision = ?`,
         )

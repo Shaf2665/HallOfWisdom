@@ -35,6 +35,18 @@ import {
 } from "../ceo-execution/ceo-plan-execution-composition.js";
 import type { CeoPlanExecutionScheduler } from "../ceo-execution/ceo-plan-execution-scheduler.js";
 import { isTerminalTaskStatus } from "../tasks/task-status-transitions.js";
+import { AgentWorktreeManager } from "../agent-worktrees/agent-worktree-manager.js";
+import { InMemoryAgentWorktreeStore } from "../agent-worktrees/in-memory-agent-worktree-store.js";
+import { SqliteAgentWorktreeStore } from "../agent-worktrees/sqlite-agent-worktree-store.js";
+import { NodeGitCommandRunner } from "../agent-worktrees/git-command-runner.js";
+import type { AgentWorktreeStorePort } from "../agent-worktrees/agent-worktree-store-port.js";
+import { InMemoryAgentExecutionArtifactStore } from "../execution-artifacts/in-memory-agent-execution-artifact-store.js";
+import { SqliteAgentExecutionArtifactStore } from "../execution-artifacts/sqlite-agent-execution-artifact-store.js";
+import type { AgentExecutionArtifactStorePort } from "../execution-artifacts/agent-execution-artifact-store-port.js";
+import { ExplicitAdapterIsolationPolicy } from "../agent-execution/isolation-policy.js";
+import { IsolatedAgentExecutionCoordinator } from "../agent-execution/isolated-agent-execution-coordinator.js";
+import { GitArtifactCollector } from "../agent-execution/git-artifact-collector.js";
+import { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
 
 export interface ServerCompositionOptions {
   /** Canonical, already-validated workspace root. */
@@ -67,6 +79,9 @@ export interface ServerCompositionOptions {
    * byte-identical: purely in-memory, exactly as before.
    */
   readonly db?: HallDatabase | undefined;
+  readonly agentWorktreeRoot?: string | undefined;
+  readonly isolatedAgentAdapterIds?: readonly string[] | undefined;
+  readonly allowInMemoryAgentIsolation?: boolean | undefined;
 }
 
 export interface ServerComposition {
@@ -84,6 +99,8 @@ export interface ServerComposition {
   readonly ceoPlans: CeoPlanComposition;
   /** Phase 15 — always composed alongside `ceoPlans`; a delegated plan may still have no active run and stay in manual mode (Phase 14 behavior, unchanged) until an operator explicitly configures and starts autonomous execution. */
   readonly ceoExecution: CeoPlanExecutionComposition;
+  readonly agentWorktreeStore: AgentWorktreeStorePort;
+  readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
   /**
    * Arms the task-mutation bridge that lets `ceoExecution.scheduler` react
    * to child-task completions. Deliberately NOT armed automatically by
@@ -118,6 +135,9 @@ export interface CoreStoresCompositionOptions {
   readonly limits: ServerLimits;
   readonly onExecutionError?: ((taskId: string, error: unknown) => void) | undefined;
   readonly db?: HallDatabase | undefined;
+  readonly agentWorktreeRoot?: string | undefined;
+  readonly isolatedAgentAdapterIds?: readonly string[] | undefined;
+  readonly allowInMemoryAgentIsolation?: boolean | undefined;
   /**
    * Phase 14.1 — an optional generic hook fired after every status-changing
    * `taskStore` mutation, regardless of which caller performed it. This
@@ -141,6 +161,8 @@ export interface CoreStoresComposition {
   readonly boardStore: BoardStorePort;
   readonly messageStore: MessageStorePort;
   readonly messageBus: MessageBus;
+  readonly agentWorktreeStore: AgentWorktreeStorePort;
+  readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
 }
 
 /**
@@ -162,6 +184,18 @@ export function createCoreStoresComposition(
   options: CoreStoresCompositionOptions,
 ): CoreStoresComposition {
   const db = options.db;
+  const isolatedAgentAdapterIds = options.isolatedAgentAdapterIds ?? [];
+  const isolationEnabled = isolatedAgentAdapterIds.length > 0;
+  if (db === undefined && isolationEnabled && options.allowInMemoryAgentIsolation !== true) {
+    throw new ServerCliError(
+      "Isolated agent execution requires durable SQLite storage in this composition.",
+    );
+  }
+  if (isolationEnabled && options.agentWorktreeRoot === undefined) {
+    throw new ServerCliError(
+      "Isolated agent execution requires an explicit Hall-owned agent worktree root.",
+    );
+  }
 
   const rawTaskStore: TaskStorePort =
     db !== undefined
@@ -180,6 +214,41 @@ export function createCoreStoresComposition(
         })
       : new EventStore({ maxEventsPerTask: options.limits.maxEventsPerTask });
   const eventBus = new EventBus({ maxSubscribersPerTask: options.limits.maxSubscribersPerTask });
+  const agentWorktreeStore: AgentWorktreeStorePort =
+    db !== undefined ? new SqliteAgentWorktreeStore({ db }) : new InMemoryAgentWorktreeStore();
+  const agentExecutionArtifactStore: AgentExecutionArtifactStorePort =
+    db !== undefined
+      ? new SqliteAgentExecutionArtifactStore({ db })
+      : new InMemoryAgentExecutionArtifactStore();
+  const gitRunner = new NodeGitCommandRunner();
+  const agentWorktreeManager =
+    isolationEnabled && options.agentWorktreeRoot !== undefined
+      ? new AgentWorktreeManager({
+          store: agentWorktreeStore,
+          gitRunner,
+          ownedRoot: options.agentWorktreeRoot,
+        })
+      : undefined;
+  const gitArtifactCollector =
+    agentWorktreeManager !== undefined
+      ? new GitArtifactCollector({
+          gitRunner,
+          worktreeValidator: agentWorktreeManager,
+        })
+      : undefined;
+  const executionCoordinator =
+    agentWorktreeManager !== undefined
+      ? new IsolatedAgentExecutionCoordinator({
+          isolationPolicy: new ExplicitAdapterIsolationPolicy(isolatedAgentAdapterIds),
+          worktreeManager: agentWorktreeManager,
+          worktreeStore: agentWorktreeStore,
+          worktreeValidator: agentWorktreeManager,
+        })
+      : undefined;
+  const artifactTerminalizer = new AgentExecutionArtifactTerminalizer({
+    store: agentExecutionArtifactStore,
+    gitArtifactCollector,
+  });
 
   const orchestrator = new TaskOrchestrator({
     taskStore,
@@ -188,6 +257,8 @@ export function createCoreStoresComposition(
     registry: options.registry,
     workspaceRoot: options.workspaceRoot,
     onExecutionError: options.onExecutionError,
+    executionCoordinator,
+    artifactTerminalizer,
   });
 
   // A fresh, isolated store per call (never shared module-level state — see
@@ -218,6 +289,8 @@ export function createCoreStoresComposition(
     boardStore,
     messageStore,
     messageBus,
+    agentWorktreeStore,
+    agentExecutionArtifactStore,
   };
 }
 
@@ -272,6 +345,9 @@ export function createMockAgentServerComposition(
     limits: options.limits,
     onExecutionError: options.onExecutionError,
     db: options.db,
+    agentWorktreeRoot: options.agentWorktreeRoot,
+    isolatedAgentAdapterIds: options.isolatedAgentAdapterIds,
+    allowInMemoryAgentIsolation: options.allowInMemoryAgentIsolation,
     onTaskMutated: (taskId) => {
       ceoOrchestratorRef.current?.onChildTaskMutated(taskId);
       const scheduler = schedulerRef.current;

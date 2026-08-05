@@ -125,6 +125,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
   let db: HallDatabase | undefined;
   let ownershipHandle: InstanceOwnershipHandle | undefined;
   let ownershipFence: OwnershipFence | undefined;
+  let agentWorktreeRoot: string | undefined;
   if (cliOptions.dataDir !== undefined) {
     try {
       const canonicalDataDir = resolveDataDir({
@@ -132,6 +133,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
         workspaceRoot,
         comparisonRoot,
       });
+      agentWorktreeRoot = path.join(canonicalDataDir, "agent-worktrees");
       // Phase 13.2 — the filesystem lock, database open, migrations,
       // epoch acquisition, and fence-set sequence lives in one shared
       // function (`openDurableStorage`) so every durable Hall Core entry
@@ -162,6 +164,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
       limits: DEFAULT_LIMITS,
       enableCodexTrustedLocal: cliOptions.enableCodexTrustedLocal,
       comparisonRoot,
+      agentWorktreeRoot,
       db,
       onExecutionError: (taskId, error) => {
         console.error(`Task ${taskId} execution failed: ${formatError(error)}`);

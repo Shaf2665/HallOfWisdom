@@ -666,6 +666,7 @@ describe("WebSocket /api/v1/ceo-plan-runs/:runId/events/live", () => {
       mockStepDelayMs: 0,
       limits: DEFAULT_LIMITS,
       db,
+      agentWorktreeRoot: path.join(tempRoot, "agent-worktrees"),
     });
     composition.activateAutonomousScheduling();
     const app = await createHallCoreApp({

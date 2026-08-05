@@ -52,6 +52,7 @@ describe("persistence-before-publication (durable mode)", () => {
       mockStepDelayMs: 5,
       limits: DEFAULT_LIMITS,
       db,
+      agentWorktreeRoot: path.join(tempRoot, "agent-worktrees"),
     });
 
     const created = composition.orchestrator.createTask({

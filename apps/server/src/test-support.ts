@@ -32,6 +32,16 @@ import {
 } from "./ceo-execution/ceo-plan-execution-composition.js";
 import { wrapTaskStoreWithMutationHook } from "./ceo-plans/task-mutation-hook.js";
 import { isTerminalTaskStatus } from "./tasks/task-status-transitions.js";
+import { AgentWorktreeManager } from "./agent-worktrees/agent-worktree-manager.js";
+import { InMemoryAgentWorktreeStore } from "./agent-worktrees/in-memory-agent-worktree-store.js";
+import { NodeGitCommandRunner } from "./agent-worktrees/git-command-runner.js";
+import type { AgentWorktreeStorePort } from "./agent-worktrees/agent-worktree-store-port.js";
+import { InMemoryAgentExecutionArtifactStore } from "./execution-artifacts/in-memory-agent-execution-artifact-store.js";
+import type { AgentExecutionArtifactStorePort } from "./execution-artifacts/agent-execution-artifact-store-port.js";
+import { ExplicitAdapterIsolationPolicy } from "./agent-execution/isolation-policy.js";
+import { IsolatedAgentExecutionCoordinator } from "./agent-execution/isolated-agent-execution-coordinator.js";
+import { GitArtifactCollector } from "./agent-execution/git-artifact-collector.js";
+import { AgentExecutionArtifactTerminalizer } from "./agent-execution/agent-execution-artifact-terminalizer.js";
 
 /** JSON shape of a `TaskRecord` as it round-trips through an HTTP response body. */
 export interface TaskRecordJson {
@@ -93,6 +103,9 @@ export interface TestHarnessOptions {
    * entirely unwired, `taskStore` stays the plain, unwrapped store.
    */
   readonly armAutonomousScheduling?: boolean | undefined;
+  readonly agentWorktreeRoot?: string | undefined;
+  readonly isolatedAgentAdapterIds?: readonly string[] | undefined;
+  readonly allowInMemoryAgentIsolation?: boolean | undefined;
 }
 
 export interface TestHarness {
@@ -110,6 +123,8 @@ export interface TestHarness {
   readonly ceoPlans: CeoPlanComposition;
   /** Phase 15 — always composed alongside `ceoPlans`, matching production's `createMockAgentServerComposition`. */
   readonly ceoExecution: CeoPlanExecutionComposition;
+  readonly agentWorktreeStore: AgentWorktreeStorePort;
+  readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
   /** No-op unless `withComparisons` was set — removes the temp comparison-root directory this harness created. */
   cleanupComparisonRoot(): void;
 }
@@ -158,6 +173,31 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     : rawTaskStore;
   const eventStore = new EventStore({ maxEventsPerTask: limits.maxEventsPerTask });
   const eventBus = new EventBus({ maxSubscribersPerTask: limits.maxSubscribersPerTask });
+  const agentWorktreeStore = new InMemoryAgentWorktreeStore();
+  const agentExecutionArtifactStore = new InMemoryAgentExecutionArtifactStore();
+  const isolatedAgentAdapterIds = options.isolatedAgentAdapterIds ?? [];
+  if (isolatedAgentAdapterIds.length > 0 && options.agentWorktreeRoot === undefined) {
+    throw new Error("Test isolated execution requires an explicit agentWorktreeRoot.");
+  }
+  if (isolatedAgentAdapterIds.length > 0 && options.allowInMemoryAgentIsolation !== true) {
+    throw new Error("Test isolated execution requires allowInMemoryAgentIsolation.");
+  }
+  const gitRunner = new NodeGitCommandRunner();
+  const agentWorktreeManager =
+    isolatedAgentAdapterIds.length > 0 && options.agentWorktreeRoot !== undefined
+      ? new AgentWorktreeManager({
+          store: agentWorktreeStore,
+          gitRunner,
+          ownedRoot: options.agentWorktreeRoot,
+        })
+      : undefined;
+  const gitArtifactCollector =
+    agentWorktreeManager !== undefined
+      ? new GitArtifactCollector({
+          gitRunner,
+          worktreeValidator: agentWorktreeManager,
+        })
+      : undefined;
 
   const orchestrator = new TaskOrchestrator({
     taskStore,
@@ -166,6 +206,19 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     registry,
     workspaceRoot: options.workspaceRoot,
     onExecutionError: options.onExecutionError,
+    executionCoordinator:
+      agentWorktreeManager !== undefined
+        ? new IsolatedAgentExecutionCoordinator({
+            isolationPolicy: new ExplicitAdapterIsolationPolicy(isolatedAgentAdapterIds),
+            worktreeManager: agentWorktreeManager,
+            worktreeStore: agentWorktreeStore,
+            worktreeValidator: agentWorktreeManager,
+          })
+        : undefined,
+    artifactTerminalizer: new AgentExecutionArtifactTerminalizer({
+      store: agentExecutionArtifactStore,
+      gitArtifactCollector,
+    }),
   });
 
   const boardStore = new BoardStore({ maxBoards: limits.maxBoards, taskStore });
@@ -222,6 +275,8 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     comparison,
     ceoPlans,
     ceoExecution,
+    agentWorktreeStore,
+    agentExecutionArtifactStore,
     cleanupComparisonRoot(): void {
       if (comparisonRootDir) fs.rmSync(comparisonRootDir, { recursive: true, force: true });
     },

@@ -9,6 +9,10 @@ export interface GitCommandResult {
   readonly signal: NodeJS.Signals | null;
   readonly stdout: string;
   readonly stderr: string;
+  readonly stdoutBytes?: Buffer | undefined;
+  readonly stderrBytes?: Buffer | undefined;
+  readonly stdoutTruncated?: boolean | undefined;
+  readonly stderrTruncated?: boolean | undefined;
   readonly timedOut: boolean;
   readonly spawnError: string | undefined;
 }
@@ -165,8 +169,25 @@ function runBoundedGitProcess(options: RunBoundedGitProcessOptions): Promise<Git
   const maxOutputChars = options.maxOutputChars ?? DEFAULT_MAX_OUTPUT_CHARS;
 
   return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
+    if (options.signal?.aborted) {
+      resolve({
+        exitCode: null,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        stdoutBytes: Buffer.alloc(0),
+        stderrBytes: Buffer.alloc(0),
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        timedOut: false,
+        spawnError: "aborted",
+      });
+      return;
+    }
+    let stdout: Buffer = Buffer.alloc(0);
+    let stderr: Buffer = Buffer.alloc(0);
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let settled = false;
     let timedOut = false;
     const handle = options.spawner.spawn(options.executablePath, options.args, {
@@ -191,33 +212,61 @@ function runBoundedGitProcess(options: RunBoundedGitProcessOptions): Promise<Git
       handle.kill();
     }, options.timeoutMs);
     options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.signal?.aborted) {
+      onAbort();
+    }
 
     handle.stdout.on("data", (chunk: Buffer) => {
-      stdout = appendBounded(stdout, chunk, maxOutputChars);
+      const appended = appendBounded(stdout, chunk);
+      stdout = appended.next;
+      stdoutTruncated ||= appended.hitLimit;
     });
     handle.stderr.on("data", (chunk: Buffer) => {
-      stderr = appendBounded(stderr, chunk, maxOutputChars);
+      const appended = appendBounded(stderr, chunk);
+      stderr = appended.next;
+      stderrTruncated ||= appended.hitLimit;
     });
     handle.onError((error) => {
       settle({
         exitCode: null,
         signal: null,
-        stdout,
-        stderr,
+        stdout: stdout.toString("utf8"),
+        stderr: stderr.toString("utf8"),
+        stdoutBytes: stdout,
+        stderrBytes: stderr,
+        stdoutTruncated,
+        stderrTruncated,
         timedOut,
         spawnError: error.message,
       });
     });
     handle.onExit((exitCode, signal) => {
-      settle({ exitCode, signal, stdout, stderr, timedOut, spawnError: undefined });
+      settle({
+        exitCode,
+        signal,
+        stdout: stdout.toString("utf8"),
+        stderr: stderr.toString("utf8"),
+        stdoutBytes: stdout,
+        stderrBytes: stderr,
+        stdoutTruncated,
+        stderrTruncated,
+        timedOut,
+        spawnError: undefined,
+      });
     });
   });
-}
 
-function appendBounded(current: string, chunk: Buffer, maxOutputChars: number): string {
-  if (current.length >= maxOutputChars) return current;
-  const next = current + chunk.toString("utf8");
-  return next.length > maxOutputChars ? next.slice(0, maxOutputChars) : next;
+  function appendBounded(
+    current: Buffer,
+    chunk: Buffer,
+  ): { readonly next: Buffer; readonly hitLimit: boolean } {
+    if (current.length >= maxOutputChars) return { next: current, hitLimit: true };
+    const remaining = maxOutputChars - current.length;
+    if (chunk.length > remaining) {
+      return { next: Buffer.concat([current, chunk.subarray(0, remaining)]), hitLimit: true };
+    }
+    return { next: Buffer.concat([current, chunk]), hitLimit: false };
+  }
 }
 
 class NodeSpawnedGitProcessHandle implements SpawnedGitProcessHandle {

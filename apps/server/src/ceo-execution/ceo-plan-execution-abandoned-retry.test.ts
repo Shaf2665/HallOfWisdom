@@ -746,6 +746,7 @@ describe("CeoPlanExecutionScheduler.retryAbandonedStep (Phase 15.6)", () => {
     expect(attempts).toHaveLength(2);
     expect(attempts[1]?.status).toBe("running");
     expect(attempts[1]?.taskRunId).toBeDefined();
+    await waitUntil(() => counter.calls() === 1);
     expect(counter.calls()).toBe(1);
   });
 

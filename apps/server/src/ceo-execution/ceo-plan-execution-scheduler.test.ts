@@ -55,7 +55,15 @@ function buildHarness(options: { adapter?: AgentAdapter; boardAuditLog?: string[
     postBoardAudit: (_planId, text) => boardAuditLog.push(text),
     runAtomicUnit: createEphemeralAtomicUnit({ planRunStore, signalStore }),
   });
-  return { taskStore, taskOrchestrator, planRunStore, signalStore, scheduler, boardAuditLog };
+  return {
+    taskStore,
+    eventStore,
+    taskOrchestrator,
+    planRunStore,
+    signalStore,
+    scheduler,
+    boardAuditLog,
+  };
 }
 
 function addAssignedTask(
@@ -586,8 +594,11 @@ describe("CeoPlanExecutionScheduler", () => {
     );
     await harness.scheduler.enqueueSignal({ planRunId: "run-1", reason: "execution_started" });
 
-    expect(harness.taskStore.get("task-a").task.status).toBe("running");
-    expect(harness.taskStore.get("task-c").task.status).toBe("running");
+    await waitUntil(
+      () =>
+        harness.taskStore.get("task-a").task.status === "running" &&
+        harness.taskStore.get("task-c").task.status === "running",
+    );
 
     const result = harness.scheduler.emergencyStop("run-1");
 
@@ -598,6 +609,11 @@ describe("CeoPlanExecutionScheduler", () => {
     expect(harness.taskStore.get("task-c").cancellationRequested).toBe(true);
     expect(harness.taskStore.get("unrelated-task").cancellationRequested).toBe(false);
     expect(harness.planRunStore.getRun("run-1").status).toBe("paused");
+    await waitUntil(() => harness.taskStore.get("task-a").task.status === "cancelled");
+    const cancelledEvent = harness.eventStore
+      .list("task-a")
+      .find((event) => event.type === "run.cancelled");
+    expect(cancelledEvent?.payload.cancelledBy).toBe("orchestrator");
 
     const emergencyEvents = harness.planRunStore
       .listEvents("run-1")
@@ -621,7 +637,7 @@ describe("CeoPlanExecutionScheduler", () => {
     addAssignedTask(harness.taskStore, { taskId: "task-a" });
     configureAndStart(harness, "run-1", "plan-1", [{ stepId: "step-a", childTaskId: "task-a" }]);
     await harness.scheduler.enqueueSignal({ planRunId: "run-1", reason: "execution_started" });
-    expect(harness.taskStore.get("task-a").task.status).toBe("running");
+    await waitUntil(() => harness.taskStore.get("task-a").task.status === "running");
     expect(harness.planRunStore.getStepExecution("run-1", "step-a").status).toBe("running");
 
     const result = harness.scheduler.emergencyStop("run-1");
@@ -650,7 +666,7 @@ describe("CeoPlanExecutionScheduler", () => {
     addAssignedTask(harness.taskStore, { taskId: "task-a" });
     configureAndStart(harness, "run-1", "plan-1", [{ stepId: "step-a", childTaskId: "task-a" }]);
     await harness.scheduler.enqueueSignal({ planRunId: "run-1", reason: "execution_started" });
-    expect(harness.taskStore.get("task-a").task.status).toBe("running");
+    await waitUntil(() => harness.taskStore.get("task-a").task.status === "running");
 
     // A task that is already terminal by the time emergency stop reaches
     // it — `requestCancellation` throws for a terminal task — simulating
