@@ -533,6 +533,8 @@ function strictIsolation(
     enabled: true,
     durableStorage: true,
     worktreeRoot: "/hall-worktrees",
+    worktreeRootReady: true,
+    validatorAvailable: true,
     sandboxProbe: probe,
   };
 }
@@ -832,6 +834,24 @@ describe("detectCodex — strict isolated mode (Phase 16.4)", () => {
     });
     expect(result.availability).toBe("unsupported");
     expect(result.diagnosticMessage).toBe(STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE);
+  });
+
+  it("fails without a canonical ready Hall-owned worktree root and validator", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      strictIsolation: {
+        ...strictIsolation(),
+        worktreeRootReady: false,
+        validatorAvailable: false,
+      },
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(
+      "Codex strict isolated execution requires a ready Hall worktree validator.",
+    );
   });
 
   it.each([

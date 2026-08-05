@@ -359,10 +359,14 @@ validated worktree path as the provider-neutral `workingDirectory`.
 
 Strict isolated Codex configuration is constructor-time and server-controlled. It is not accepted
 from tasks, REST payloads, browser data, provider output, or arbitrary environment variables. The
-durable server composition supplies it only when SQLite durability is active and an explicit
-Hall-owned `--agent-worktree-root` is configured. Normal in-memory mode leaves strict isolation
-disabled. Trusted-local mode remains a separate explicit opt-in and does not depend on strict
-isolated mode.
+durable server composition supplies it only when SQLite durability is active, a canonical
+Hall-owned `--agent-worktree-root` exists, the worktree store and manager validator are composed,
+and trusted-local mode is not enabled. At server startup the worktree root must be absolute,
+non-root, free of NUL/control characters, canonicalizable through the nearest existing ancestor,
+not a symlink or junction substitution, and mutually non-contained with the workspace root, durable
+data directory, and comparison root. The raw CLI value is not retained after validation; the adapter
+receives only the canonical root. Normal in-memory mode leaves strict isolation disabled.
+Trusted-local mode remains a separate explicit opt-in and does not depend on strict isolated mode.
 
 The Codex adapter rejects strict execution unless Hall Core confirms the exact task/run/worktree
 identity immediately before launch. The adapter calls an injected validator built by Hall Core from
@@ -379,18 +383,43 @@ required `codex exec` flags, ChatGPT authentication, absence of billing-changing
 variables, durable Hall isolation, explicit Hall-owned worktree root, a passing native sandbox
 compatibility probe, and the adapter's deterministic JSONL and process-tree cancellation coverage.
 
-The native sandbox probe uses the installed CLI's sandbox helper with the strongest working native
-workspace profile for this installed CLI (`codex sandbox -P :workspace` on local 0.144.4). It runs
-no model and uses a disposable temporary workspace. The probe verifies read, create, modify, and
-delete operations inside the sandboxed workspace; rejects if an outside write succeeds; rejects if
-network connect succeeds; bounds output and time; sanitizes the public result to stable codes only;
-and removes only its generated temp tree. If the platform or local Codex install cannot provide a
-safe native sandbox, strict Codex detection reports unsupported rather than falling back to
-trusted-local or a dangerous bypass. No administrator setup, ACL changes, firewall changes,
-system-user creation, or credential-file reads are performed.
+The strict sandbox policy is represented once inside the Codex adapter and rendered into both the
+real task argv and the zero-model native probe. The real task uses `codex exec --sandbox
+workspace-write`; the native probe uses the installed CLI's sandbox helper with the corresponding
+workspace profile for this installed CLI (`codex sandbox -P :workspace` on local 0.144.4). Both
+forms use the same fixed approval, network, web-search, and feature-disable policy, and neither uses
+`--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `danger-full-access`, `--add-dir`, remote
+operations, or task-controlled security options.
 
-Strict task launch re-runs detection and worktree validation immediately before constructing the
-`CodexRun`. The strict argv remains fixed and uses structured arguments:
+The probe runs no model. It creates a disposable probe workspace under the canonical Hall-owned
+worktree root, and a pre-existing outside sentinel in the same canonical root but outside that
+workspace. The sandboxed script verifies read, create, modify, and delete operations inside the
+workspace, attempts to alter the outside sentinel, and tries to connect to a parent-owned loopback
+TCP listener on `127.0.0.1`. A successful outside sentinel mutation, a successful loopback
+connection, timeout, spawn failure, unexpected output, or unsupported helper behavior all fail
+closed with bounded stable codes only. The probe never contacts public internet, never performs DNS,
+never exposes absolute paths in public results, closes the listener in all paths, and removes only
+its own generated probe workspace and sentinel. If the platform or local Codex install cannot
+express this common strict policy safely, strict Codex detection reports unsupported rather than
+falling back to trusted-local or a dangerous bypass. No administrator setup, ACL changes, firewall
+changes, system-user creation, or credential-file reads are performed.
+
+Strict task launch uses a cancellation-aware fresh detection path rather than the public coalesced
+polling detector. Cancellation is checked before subprocess detection starts, after version/help/auth
+checks, during the sandbox probe, during worktree validation, and again inside the lazy run's
+pre-spawn gate. Cancellation emits `run.cancelled`, never a worktree-validation failure, and never
+leaks raw abort reasons.
+
+Strict task launch performs preliminary worktree validation before returning a run handle, then the
+lazy `CodexRun` performs the same strong validation again inside an async pre-spawn gate immediately
+before the structured `spawner.spawn` call. The final gate revalidates task id, Hall agent-run id,
+adapter id, worktree id, exact canonical worktree directory, Git registration, common git dir,
+detached HEAD, base commit, and symlink/junction state through Hall Core's injected manager-backed
+validator. If the final check fails, no Codex task process is spawned and a bounded
+`CODEX_WORKTREE_VALIDATION_FAILED` event is emitted; if cancellation wins, `run.cancelled` is
+emitted instead.
+
+The strict argv remains fixed and uses structured arguments:
 
 ```text
 codex exec --json --ephemeral --ignore-user-config --ignore-rules --strict-config
@@ -603,7 +632,7 @@ host platform can exercise it.
 
 Deferred to later Phase 16 subphases:
 
-- Codex adapter hardening and any Codex-specific launch argument changes;
+- additional Codex-specific launch behavior beyond the strict isolated profile described above;
 - routes and UI;
 - startup reconciliation and cleanup workers;
 - automatic retry/relaunch behavior;

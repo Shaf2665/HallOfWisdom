@@ -7,6 +7,7 @@ import { AgentWorktreePathError } from "./agent-worktree-errors.js";
 import {
   assertContainedPath,
   canonicalizeExistingDirectory,
+  canonicalizeHallOwnedRoot,
   canonicalizeOwnedRoot,
   isPathContained,
 } from "./path-safety.js";
@@ -157,6 +158,93 @@ describe("agent worktree path safety", () => {
     } else {
       expect(isPathContained("C:\\Projects\\Repo", "c:\\projects\\repo\\apps")).toBe(false);
     }
+  });
+
+  it("rejects a startup Hall-owned root nested inside the workspace before creating it", () => {
+    const workspace = tempRoot("hall-startup-workspace-");
+    const dataDir = tempRoot("hall-startup-data-");
+    const proposed = path.join(workspace, ".hall-worktrees");
+    expect(() =>
+      canonicalizeHallOwnedRoot({
+        rawOwnedRoot: proposed,
+        forbiddenRoots: [
+          { canonicalPath: workspace, label: "workspace root" },
+          { canonicalPath: dataDir, label: "data directory" },
+        ],
+      }),
+    ).toThrow(AgentWorktreePathError);
+    expect(fs.existsSync(proposed)).toBe(false);
+  });
+
+  it("rejects a startup Hall-owned root that is an ancestor of the workspace", () => {
+    const base = tempRoot("hall-startup-ancestor-");
+    const workspace = path.join(base, "owned", "workspace");
+    fs.mkdirSync(workspace, { recursive: true });
+    const dataDir = tempRoot("hall-startup-data-");
+    expect(() =>
+      canonicalizeHallOwnedRoot({
+        rawOwnedRoot: path.join(base, "owned"),
+        forbiddenRoots: [
+          { canonicalPath: fs.realpathSync.native(workspace), label: "workspace root" },
+          { canonicalPath: dataDir, label: "data directory" },
+        ],
+      }),
+    ).toThrow(AgentWorktreePathError);
+  });
+
+  it("rejects a startup Hall-owned root nested inside the data directory", () => {
+    const workspace = tempRoot("hall-startup-workspace-");
+    const dataDir = tempRoot("hall-startup-data-");
+    expect(() =>
+      canonicalizeHallOwnedRoot({
+        rawOwnedRoot: path.join(dataDir, "agent-worktrees"),
+        forbiddenRoots: [
+          { canonicalPath: workspace, label: "workspace root" },
+          { canonicalPath: dataDir, label: "data directory" },
+        ],
+      }),
+    ).toThrow(AgentWorktreePathError);
+  });
+
+  it("rejects a startup Hall-owned root that is a symlink or junction", () => {
+    const base = tempRoot("hall-startup-link-");
+    const workspace = path.join(base, "workspace");
+    const dataDir = path.join(base, "data");
+    const target = path.join(base, "target");
+    const link = path.join(base, "linked-root");
+    fs.mkdirSync(workspace);
+    fs.mkdirSync(dataDir);
+    fs.mkdirSync(target);
+    try {
+      fs.symlinkSync(target, link, "junction");
+    } catch {
+      return undefined;
+    }
+    expect(() =>
+      canonicalizeHallOwnedRoot({
+        rawOwnedRoot: link,
+        forbiddenRoots: [
+          { canonicalPath: fs.realpathSync.native(workspace), label: "workspace root" },
+          { canonicalPath: fs.realpathSync.native(dataDir), label: "data directory" },
+        ],
+      }),
+    ).toThrow(AgentWorktreePathError);
+  });
+
+  it("allows a startup Hall-owned root with spaces outside all forbidden roots", () => {
+    const base = tempRoot("hall startup spaces ");
+    const workspace = path.join(base, "Workspace Root");
+    const dataDir = path.join(base, "Data Root");
+    fs.mkdirSync(workspace);
+    fs.mkdirSync(dataDir);
+    const owned = canonicalizeHallOwnedRoot({
+      rawOwnedRoot: path.join(base, "Agent Worktrees"),
+      forbiddenRoots: [
+        { canonicalPath: fs.realpathSync.native(workspace), label: "workspace root" },
+        { canonicalPath: fs.realpathSync.native(dataDir), label: "data directory" },
+      ],
+    });
+    expect(owned).toBe(fs.realpathSync.native(path.join(base, "Agent Worktrees")));
   });
 });
 

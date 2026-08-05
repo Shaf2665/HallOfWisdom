@@ -34,6 +34,8 @@ export interface StrictIsolatedDetectionOptions {
   readonly enabled: boolean;
   readonly durableStorage: boolean;
   readonly worktreeRoot: string;
+  readonly worktreeRootReady?: boolean | undefined;
+  readonly validatorAvailable?: boolean | undefined;
   readonly sandboxProbe: CodexSandboxCompatibilityProbe;
   readonly sandboxProbeTimeoutMs?: number | undefined;
 }
@@ -51,6 +53,7 @@ export interface DetectionOptions {
   readonly versionRetryDelayMs?: number;
   readonly trustedLocal?: TrustedLocalDetectionOptions;
   readonly strictIsolation?: StrictIsolatedDetectionOptions;
+  readonly signal?: AbortSignal | undefined;
 }
 
 const DEFAULT_VERSION_TIMEOUT_MS = 5000;
@@ -162,6 +165,8 @@ export const STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE =
   "Codex strict isolated execution requires SQLite durability.";
 export const STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE =
   "Codex strict isolated execution requires a configured Hall-owned worktree root.";
+export const STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE =
+  "Codex strict isolated execution requires a ready Hall worktree validator.";
 export const STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE =
   "Codex strict isolated execution requires a passing native sandbox compatibility probe.";
 /**
@@ -384,6 +389,7 @@ async function runVersionProbeWithBoundedRetry(
   env: Readonly<Record<string, string>>,
   timeoutMs: number,
   retryDelayMs: number,
+  signal: AbortSignal | undefined,
 ) {
   const first = await runBoundedProcess({
     spawner,
@@ -392,12 +398,21 @@ async function runVersionProbeWithBoundedRetry(
     cwd,
     env,
     timeoutMs,
+    ...(signal !== undefined ? { signal } : {}),
   });
-  if (!isRetryableProbeFailure(first)) return first;
+  if (first.aborted === true || !isRetryableProbeFailure(first)) return first;
   await new Promise<void>((resolve) => {
     setTimeout(resolve, retryDelayMs);
   });
-  return runBoundedProcess({ spawner, executablePath, args: ["--version"], cwd, env, timeoutMs });
+  return runBoundedProcess({
+    spawner,
+    executablePath,
+    args: ["--version"],
+    cwd,
+    env,
+    timeoutMs,
+    ...(signal !== undefined ? { signal } : {}),
+  });
 }
 
 function extractVersion(stdout: string): string | undefined {
@@ -406,6 +421,10 @@ function extractVersion(stdout: string): string | undefined {
   return firstLine.length > MAX_DETECTED_VERSION_LENGTH
     ? firstLine.slice(0, MAX_DETECTED_VERSION_LENGTH)
     : firstLine;
+}
+
+function isSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /**
@@ -423,6 +442,10 @@ function extractVersion(stdout: string): string | undefined {
  * module doc comment on `environment.ts`.
  */
 export async function detectCodex(options: DetectionOptions): Promise<AgentDetectionResult> {
+  if (isSignalAborted(options.signal)) {
+    return unsupported("Codex execution was cancelled before detection completed.");
+  }
+
   const pathValue = getEnvValueCaseInsensitive(options.parentEnv, "PATH") ?? "";
   const pathExt = getEnvValueCaseInsensitive(options.parentEnv, "PATHEXT");
   const resolution = resolveCodexExecutable({
@@ -448,8 +471,12 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     env,
     options.versionTimeoutMs ?? DEFAULT_VERSION_TIMEOUT_MS,
     options.versionRetryDelayMs ?? DEFAULT_VERSION_RETRY_DELAY_MS,
+    options.signal,
   );
 
+  if (versionResult.aborted === true || isSignalAborted(options.signal)) {
+    return unsupported("Codex execution was cancelled before detection completed.");
+  }
   if (isRetryableProbeFailure(versionResult)) {
     return unavailable("Codex CLI could not be started.");
   }
@@ -472,7 +499,11 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     env,
     detectedVersionString: detectedVersion,
     ...(options.helpTimeoutMs !== undefined ? { helpTimeoutMs: options.helpTimeoutMs } : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
   });
+  if (isSignalAborted(options.signal)) {
+    return unsupported("Codex execution was cancelled before detection completed.");
+  }
   if (execHelpText === undefined || !matchesIsolationFlags(execHelpText)) {
     return unsupported(UNSUPPORTED_ISOLATION_PROFILE_MESSAGE, detectedVersion);
   }
@@ -484,8 +515,12 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     cwd,
     env,
     timeoutMs: options.authTimeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS,
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
   });
 
+  if (authResult.aborted === true || isSignalAborted(options.signal)) {
+    return unsupported("Codex execution was cancelled before detection completed.");
+  }
   if (authResult.spawnError !== undefined || authResult.timedOut) {
     return unsupported(UNVERIFIED_CHATGPT_MESSAGE, detectedVersion);
   }
@@ -546,6 +581,12 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
         detectedVersion,
       );
     }
+    if (
+      options.strictIsolation.worktreeRootReady !== true ||
+      options.strictIsolation.validatorAvailable !== true
+    ) {
+      return unsupportedRestricted(STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE, detectedVersion);
+    }
     if (hasBlockedBillingEnvironmentKey(options.parentEnv)) {
       return unsupportedRestricted(TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE, detectedVersion);
     }
@@ -553,8 +594,13 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
       executablePath,
       spawner: options.spawner,
       parentEnv: options.parentEnv,
+      worktreeRoot: options.strictIsolation.worktreeRoot,
       timeoutMs: options.strictIsolation.sandboxProbeTimeoutMs,
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });
+    if (isSignalAborted(options.signal)) {
+      return unsupported("Codex execution was cancelled before detection completed.");
+    }
     if (!probe.ok) {
       return unsupportedRestricted(STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE, detectedVersion);
     }

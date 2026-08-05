@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseNormalizedAgentEvent } from "@hall-of-wisdom/protocol";
 import type { NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
 import { CodexRun } from "./codex-run.js";
+import type { CodexPreSpawnGate } from "./codex-run.js";
 import type { ProcessSpawner, SpawnedProcessHandle } from "./process-spawner.js";
 import type { PosixGroupKiller } from "./process-tree.js";
 
@@ -130,6 +131,7 @@ function makeRun(options: {
   maxRunDurationMs: number;
   inactivityTimeoutMs?: number;
   postExitStdoutDrainGraceMs?: number;
+  preSpawnGate?: CodexPreSpawnGate;
   spawner: ProcessSpawner;
   signal?: AbortSignal;
   posixGroupKiller?: PosixGroupKiller;
@@ -146,6 +148,28 @@ async function collectEvents(run: CodexRun): Promise<NormalizedAgentEvent[]> {
 }
 
 describe("CodexRun — successful lifecycle", () => {
+  it("runs the pre-spawn gate immediately before spawning", async () => {
+    const handle = new FakeHandle();
+    const { spawner, calls } = fakeSpawner(handle);
+    const gateCalls: string[] = [];
+    const run = makeRun({
+      ...baseOptions(),
+      spawner,
+      preSpawnGate: () => {
+        gateCalls.push("gate");
+        expect(calls).toHaveLength(0);
+        return Promise.resolve({ ok: true });
+      },
+    });
+    const eventsPromise = collectEvents(run);
+    await Promise.resolve();
+    expect(gateCalls).toEqual(["gate"]);
+    expect(calls).toHaveLength(1);
+    handle.emitStdout(TURN_COMPLETED);
+    handle.emitExit(0);
+    await eventsPromise;
+  });
+
   it("emits run.started immediately once the process spawns", async () => {
     const handle = new FakeHandle();
     const { spawner } = fakeSpawner(handle);
@@ -410,6 +434,33 @@ describe("CodexRun — event-channel isolation (Phase 10.1)", () => {
 });
 
 describe("CodexRun — failure paths", () => {
+  it("fails before spawning when the pre-spawn gate rejects the worktree", async () => {
+    const spawnCalls: unknown[] = [];
+    const spawner: ProcessSpawner = {
+      spawn: (...args) => {
+        spawnCalls.push(args);
+        return new FakeHandle();
+      },
+    };
+    const run = makeRun({
+      ...baseOptions(),
+      spawner,
+      preSpawnGate: () =>
+        Promise.resolve({
+          ok: false,
+          failure: {
+            code: "CODEX_WORKTREE_VALIDATION_FAILED",
+            message: "Codex strict isolated execution requires the exact validated Hall worktree.",
+          },
+        }),
+    });
+    const events = await collectEvents(run);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_WORKTREE_VALIDATION_FAILED",
+    );
+    expect(spawnCalls).toHaveLength(0);
+  });
+
   it("maps turn.failed to run.failed", async () => {
     const handle = new FakeHandle();
     const { spawner } = fakeSpawner(handle);
@@ -601,6 +652,38 @@ describe("CodexRun — cancellation (Windows path, always safe)", () => {
     const events = await collectEvents(run);
     expect(events).toEqual([expect.objectContaining({ type: "run.cancelled" })]);
     expect(spawnCalls).toHaveLength(0);
+  });
+
+  it("cancellation during the pre-spawn gate emits run.cancelled without spawning", async () => {
+    const controller = new AbortController();
+    const spawnCalls: unknown[] = [];
+    let resolveGate!: () => void;
+    const gatePromise = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    const spawner: ProcessSpawner = {
+      spawn: (...args) => {
+        spawnCalls.push(args);
+        return new FakeHandle();
+      },
+    };
+    const run = makeRun({
+      ...baseOptions(),
+      spawner,
+      signal: controller.signal,
+      preSpawnGate: async () => {
+        await gatePromise;
+        return { ok: true };
+      },
+    });
+    const eventsPromise = collectEvents(run);
+    await Promise.resolve();
+    controller.abort("do not leak this reason");
+    resolveGate();
+    const events = await eventsPromise;
+    expect(events).toEqual([expect.objectContaining({ type: "run.cancelled" })]);
+    expect(spawnCalls).toHaveLength(0);
+    expect(JSON.stringify(events)).not.toContain("do not leak this reason");
   });
 
   it("cancellation during stdin write / stdout processing is safe and still resolves cleanly", async () => {

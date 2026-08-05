@@ -65,6 +65,12 @@ export function registerCodexAdapter(
   registry: AgentRegistry,
   options: RegisterCodexAdapterOptions,
 ): void {
+  const strictValidator = buildStrictWorktreeValidator(
+    options.worktreeStore,
+    options.worktreeValidator,
+  );
+  const strictRootReady =
+    options.agentWorktreeRoot !== undefined && options.agentWorktreeRoot !== "";
   registry.register(
     new CodexAdapter({
       trustedLocal: {
@@ -80,11 +86,10 @@ export function registerCodexAdapter(
         enabled: options.enableCodexTrustedLocal !== true,
         durableStorage: options.durableStorageEnabled === true,
         worktreeRoot: options.agentWorktreeRoot ?? "",
+        worktreeRootReady: strictRootReady,
+        validatorAvailable: strictValidator !== undefined,
         sandboxProbe: options.sandboxProbe ?? realCodexSandboxCompatibilityProbe,
-        validateWorktree: buildStrictWorktreeValidator(
-          options.worktreeStore,
-          options.worktreeValidator,
-        ),
+        validateWorktree: strictValidator,
       },
       ...(options.spawner === undefined ? {} : { spawner: options.spawner }),
     }),
@@ -102,7 +107,8 @@ function buildStrictWorktreeValidator(
     if (
       record?.hallTaskId !== input.hallTaskId ||
       record.hallAgentRunId !== input.hallAgentRunId ||
-      record.status !== "ready"
+      record.status !== "ready" ||
+      (input.expectedWorktreeId !== undefined && record.worktreeId !== input.expectedWorktreeId)
     ) {
       return { ok: false };
     }
@@ -113,6 +119,7 @@ function buildStrictWorktreeValidator(
       signal: input.signal,
       worktreeId: record.worktreeId,
     });
-    return { ok: samePath(handle.agentWorkingDirectory, input.workingDirectory) };
+    const ok = samePath(handle.agentWorkingDirectory, input.workingDirectory);
+    return { ok, ...(ok ? { worktreeId: record.worktreeId } : {}) };
   };
 }

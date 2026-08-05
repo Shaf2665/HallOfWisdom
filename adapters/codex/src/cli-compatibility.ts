@@ -93,6 +93,7 @@ export interface IsolationFlagSupportOptions {
   readonly env: Readonly<Record<string, string>>;
   readonly detectedVersionString: string | undefined;
   readonly helpTimeoutMs?: number;
+  readonly signal?: AbortSignal | undefined;
 }
 
 /**
@@ -132,6 +133,7 @@ export async function fetchCodexExecHelpText(
     cwd: options.cwd,
     env: options.env,
     timeoutMs: options.helpTimeoutMs ?? DEFAULT_HELP_TIMEOUT_MS,
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
   });
 
   if (helpResult.spawnError !== undefined || helpResult.timedOut || helpResult.exitCode !== 0) {

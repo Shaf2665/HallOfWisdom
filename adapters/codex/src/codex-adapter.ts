@@ -23,6 +23,7 @@ import {
   STRICT_ISOLATION_DISABLED_MESSAGE,
   STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE,
   STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE,
+  STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE,
   STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE,
   type StrictIsolatedDetectionOptions,
   type TrustedLocalDetectionOptions,
@@ -43,7 +44,7 @@ import {
   type WorkspaceWritabilityProbe,
 } from "./workspace-writability-probe.js";
 import { nodeProcessSpawner, type ProcessSpawner } from "./process-spawner.js";
-import { CodexRun } from "./codex-run.js";
+import { CodexRun, type CodexPreSpawnGateResult } from "./codex-run.js";
 import {
   buildFailure,
   CODEX_CLI_NOT_FOUND,
@@ -75,11 +76,13 @@ export interface CodexStrictWorktreeValidationInput {
   readonly hallAgentRunId: string;
   readonly adapterId: string;
   readonly workingDirectory: string;
+  readonly expectedWorktreeId?: string | undefined;
   readonly signal?: AbortSignal | undefined;
 }
 
 export interface CodexStrictWorktreeValidationResult {
   readonly ok: boolean;
+  readonly worktreeId?: string | undefined;
 }
 
 export type CodexStrictWorktreeValidator = (
@@ -96,6 +99,8 @@ const STRICT_ISOLATION_DISABLED: CodexStrictIsolatedConfig = {
   enabled: false,
   durableStorage: false,
   worktreeRoot: "",
+  worktreeRootReady: false,
+  validatorAvailable: false,
   sandboxProbe: realCodexSandboxCompatibilityProbe,
 };
 
@@ -156,6 +161,42 @@ class PreflightFailedRun implements AgentRunHandle {
   cancel(): void {
     // Already terminal the moment this object exists; nothing to cancel.
   }
+}
+
+class PreflightCancelledRun implements AgentRunHandle {
+  readonly runId: string;
+  readonly events: AsyncIterable<NormalizedAgentEvent>;
+  readonly completion: Promise<NormalizedAgentEvent>;
+
+  constructor(runId: string, taskId: string, agentId: string) {
+    this.runId = runId;
+    const factory = new EventFactory({ runId, taskId, agentId });
+    const guard = new TerminalEventGuard();
+    const event = guard.guardEvent(factory.runCancelled("system", undefined));
+    this.completion = Promise.resolve(event);
+    this.events = {
+      [Symbol.asyncIterator]() {
+        let yielded = false;
+        return {
+          next(): Promise<IteratorResult<NormalizedAgentEvent>> {
+            if (yielded) return Promise.resolve({ value: undefined, done: true });
+            yielded = true;
+            return Promise.resolve({ value: event, done: false });
+          },
+        };
+      },
+    };
+  }
+
+  readonly currentState: RunTerminalState = "cancelled";
+
+  cancel(): void {
+    // Already terminal the moment this object exists; nothing to cancel.
+  }
+}
+
+function isSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /**
@@ -225,21 +266,26 @@ export class CodexAdapter implements AgentAdapter {
     return promise;
   }
 
-  async #runDetection(): Promise<AgentDetectionResult> {
+  async #runDetection(signal?: AbortSignal): Promise<AgentDetectionResult> {
     try {
-      const result = await detectCodex({
-        platform: this.#platform,
-        parentEnv: this.#parentEnv,
-        fs: this.#fs,
-        spawner: this.#spawner,
-        trustedLocal: this.#trustedLocal,
-        ...(this.#strictIsolationConfigured ? { strictIsolation: this.#strictIsolation } : {}),
-        ...(this.#binaryName !== undefined ? { binaryName: this.#binaryName } : {}),
-      });
-      return parseAgentDetectionResult(result);
+      return await this.#detectFresh(signal);
     } finally {
       this.#inFlightDetection = undefined;
     }
+  }
+
+  async #detectFresh(signal?: AbortSignal): Promise<AgentDetectionResult> {
+    const result = await detectCodex({
+      platform: this.#platform,
+      parentEnv: this.#parentEnv,
+      fs: this.#fs,
+      spawner: this.#spawner,
+      trustedLocal: this.#trustedLocal,
+      ...(this.#strictIsolationConfigured ? { strictIsolation: this.#strictIsolation } : {}),
+      ...(this.#binaryName !== undefined ? { binaryName: this.#binaryName } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    return parseAgentDetectionResult(result);
   }
 
   async startTask(input: AgentTaskInput, options?: AgentExecutionOptions): Promise<AgentRunHandle> {
@@ -251,10 +297,25 @@ export class CodexAdapter implements AgentAdapter {
       );
     }
 
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
+      );
+    }
+
     // Billing-safety defense in depth: re-verify ChatGPT authentication at
     // the moment of execution, not only whenever the caller last called
     // detect(). Mirrors the Claude Code adapter's own discipline.
-    const detection = await this.detect();
+    const detection = await this.#detectFresh(options?.signal);
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
+      );
+    }
     if (detection.availability !== "available") {
       return new PreflightFailedRun(
         parsedInput.runId,
@@ -284,6 +345,14 @@ export class CodexAdapter implements AgentAdapter {
       );
     }
 
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
+      );
+    }
+
     // Codex normally requires a Git repository; this adapter never passes
     // --skip-git-repo-check for a normal task, trusted-local included.
     // Checked here, before ever spawning Codex, so a non-repository
@@ -301,8 +370,24 @@ export class CodexAdapter implements AgentAdapter {
       );
     }
 
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
+      );
+    }
+
+    let validatedWorktreeId: string | undefined;
     if (!this.#trustedLocal.enabled) {
       const worktreeValidation = await this.#validateStrictWorktree(parsedInput, options?.signal);
+      if (worktreeValidation.cancelled) {
+        return new PreflightCancelledRun(
+          parsedInput.runId,
+          parsedInput.hallTask.taskId,
+          parsedInput.agentIdentity.agentId,
+        );
+      }
       if (!worktreeValidation.ok) {
         return new PreflightFailedRun(
           parsedInput.runId,
@@ -314,6 +399,7 @@ export class CodexAdapter implements AgentAdapter {
           ),
         );
       }
+      validatedWorktreeId = worktreeValidation.worktreeId;
     }
 
     // Phase 10.2 — trusted-local mode's own writability preflight. Never
@@ -336,6 +422,14 @@ export class CodexAdapter implements AgentAdapter {
           CODEX_WORKSPACE_NOT_WRITABLE,
           "Codex trusted-local execution requires the task's working directory to be writable.",
         ),
+      );
+    }
+
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
       );
     }
 
@@ -365,6 +459,12 @@ export class CodexAdapter implements AgentAdapter {
       runId: parsedInput.runId,
       taskId: parsedInput.hallTask.taskId,
       agentId: parsedInput.agentIdentity.agentId,
+      ...(!this.#trustedLocal.enabled
+        ? {
+            preSpawnGate: (signal) =>
+              this.#validateStrictWorktreeForSpawn(parsedInput, signal, validatedWorktreeId),
+          }
+        : {}),
       ...(options?.signal !== undefined ? { signal: options.signal } : {}),
     });
     return Promise.resolve(run);
@@ -373,26 +473,56 @@ export class CodexAdapter implements AgentAdapter {
   async #validateStrictWorktree(
     input: AgentTaskInput,
     signal: AbortSignal | undefined,
-  ): Promise<CodexStrictWorktreeValidationResult> {
+    expectedWorktreeId?: string,
+  ): Promise<CodexStrictWorktreeValidationResult & { readonly cancelled?: boolean }> {
+    if (isSignalAborted(signal)) return { ok: false, cancelled: true };
     if (
       !this.#strictIsolation.enabled ||
       !this.#strictIsolation.durableStorage ||
       this.#strictIsolation.worktreeRoot.trim().length === 0 ||
+      this.#strictIsolation.worktreeRootReady !== true ||
+      this.#strictIsolation.validatorAvailable !== true ||
       this.#strictIsolation.validateWorktree === undefined
     ) {
       return { ok: false };
     }
     try {
-      return await this.#strictIsolation.validateWorktree({
+      const result = await this.#strictIsolation.validateWorktree({
         hallTaskId: input.hallTask.taskId,
         hallAgentRunId: input.runId,
         adapterId: input.agentIdentity.adapterId,
         workingDirectory: input.workingDirectory,
+        ...(expectedWorktreeId !== undefined ? { expectedWorktreeId } : {}),
         ...(signal === undefined ? {} : { signal }),
       });
+      if (isSignalAborted(signal)) return { ok: false, cancelled: true };
+      if (!result.ok) return result;
+      if (result.worktreeId === undefined) return { ok: false };
+      if (expectedWorktreeId !== undefined && result.worktreeId !== expectedWorktreeId) {
+        return { ok: false };
+      }
+      return result;
     } catch {
+      if (isSignalAborted(signal)) return { ok: false, cancelled: true };
       return { ok: false };
     }
+  }
+
+  async #validateStrictWorktreeForSpawn(
+    input: AgentTaskInput,
+    signal: AbortSignal,
+    expectedWorktreeId: string | undefined,
+  ): Promise<CodexPreSpawnGateResult> {
+    const validation = await this.#validateStrictWorktree(input, signal, expectedWorktreeId);
+    if (validation.cancelled) return { ok: false, cancelled: true };
+    if (validation.ok) return { ok: true };
+    return {
+      ok: false,
+      failure: buildFailure(
+        CODEX_WORKTREE_VALIDATION_FAILED,
+        "Codex strict isolated execution requires the exact validated Hall worktree.",
+      ),
+    };
   }
 }
 
@@ -427,6 +557,7 @@ function failureCodeForUnavailableDetection(detection: AgentDetectionResult): st
         detection.diagnosticMessage === STRICT_ISOLATION_DISABLED_MESSAGE ||
         detection.diagnosticMessage === STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE ||
         detection.diagnosticMessage === STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE ||
         detection.diagnosticMessage === STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE
       ) {
         return CODEX_ISOLATION_UNSUPPORTED;

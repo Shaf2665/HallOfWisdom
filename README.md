@@ -11,7 +11,7 @@ Requirements:
 - Git
 
 ```powershell
-git clone <repository URL>
+git clone https://github.com/Shaf2665/HallOfWisdom.git
 cd HallOfWisdom
 pnpm install
 pnpm typecheck
