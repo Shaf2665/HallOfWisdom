@@ -1,11 +1,9 @@
 # 0009 — Codex Adapter
 
-Status: Draft (Phase 10; hardened in Phase 10.1 — see "Phase 10.1 — Event-channel isolation,
-capability accuracy, and sandbox diagnosis" near the end of this document for what changed and
-why). File-editing capability under the _default, strict_ sandbox profile is a disclosed,
-unresolved gap — see "Phase 10.1" below. By default, `detect()` never reports Codex as
-`"available"`: it always reports `"unsupported"` with a fixed, safe diagnostic, so Hall Web will
-not offer it for assignment by default.
+Status: Draft (Phase 10; hardened in Phase 10.1, Phase 10.2, Phase 10.3, and Phase 16.4). Strict
+Codex availability is now gated by durable Hall-owned worktree isolation plus a zero-model native
+sandbox compatibility probe; without that server-controlled Phase 16.4 configuration, strict
+`detect()` still fails closed instead of offering Codex for assignment.
 **Phase 10.2** (see
 [`0010-paperclip-compatible-codex-mode.md`](0010-paperclip-compatible-codex-mode.md)) adds a
 separate, explicitly opt-in "trusted-local" mode that makes Codex assignable by having it bypass
@@ -716,3 +714,49 @@ and deleted `.tmp/codex-sandbox-probe/` (the sandbox-write-permission fixture) a
 task). `.tmp/` is gitignored; none of
 these were ever committed. No real account email, workspace name, `CODEX_HOME` path, or auth-status
 JSON was found in any tracked file, test fixture, or snapshot during review.
+
+## Phase 16.4 — Strict isolated compatibility
+
+Phase 16.4 changes the default strict Codex availability rule from a permanent Phase 10.1
+capability cap to a durable, probed compatibility gate. Strict mode may report `available` only
+when all of the following hold: the executable resolves, the installed version and required
+`codex exec` flags are supported, `codex login status` verifies ChatGPT authentication, no
+billing-changing environment variable is present, durable Hall worktree isolation is enabled, an
+explicit Hall-owned worktree root is configured, and the installed Codex native sandbox passes
+Hall's zero-model compatibility probe.
+
+The probe uses the installed `codex sandbox` helper rather than `codex exec`, so it spends no model
+usage. On the local `codex-cli 0.144.4` install, the working helper shape is
+`codex sandbox -P :workspace -C <workspace> ...`. It verifies read/write/delete behavior inside a
+disposable workspace, rejects outside writes, rejects network success, bounds output and time, and
+returns only stable safe probe codes. If no safe native sandbox is available on Windows, Linux, or
+macOS, strict detection fails closed as `unsupported`.
+
+Strict task launch performs a fresh detection and then calls a server-injected worktree validator
+before constructing `CodexRun`. That validator is built from Hall Core's
+`AgentWorktreeManager.validateReadyWorktree`, not from adapter-owned lexical path checks. The
+adapter rejects primary checkouts, sibling substitutions, symlink/junction escapes, unregistered
+worktrees, attached worktrees, stale task/run identity, and TOCTOU replacement before spawning
+Codex.
+
+The strict argv remains sandboxed and fixed:
+
+```text
+exec --json --ephemeral --ignore-user-config --ignore-rules --strict-config
+  --sandbox workspace-write
+  -c approval_policy="never"
+  -c sandbox_workspace_write.network_access=false
+  -c web_search="disabled"
+  --disable hooks --disable plugins --disable plugin_sharing
+  --disable remote_plugin --disable multi_agent
+  --disable apps --disable browser_use --disable browser_use_external
+  --disable browser_use_full_cdp_access --disable computer_use
+  --cd <validated Hall worktree>
+  -
+```
+
+Strict mode still never uses dangerous bypass flags, `--yolo`, `danger-full-access`,
+`--skip-git-repo-check`, `--search`, session resume, arbitrary extra arguments, arbitrary
+environment variables, task-controlled security options, hooks, plugins, remote plugins, or
+multi-agent Codex features. The prompt remains stdin-only. No real Codex task is run in Phase
+16.4; explicitly authorized model-backed smoke verification is deferred to Phase 16.6.

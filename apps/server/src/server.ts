@@ -133,7 +133,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
         workspaceRoot,
         comparisonRoot,
       });
-      agentWorktreeRoot = path.join(canonicalDataDir, "agent-worktrees");
+      agentWorktreeRoot = cliOptions.agentWorktreeRoot;
       // Phase 13.2 — the filesystem lock, database open, migrations,
       // epoch acquisition, and fence-set sequence lives in one shared
       // function (`openDurableStorage`) so every durable Hall Core entry

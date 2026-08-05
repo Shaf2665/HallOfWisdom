@@ -81,6 +81,14 @@ const DISABLED_FEATURES = [
 
 const SANDBOX_MODE = "workspace-write";
 
+const STRICT_ONLY_DISABLED_FEATURES = [
+  "apps",
+  "browser_use",
+  "browser_use_external",
+  "browser_use_full_cdp_access",
+  "computer_use",
+] as const;
+
 /**
  * The complete, fixed `codex exec` argv, given only the already-validated
  * canonical working directory. The task prompt is never included here —
@@ -108,7 +116,10 @@ export function buildCodexArgv(workingDirectory: string): readonly string[] {
     "sandbox_workspace_write.network_access=false",
     "-c",
     'web_search="disabled"',
-    ...DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
+    ...[...DISABLED_FEATURES, ...STRICT_ONLY_DISABLED_FEATURES].flatMap((feature) => [
+      "--disable",
+      feature,
+    ]),
     "--cd",
     workingDirectory,
     "-",

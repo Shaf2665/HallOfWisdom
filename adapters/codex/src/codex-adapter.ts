@@ -20,6 +20,11 @@ import {
   TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE,
   TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE,
   TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE,
+  STRICT_ISOLATION_DISABLED_MESSAGE,
+  STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE,
+  STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE,
+  STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE,
+  type StrictIsolatedDetectionOptions,
   type TrustedLocalDetectionOptions,
 } from "./detection.js";
 import { resolveCodexExecutable, type FileSystemProbe } from "./executable-resolver.js";
@@ -27,6 +32,7 @@ import { realFileSystemProbe } from "./real-file-system-probe.js";
 import { buildChildEnvironment } from "./environment.js";
 import { buildCodexTaskPrompt } from "./prompt-builder.js";
 import { buildCodexArgv, buildCodexTrustedLocalArgv } from "./permission-profile.js";
+import { realCodexSandboxCompatibilityProbe } from "./sandbox-compatibility-probe.js";
 import {
   isInsideGitRepository,
   realGitRepositoryProbe,
@@ -46,6 +52,7 @@ import {
   CODEX_CHATGPT_AUTH_UNVERIFIED,
   CODEX_ISOLATION_UNSUPPORTED,
   CODEX_WORKSPACE_NOT_WRITABLE,
+  CODEX_WORKTREE_VALIDATION_FAILED,
 } from "./failure-codes.js";
 import { getEnvValueCaseInsensitive } from "./env-lookup.js";
 
@@ -59,11 +66,37 @@ import { getEnvValueCaseInsensitive } from "./env-lookup.js";
  * `docs/architecture/0010-paperclip-compatible-codex-mode.md`.
  */
 export type CodexTrustedLocalConfig = TrustedLocalDetectionOptions;
+export type CodexStrictIsolatedConfig = StrictIsolatedDetectionOptions & {
+  readonly validateWorktree?: CodexStrictWorktreeValidator | undefined;
+};
+
+export interface CodexStrictWorktreeValidationInput {
+  readonly hallTaskId: string;
+  readonly hallAgentRunId: string;
+  readonly adapterId: string;
+  readonly workingDirectory: string;
+  readonly signal?: AbortSignal | undefined;
+}
+
+export interface CodexStrictWorktreeValidationResult {
+  readonly ok: boolean;
+}
+
+export type CodexStrictWorktreeValidator = (
+  input: CodexStrictWorktreeValidationInput,
+) => Promise<CodexStrictWorktreeValidationResult>;
 
 const TRUSTED_LOCAL_DISABLED: CodexTrustedLocalConfig = {
   enabled: false,
   loopbackBound: false,
   workspaceRoot: "",
+};
+
+const STRICT_ISOLATION_DISABLED: CodexStrictIsolatedConfig = {
+  enabled: false,
+  durableStorage: false,
+  worktreeRoot: "",
+  sandboxProbe: realCodexSandboxCompatibilityProbe,
 };
 
 export interface CodexAdapterConfig {
@@ -75,6 +108,7 @@ export interface CodexAdapterConfig {
   readonly writabilityProbe?: WorkspaceWritabilityProbe;
   readonly binaryName?: string;
   readonly trustedLocal?: CodexTrustedLocalConfig;
+  readonly strictIsolation?: CodexStrictIsolatedConfig;
 }
 
 /**
@@ -152,6 +186,8 @@ export class CodexAdapter implements AgentAdapter {
    * `codex-adapter.test.ts` for why this matters.
    */
   readonly #trustedLocal: CodexTrustedLocalConfig;
+  readonly #strictIsolation: CodexStrictIsolatedConfig;
+  readonly #strictIsolationConfigured: boolean;
   /**
    * Phase 10.3 — in-flight detection coalescing. When several callers
    * (e.g. overlapping `GET /api/v1/adapters` requests) invoke `detect()`
@@ -178,6 +214,8 @@ export class CodexAdapter implements AgentAdapter {
     this.#writabilityProbe = config.writabilityProbe ?? realWorkspaceWritabilityProbe;
     this.#binaryName = config.binaryName;
     this.#trustedLocal = config.trustedLocal ?? TRUSTED_LOCAL_DISABLED;
+    this.#strictIsolation = config.strictIsolation ?? STRICT_ISOLATION_DISABLED;
+    this.#strictIsolationConfigured = config.strictIsolation !== undefined;
   }
 
   async detect(): Promise<AgentDetectionResult> {
@@ -195,6 +233,7 @@ export class CodexAdapter implements AgentAdapter {
         fs: this.#fs,
         spawner: this.#spawner,
         trustedLocal: this.#trustedLocal,
+        ...(this.#strictIsolationConfigured ? { strictIsolation: this.#strictIsolation } : {}),
         ...(this.#binaryName !== undefined ? { binaryName: this.#binaryName } : {}),
       });
       return parseAgentDetectionResult(result);
@@ -262,6 +301,21 @@ export class CodexAdapter implements AgentAdapter {
       );
     }
 
+    if (!this.#trustedLocal.enabled) {
+      const worktreeValidation = await this.#validateStrictWorktree(parsedInput, options?.signal);
+      if (!worktreeValidation.ok) {
+        return new PreflightFailedRun(
+          parsedInput.runId,
+          parsedInput.hallTask.taskId,
+          parsedInput.agentIdentity.agentId,
+          buildFailure(
+            CODEX_WORKTREE_VALIDATION_FAILED,
+            "Codex strict isolated execution requires the exact validated Hall worktree.",
+          ),
+        );
+      }
+    }
+
     // Phase 10.2 — trusted-local mode's own writability preflight. Never
     // runs in strict mode (Codex's own sandbox already enforces
     // writability there). `parsedInput.workingDirectory` is the
@@ -315,6 +369,31 @@ export class CodexAdapter implements AgentAdapter {
     });
     return Promise.resolve(run);
   }
+
+  async #validateStrictWorktree(
+    input: AgentTaskInput,
+    signal: AbortSignal | undefined,
+  ): Promise<CodexStrictWorktreeValidationResult> {
+    if (
+      !this.#strictIsolation.enabled ||
+      !this.#strictIsolation.durableStorage ||
+      this.#strictIsolation.worktreeRoot.trim().length === 0 ||
+      this.#strictIsolation.validateWorktree === undefined
+    ) {
+      return { ok: false };
+    }
+    try {
+      return await this.#strictIsolation.validateWorktree({
+        hallTaskId: input.hallTask.taskId,
+        hallAgentRunId: input.runId,
+        adapterId: input.agentIdentity.adapterId,
+        workingDirectory: input.workingDirectory,
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch {
+      return { ok: false };
+    }
+  }
 }
 
 /**
@@ -344,7 +423,11 @@ function failureCodeForUnavailableDetection(detection: AgentDetectionResult): st
         detection.diagnosticMessage === TRUSTED_LOCAL_NOT_LOOPBACK_MESSAGE ||
         detection.diagnosticMessage === TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE ||
         detection.diagnosticMessage === TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE ||
-        detection.diagnosticMessage === TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE
+        detection.diagnosticMessage === TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_DISABLED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE
       ) {
         return CODEX_ISOLATION_UNSUPPORTED;
       }

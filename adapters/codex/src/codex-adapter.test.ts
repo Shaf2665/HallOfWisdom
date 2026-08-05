@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentTaskInput } from "@hall-of-wisdom/agent-adapter-sdk";
 import { CodexAdapter } from "./codex-adapter.js";
+import type { CodexStrictWorktreeValidator } from "./codex-adapter.js";
 import type { ProcessSpawner, SpawnedProcessHandle } from "./process-spawner.js";
 import type { FileSystemProbe } from "./executable-resolver.js";
 import type { GitRepositoryProbe } from "./git-repository-check.js";
@@ -73,6 +74,7 @@ const VALID_EXEC_HELP_TEXT = [
   "--ignore-rules",
   "--strict-config",
   "--sandbox",
+  "--disable",
   "--cd",
   "-c, --config",
 ].join("\n");
@@ -557,6 +559,12 @@ const MINIMAL_VALID_TASK_JSONL =
   "\n";
 
 const TRUSTED_LOCAL_ENABLED = { enabled: true, loopbackBound: true, workspaceRoot: "D:\\fixture" };
+const STRICT_ISOLATED_ENABLED = {
+  enabled: true,
+  durableStorage: true,
+  worktreeRoot: "D:\\hall-worktrees",
+  sandboxProbe: { run: () => Promise.resolve({ ok: true, code: "SANDBOX_PROBE_PASSED" }) },
+};
 
 /**
  * Answers --version, exec --help, and login status exactly like the
@@ -599,6 +607,20 @@ function fakeWritabilityProbe(writable: boolean): {
         calls.push(dir);
         return writable;
       },
+    },
+    calls,
+  };
+}
+
+function strictValidator(ok: boolean): {
+  validator: CodexStrictWorktreeValidator;
+  calls: string[];
+} {
+  const calls: string[] = [];
+  return {
+    validator: (input) => {
+      calls.push(input.workingDirectory);
+      return Promise.resolve({ ok });
     },
     calls,
   };
@@ -821,6 +843,172 @@ describe("CodexAdapter — trusted-local mode (Phase 10.2)", () => {
       expect(execCall?.args[cdIndex + 1]).toBe(canonicalWorkingDirectory);
     },
   );
+});
+
+describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
+  it("accepts the exact Hall-validated worktree and spawns the strict workspace-write argv", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const { validator, calls: validationCalls } = strictValidator(true);
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: { ...STRICT_ISOLATED_ENABLED, validateWorktree: validator },
+    });
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events.some((event) => event.type === "run.completed")).toBe(true);
+    expect(validationCalls).toEqual(["D:\\fixture\\workdir"]);
+
+    const execCall = calls.find(
+      (call) => call.args.includes("exec") && call.args.includes("--json"),
+    );
+    expect(execCall).toBeDefined();
+    expect(execCall?.args).toContain("--sandbox");
+    expect(execCall?.args).toContain("workspace-write");
+    expect(execCall?.args).toContain('approval_policy="never"');
+    expect(execCall?.args).toContain("sandbox_workspace_write.network_access=false");
+    expect(execCall?.args).toContain('web_search="disabled"');
+    expect(execCall?.args).toContain("--ignore-user-config");
+    expect(execCall?.args).toContain("--ignore-rules");
+    expect(execCall?.args).toContain("--strict-config");
+    expect(execCall?.args).toContain("--ephemeral");
+    expect(execCall?.args).toContain("--disable");
+    expect(execCall?.args).toContain("hooks");
+    expect(execCall?.args).toContain("plugins");
+    expect(execCall?.args).toContain("remote_plugin");
+    expect(execCall?.args).toContain("multi_agent");
+    expect(execCall?.args).toContain("browser_use");
+    expect(execCall?.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(execCall?.args).not.toContain("--yolo");
+    expect(execCall?.args).not.toContain("danger-full-access");
+    expect(execCall?.args).not.toContain("--skip-git-repo-check");
+    expect(execCall?.args).not.toContain("--search");
+    expect(execCall?.args).not.toContain("resume");
+    const cdIndex = execCall?.args.indexOf("--cd") ?? -1;
+    expect(execCall?.args[cdIndex + 1]).toBe("D:\\fixture\\workdir");
+    expect(execCall?.args.at(-1)).toBe("-");
+  });
+
+  it.each([
+    "primary checkout",
+    "sibling worktree substitution",
+    "symlink or junction escape",
+    "unregistered worktree",
+    "attached worktree",
+  ])("rejects %s before spawning Codex", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: strictValidator(false).validator,
+      },
+    });
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_WORKTREE_VALIDATION_FAILED",
+    );
+    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+      false,
+    );
+  });
+
+  it("detects TOCTOU worktree changes through the fresh start-time validator", async () => {
+    let ok = true;
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: () => Promise.resolve({ ok }),
+      },
+    });
+    const first = await adapter.detect();
+    expect(first.availability).toBe("available");
+    ok = false;
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_WORKTREE_VALIDATION_FAILED",
+    );
+    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+      false,
+    );
+  });
+
+  it("prompt is sent through stdin only in strict isolated mode", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: strictValidator(true).validator,
+      },
+    });
+    const input = taskInput({
+      hallTask: { ...taskInput().hallTask, description: "PROMPT_SECRET" },
+    });
+    const run = await adapter.startTask(input);
+    await collectRunEvents(run);
+    const execCall = calls.find(
+      (call) => call.args.includes("exec") && call.args.includes("--json"),
+    );
+    expect(execCall?.args.join(" ")).not.toContain("PROMPT_SECRET");
+  });
+
+  it("cancellation before the run starts creates no real Codex task process", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const controller = new AbortController();
+    controller.abort();
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: strictValidator(true).validator,
+      },
+    });
+    const run = await adapter.startTask(taskInput(), { signal: controller.signal });
+    const events = await collectRunEvents(run);
+    expect(events.some((event) => event.type === "run.cancelled")).toBe(true);
+    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+      false,
+    );
+  });
 });
 
 describe("CodexAdapter — Phase 10.3 detection stability", () => {

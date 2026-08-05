@@ -12,6 +12,7 @@ import {
   matchesIsolationFlags,
   matchesTrustedLocalFlags,
 } from "./cli-compatibility.js";
+import type { CodexSandboxCompatibilityProbe } from "./sandbox-compatibility-probe.js";
 
 /**
  * Phase 10.2 — the trusted-local preconditions `detectCodex` must verify
@@ -29,6 +30,14 @@ export interface TrustedLocalDetectionOptions {
   readonly workspaceRoot: string;
 }
 
+export interface StrictIsolatedDetectionOptions {
+  readonly enabled: boolean;
+  readonly durableStorage: boolean;
+  readonly worktreeRoot: string;
+  readonly sandboxProbe: CodexSandboxCompatibilityProbe;
+  readonly sandboxProbeTimeoutMs?: number | undefined;
+}
+
 export interface DetectionOptions {
   readonly platform: NodeJS.Platform;
   readonly parentEnv: Readonly<NodeJS.ProcessEnv>;
@@ -41,6 +50,7 @@ export interface DetectionOptions {
   /** Phase 10.3 — see `DEFAULT_VERSION_RETRY_DELAY_MS`'s doc comment. */
   readonly versionRetryDelayMs?: number;
   readonly trustedLocal?: TrustedLocalDetectionOptions;
+  readonly strictIsolation?: StrictIsolatedDetectionOptions;
 }
 
 const DEFAULT_VERSION_TIMEOUT_MS = 5000;
@@ -146,6 +156,14 @@ export const TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE =
   "Codex trusted-local execution was refused because a billing-changing environment variable is present.";
 export const TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE =
   "Installed Codex cannot guarantee the required trusted-local execution profile.";
+export const STRICT_ISOLATION_DISABLED_MESSAGE =
+  "Codex strict isolated execution requires durable Hall worktree isolation.";
+export const STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE =
+  "Codex strict isolated execution requires SQLite durability.";
+export const STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE =
+  "Codex strict isolated execution requires a configured Hall-owned worktree root.";
+export const STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE =
+  "Codex strict isolated execution requires a passing native sandbox compatibility probe.";
 /**
  * The only diagnostic message this adapter ever attaches to an
  * `availability: "available"` result. Deliberately does not use the words
@@ -156,6 +174,8 @@ export const TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE =
  */
 export const TRUSTED_LOCAL_AVAILABLE_MESSAGE =
   "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.";
+export const STRICT_ISOLATED_AVAILABLE_MESSAGE =
+  "Strict isolated mode: Codex runs in a Hall-owned Git worktree with workspace-write sandboxing and network disabled.";
 
 /**
  * Phase 11 — true regardless of this machine's current CLI/auth/sandbox
@@ -285,6 +305,56 @@ function available(diagnosticMessage: string, detectedVersion?: string): AgentDe
       },
     ],
     limitations: [TRUSTED_LOCAL_AVAILABLE_MESSAGE],
+  };
+  return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
+}
+
+function availableStrictIsolated(detectedVersion?: string): AgentDetectionResult {
+  const result: AgentDetectionResult = {
+    installed: true,
+    availability: "available",
+    diagnosticMessage: STRICT_ISOLATED_AVAILABLE_MESSAGE,
+    executionTrust: "isolated",
+    capabilityObservations: [
+      {
+        capability: "project.read",
+        status: "verified",
+        safeSummary: "Verified by the strict isolated sandbox compatibility probe.",
+        evidence: "environment_probe",
+      },
+      {
+        capability: "project.edit",
+        status: "verified",
+        safeSummary: "Verified by the strict isolated sandbox compatibility probe.",
+        evidence: "environment_probe",
+      },
+      {
+        capability: "command.execute",
+        status: "verified",
+        safeSummary: "Verified by the strict isolated sandbox compatibility probe.",
+        evidence: "environment_probe",
+      },
+      {
+        capability: "git.inspect",
+        status: "verified",
+        safeSummary: "Hall validates the detached Git worktree before Codex starts.",
+        evidence: "deterministic_test",
+      },
+      ...BASELINE_OBSERVATIONS,
+      {
+        capability: "session.resume",
+        status: "unsupported",
+        safeSummary: "This adapter never uses `codex exec resume`.",
+        evidence: "declared_only",
+      },
+      {
+        capability: "network.access",
+        status: "unsupported",
+        safeSummary: "Strict isolated Codex execution disables network access.",
+        evidence: "environment_probe",
+      },
+    ],
+    limitations: [STRICT_ISOLATED_AVAILABLE_MESSAGE],
   };
   return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
 }
@@ -458,13 +528,37 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     return unsupported(UNVERIFIED_CHATGPT_MESSAGE, detectedVersion);
   }
 
-  // Installation, isolation-flag support, and ChatGPT authentication are
-  // all confirmed at this point. Phase 10.1's fail-closed default still
-  // applies unconditionally: unless trusted-local mode was explicitly
-  // enabled by the operator at Hall Core startup, this adapter never
-  // reports "available" — see UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE.
   if (options.trustedLocal?.enabled !== true) {
-    return unsupportedRestricted(UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE, detectedVersion);
+    if (options.strictIsolation?.enabled !== true) {
+      return unsupportedRestricted(
+        options.strictIsolation === undefined
+          ? UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE
+          : STRICT_ISOLATION_DISABLED_MESSAGE,
+        detectedVersion,
+      );
+    }
+    if (!options.strictIsolation.durableStorage) {
+      return unsupportedRestricted(STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE, detectedVersion);
+    }
+    if (options.strictIsolation.worktreeRoot.trim().length === 0) {
+      return unsupportedRestricted(
+        STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE,
+        detectedVersion,
+      );
+    }
+    if (hasBlockedBillingEnvironmentKey(options.parentEnv)) {
+      return unsupportedRestricted(TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE, detectedVersion);
+    }
+    const probe = await options.strictIsolation.sandboxProbe.run({
+      executablePath,
+      spawner: options.spawner,
+      parentEnv: options.parentEnv,
+      timeoutMs: options.strictIsolation.sandboxProbeTimeoutMs,
+    });
+    if (!probe.ok) {
+      return unsupportedRestricted(STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE, detectedVersion);
+    }
+    return availableStrictIsolated(detectedVersion);
   }
 
   // Phase 10.2 — trusted-local mode is explicitly enabled. Every check

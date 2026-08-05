@@ -157,6 +157,38 @@ describe("parseServerCliArguments", () => {
     });
   });
 
+  describe("--agent-worktree-root (Phase 16.4)", () => {
+    it("is undefined when omitted", () => {
+      const options = parseServerCliArguments(["--workspace-root", "D:\\HallOfWisdom"]);
+      expect(options.agentWorktreeRoot).toBeUndefined();
+    });
+
+    it("parses --agent-worktree-root when supplied", () => {
+      const options = parseServerCliArguments([
+        "--workspace-root",
+        "D:\\HallOfWisdom",
+        "--data-dir",
+        "D:\\HallOfWisdomData",
+        "--agent-worktree-root",
+        "D:\\HallOfWisdomAgentWorktrees",
+      ]);
+      expect(options.agentWorktreeRoot).toBe("D:\\HallOfWisdomAgentWorktrees");
+    });
+
+    it("parses --agent-worktree-root after the pnpm '--' script separator", () => {
+      const options = parseServerCliArguments([
+        "--",
+        "--workspace-root",
+        "D:\\HallOfWisdom",
+        "--data-dir",
+        "D:\\HallOfWisdomData",
+        "--agent-worktree-root",
+        "D:\\HallOfWisdomAgentWorktrees",
+      ]);
+      expect(options.agentWorktreeRoot).toBe("D:\\HallOfWisdomAgentWorktrees");
+    });
+  });
+
   describe("stripLeadingScriptSeparator (Phase 11.1)", () => {
     it("leaves argv without a leading separator untouched (direct node invocation)", () => {
       expect(stripLeadingScriptSeparator(["--workspace-root", "D:\\HallOfWisdom"])).toEqual([

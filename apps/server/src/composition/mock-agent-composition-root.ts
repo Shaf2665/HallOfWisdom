@@ -45,6 +45,7 @@ import { SqliteAgentExecutionArtifactStore } from "../execution-artifacts/sqlite
 import type { AgentExecutionArtifactStorePort } from "../execution-artifacts/agent-execution-artifact-store-port.js";
 import { ExplicitAdapterIsolationPolicy } from "../agent-execution/isolation-policy.js";
 import { IsolatedAgentExecutionCoordinator } from "../agent-execution/isolated-agent-execution-coordinator.js";
+import type { AgentWorktreeValidator } from "../agent-execution/isolated-agent-execution-coordinator.js";
 import { GitArtifactCollector } from "../agent-execution/git-artifact-collector.js";
 import { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
 
@@ -100,6 +101,7 @@ export interface ServerComposition {
   /** Phase 15 — always composed alongside `ceoPlans`; a delegated plan may still have no active run and stay in manual mode (Phase 14 behavior, unchanged) until an operator explicitly configures and starts autonomous execution. */
   readonly ceoExecution: CeoPlanExecutionComposition;
   readonly agentWorktreeStore: AgentWorktreeStorePort;
+  readonly agentWorktreeValidator: AgentWorktreeValidator | undefined;
   readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
   /**
    * Arms the task-mutation bridge that lets `ceoExecution.scheduler` react
@@ -162,6 +164,7 @@ export interface CoreStoresComposition {
   readonly messageStore: MessageStorePort;
   readonly messageBus: MessageBus;
   readonly agentWorktreeStore: AgentWorktreeStorePort;
+  readonly agentWorktreeValidator: AgentWorktreeValidator | undefined;
   readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
 }
 
@@ -290,6 +293,7 @@ export function createCoreStoresComposition(
     messageStore,
     messageBus,
     agentWorktreeStore,
+    agentWorktreeValidator: agentWorktreeManager,
     agentExecutionArtifactStore,
   };
 }

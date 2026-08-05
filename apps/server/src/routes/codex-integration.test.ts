@@ -70,6 +70,7 @@ const VALID_EXEC_HELP_TEXT = [
   "--strict-config",
   "--sandbox",
   "--cd",
+  "--disable",
   "-c, --config",
 ].join("\n");
 

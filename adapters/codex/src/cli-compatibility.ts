@@ -36,6 +36,7 @@ const REQUIRED_HELP_MARKERS = [
   "--ignore-rules",
   "--strict-config",
   "--sandbox",
+  "--disable",
   "--cd",
   "-c, --config",
 ] as const;
