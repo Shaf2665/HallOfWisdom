@@ -408,14 +408,16 @@ runtime can toggle it.
 Phase 16.4 adds a separate strict isolated Codex path for durable Hall-owned worktrees. It does not
 reuse trusted-local mode and does not make trusted-local safer. Strict isolated mode keeps
 `--sandbox workspace-write`, disables network and web search, disables hooks/plugins/remote plugin
-and multi-agent features, validates the exact Hall worktree through `AgentWorktreeManager`, and
-requires a passing zero-model native sandbox probe before detection may report `available`.
+and multi-agent features, and retains the exact Hall worktree validation infrastructure through
+`AgentWorktreeManager`. A passing zero-model native sandbox probe is necessary but not sufficient:
+because `codex sandbox -P :workspace` is not exact proof of real `codex exec --sandbox
+workspace-write` policy equivalence, strict detection remains `unsupported` until Phase 16.6.
 
 Trusted-local remains exactly what this document says it is: explicitly opt-in, not sandboxed, and
 backed by `--dangerously-bypass-approvals-and-sandbox`. If trusted-local is enabled, it remains a
 separate operator choice and is never silently selected as a fallback when strict isolated mode is
-missing durability, lacks an explicit worktree root, fails the sandbox probe, or rejects a worktree
-at start time.
+missing durability, lacks an explicit worktree root, fails the sandbox probe, lacks exact sandbox
+equivalence proof, or rejects a worktree at start time.
 
 Phase 16.4 does not run a real model-backed Codex task. Restart-safe worktree cleanup and
 reconciliation remain Phase 16.5; real Codex smoke verification remains Phase 16.6.

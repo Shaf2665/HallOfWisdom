@@ -158,7 +158,7 @@ describe("registerCodexAdapter", () => {
     expect(result.availability).not.toBe("available");
   });
 
-  it("enables strict isolated detection only when durable storage, root, and probe are configured", async () => {
+  it("keeps strict isolated detection unsupported even when durable storage, root, and probe are configured", async () => {
     const registry = new AgentRegistry();
     const worktreeStore = new InMemoryAgentWorktreeStore();
     const validator: AgentWorktreeValidator = {
@@ -189,8 +189,17 @@ describe("registerCodexAdapter", () => {
       spawner: successfulDetectionSpawner(),
     });
     const result = await registry.resolve("hall.codex").detect();
-    expect(result.availability).toBe("available");
-    expect(result.executionTrust).toBe("isolated");
+    expect(result.availability).toBe("unsupported");
+    expect(result.executionTrust).toBe("unavailable");
+    expect(result.diagnosticMessage).toBe(
+      "Codex strict isolated execution requires exact sandbox equivalence verification from Phase 16.6.",
+    );
+    expect(result.capabilityObservations).not.toContainEqual(
+      expect.objectContaining({ capability: "project.edit", status: "verified" }),
+    );
+    expect(result.capabilityObservations).not.toContainEqual(
+      expect.objectContaining({ capability: "command.execute", status: "verified" }),
+    );
   });
 
   it("fails strict isolated detection closed when the explicit worktree root is absent", async () => {

@@ -106,7 +106,7 @@ Implemented through Phase 16.3:
 - Phase 16.3 isolated orchestration
 - run-specific retry and cancellation fencing
 
-Phase 16.4 adds strict isolated Codex compatibility behind durable Hall-owned worktree configuration and a zero-model sandbox compatibility probe. It does not add UI, routes, public protocol fields, automatic worktree cleanup, restart reconciliation for Phase 16 worktrees, or real Codex smoke testing.
+Phase 16.4 adds strict isolated Codex infrastructure behind durable Hall-owned worktree configuration and a zero-model native sandbox probe. That helper probe is not exact proof that `codex sandbox -P :workspace` and real `codex exec --sandbox workspace-write` enforce identical effective policy, so strict Codex availability remains fail-closed as `unsupported` until the explicitly authorized Phase 16.6 verification. It does not add UI, routes, public protocol fields, automatic worktree cleanup, restart reconciliation for Phase 16 worktrees, or real Codex smoke testing.
 
 ## Features
 
@@ -188,7 +188,7 @@ pnpm --filter @hall-of-wisdom/hall-core run test -- src/agent-execution src/agen
 
 ## Security Limitations
 
-Hall binds locally to `127.0.0.1` and is still a prototype. It has no production authentication layer. SQLite durability is optional. Phase 16 worktrees are retained after terminal execution; automatic cleanup and restart reconciliation are deferred to Phase 16.5. Strict Codex compatibility depends on the installed native Codex sandbox passing Hall's zero-model probe. If no safe native sandbox is available, strict Codex fails closed.
+Hall binds locally to `127.0.0.1` and is still a prototype. It has no production authentication layer. SQLite durability is optional. Phase 16 worktrees are retained after terminal execution; automatic cleanup and restart reconciliation are deferred to Phase 16.5. Strict Codex remains unsupported until Hall can prove exact equivalence for the real `codex exec --sandbox workspace-write` policy in Phase 16.6; the zero-model helper probe alone is necessary evidence but not sufficient.
 
 Trusted-local Codex mode is separate and explicitly opt-in. It bypasses Codex's sandbox and approval enforcement and runs with the Hall Core process user's filesystem permissions. Do not confuse it with strict isolated mode.
 

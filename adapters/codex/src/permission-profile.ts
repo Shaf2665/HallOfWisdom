@@ -113,7 +113,7 @@ export function buildCodexArgv(workingDirectory: string): readonly string[] {
  * when the operator has explicitly enabled trusted-local mode at Hall Core
  * startup (`--enable-codex-trusted-local`) and every trusted-local
  * precondition in `detection.ts` has passed; `buildCodexArgv` above remains
- * the untouched, always-available strict-mode profile. See
+ * the untouched strict-mode argv builder. See
  * `docs/architecture/0010-paperclip-compatible-codex-mode.md`.
  *
  * `--dangerously-bypass-approvals-and-sandbox` (confirmed present, exact

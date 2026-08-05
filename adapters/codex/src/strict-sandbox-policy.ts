@@ -23,10 +23,41 @@ export const STRICT_CODEX_SANDBOX_POLICY = {
   networkDisabled: true,
 } as const;
 
+export interface StrictCodexSandboxEquivalenceInput {
+  readonly execSandboxMode: string;
+  readonly sandboxPermissionProfile: string;
+  readonly establishedBy: "shared_constants" | "same_effective_sandbox_state";
+}
+
+export type StrictCodexSandboxEquivalenceResult =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly code:
+        "CODEX_STRICT_SANDBOX_SELECTOR_MISMATCH" | "CODEX_STRICT_SANDBOX_EQUIVALENCE_UNPROVEN";
+    };
+
 export function strictCodexConfigArgs(): readonly string[] {
   return STRICT_CODEX_SANDBOX_POLICY.configOverrides.flatMap((override) => ["-c", override]);
 }
 
 export function strictCodexFeatureDisableArgs(): readonly string[] {
   return STRICT_CODEX_SANDBOX_POLICY.disabledFeatures.flatMap((feature) => ["--disable", feature]);
+}
+
+export function evaluateStrictCodexSandboxEquivalence(
+  input: StrictCodexSandboxEquivalenceInput,
+): StrictCodexSandboxEquivalenceResult {
+  if (
+    input.execSandboxMode !== STRICT_CODEX_SANDBOX_POLICY.execSandboxMode ||
+    input.sandboxPermissionProfile !== STRICT_CODEX_SANDBOX_POLICY.sandboxPermissionProfile
+  ) {
+    return { ok: false, code: "CODEX_STRICT_SANDBOX_SELECTOR_MISMATCH" };
+  }
+
+  switch (input.establishedBy) {
+    case "shared_constants":
+    case "same_effective_sandbox_state":
+      return { ok: false, code: "CODEX_STRICT_SANDBOX_EQUIVALENCE_UNPROVEN" };
+  }
 }

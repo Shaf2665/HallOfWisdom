@@ -1,9 +1,10 @@
 # 0009 — Codex Adapter
 
-Status: Draft (Phase 10; hardened in Phase 10.1, Phase 10.2, Phase 10.3, and Phase 16.4). Strict
-Codex availability is now gated by durable Hall-owned worktree isolation plus a zero-model native
-sandbox compatibility probe; without that server-controlled Phase 16.4 configuration, strict
-`detect()` still fails closed instead of offering Codex for assignment.
+Status: Draft (Phase 10; hardened in Phase 10.1, Phase 10.2, Phase 10.3, and Phase 16.4). Phase
+16.4 keeps strict Codex fail-closed: durable Hall-owned worktree isolation and the zero-model native
+sandbox probe are present, but they do not prove exact equivalence with real
+`codex exec --sandbox workspace-write` execution. Strict `detect()` remains `unsupported` until the
+explicit Phase 16.6 verification proves the effective policy.
 **Phase 10.2** (see
 [`0010-paperclip-compatible-codex-mode.md`](0010-paperclip-compatible-codex-mode.md)) adds a
 separate, explicitly opt-in "trusted-local" mode that makes Codex assignable by having it bypass
@@ -717,27 +718,26 @@ JSON was found in any tracked file, test fixture, or snapshot during review.
 
 ## Phase 16.4 — Strict isolated compatibility
 
-Phase 16.4 changes the default strict Codex availability rule from a permanent Phase 10.1
-capability cap to a durable, probed compatibility gate. Strict mode may report `available` only
-when all of the following hold: the executable resolves, the installed version and required
-`codex exec` flags are supported, `codex login status` verifies ChatGPT authentication, no
-billing-changing environment variable is present, durable Hall worktree isolation is enabled, an
-explicit Hall-owned worktree root is configured, and the installed Codex native sandbox passes
-Hall's zero-model compatibility probe.
+Phase 16.4 keeps the default strict Codex availability rule fail-closed. The adapter now has the
+durable worktree and native-probe infrastructure it needs, but strict mode must not report
+`available` merely because the helper probe passes. Availability still requires an exact proof that
+the real `codex exec --sandbox workspace-write` policy and the zero-model helper policy have the
+same effective filesystem and network restrictions; that proof is deferred to the explicitly
+authorized Phase 16.6 verification.
 
 The probe uses the installed `codex sandbox` helper rather than `codex exec`, so it spends no model
 usage. On the local `codex-cli 0.144.4` install, the working helper shape is
 `codex sandbox -P :workspace -C <workspace> ...`. It verifies read/write/delete behavior inside a
 disposable workspace, rejects outside writes, rejects network success, bounds output and time, and
-returns only stable safe probe codes. If no safe native sandbox is available on Windows, Linux, or
-macOS, strict detection fails closed as `unsupported`.
+returns only stable safe probe codes. This is useful native-sandbox evidence, but it is not exact
+equivalence proof for the real execution selector. If equivalence is unproven, strict detection
+fails closed as `unsupported` and does not mark editing or command execution verified.
 
-Strict task launch performs a fresh detection and then calls a server-injected worktree validator
-before constructing `CodexRun`. That validator is built from Hall Core's
-`AgentWorktreeManager.validateReadyWorktree`, not from adapter-owned lexical path checks. The
-adapter rejects primary checkouts, sibling substitutions, symlink/junction escapes, unregistered
-worktrees, attached worktrees, stale task/run identity, and TOCTOU replacement before spawning
-Codex.
+Once exact equivalence is proven in a later phase, strict task launch performs a fresh detection
+and then calls a server-injected worktree validator before constructing `CodexRun`. That validator
+is built from Hall Core's `AgentWorktreeManager.validateReadyWorktree`, not from adapter-owned
+lexical path checks. While equivalence is unproven, the adapter fails before worktree validation and
+before any model-backed Codex task process is spawned.
 
 The strict argv remains sandboxed and fixed:
 

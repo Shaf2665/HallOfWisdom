@@ -871,7 +871,7 @@ describe("CodexAdapter — trusted-local mode (Phase 10.2)", () => {
 });
 
 describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
-  it("accepts the exact Hall-validated worktree and spawns the strict workspace-write argv", async () => {
+  it("keeps strict execution fail-closed when sandbox equivalence is unproven, with zero model-backed task processes", async () => {
     const { spawner, calls } = scriptedSpawnerWithExec(
       "codex-cli 0.144.4",
       "Logged in using ChatGPT",
@@ -887,37 +887,26 @@ describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
     });
     const run = await adapter.startTask(taskInput());
     const events = await collectRunEvents(run);
-    expect(events.some((event) => event.type === "run.completed")).toBe(true);
-    expect(validationCalls).toEqual(["D:\\fixture\\workdir", "D:\\fixture\\workdir"]);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_ISOLATION_UNSUPPORTED",
+    );
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.message).toBe(
+      "Codex strict isolated execution requires exact sandbox equivalence verification from Phase 16.6.",
+    );
+    expect(validationCalls).toEqual([]);
 
     const execCall = calls.find(
       (call) => call.args.includes("exec") && call.args.includes("--json"),
     );
-    expect(execCall).toBeDefined();
-    expect(execCall?.args).toContain("--sandbox");
-    expect(execCall?.args).toContain("workspace-write");
-    expect(execCall?.args).toContain('approval_policy="never"');
-    expect(execCall?.args).toContain("sandbox_workspace_write.network_access=false");
-    expect(execCall?.args).toContain('web_search="disabled"');
-    expect(execCall?.args).toContain("--ignore-user-config");
-    expect(execCall?.args).toContain("--ignore-rules");
-    expect(execCall?.args).toContain("--strict-config");
-    expect(execCall?.args).toContain("--ephemeral");
-    expect(execCall?.args).toContain("--disable");
-    expect(execCall?.args).toContain("hooks");
-    expect(execCall?.args).toContain("plugins");
-    expect(execCall?.args).toContain("remote_plugin");
-    expect(execCall?.args).toContain("multi_agent");
-    expect(execCall?.args).toContain("browser_use");
-    expect(execCall?.args).not.toContain("--dangerously-bypass-approvals-and-sandbox");
-    expect(execCall?.args).not.toContain("--yolo");
-    expect(execCall?.args).not.toContain("danger-full-access");
-    expect(execCall?.args).not.toContain("--skip-git-repo-check");
-    expect(execCall?.args).not.toContain("--search");
-    expect(execCall?.args).not.toContain("resume");
-    const cdIndex = execCall?.args.indexOf("--cd") ?? -1;
-    expect(execCall?.args[cdIndex + 1]).toBe("D:\\fixture\\workdir");
-    expect(execCall?.args.at(-1)).toBe("-");
+    expect(execCall).toBeUndefined();
+    const serializedCalls = JSON.stringify(calls.map((call) => call.args));
+    expect(serializedCalls).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(serializedCalls).not.toContain("--yolo");
+    expect(serializedCalls).not.toContain("danger-full-access");
+    expect(serializedCalls).not.toContain("sandbox_workspace_write.network_access=true");
+    expect(serializedCalls).not.toContain("--search");
+    expect(serializedCalls).not.toContain('web_search="live"');
   });
 
   it.each([
@@ -926,33 +915,38 @@ describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
     "symlink or junction escape",
     "unregistered worktree",
     "attached worktree",
-  ])("rejects %s before spawning Codex", async () => {
-    const { spawner, calls } = scriptedSpawnerWithExec(
-      "codex-cli 0.144.4",
-      "Logged in using ChatGPT",
-    );
-    const adapter = new CodexAdapter({
-      platform: "linux",
-      parentEnv: FOUND_ENV,
-      fs: FS_WITH_CODEX,
-      spawner,
-      gitProbe: ALWAYS_IN_REPO,
-      strictIsolation: {
-        ...STRICT_ISOLATED_ENABLED,
-        validateWorktree: strictValidator(false).validator,
-      },
-    });
-    const run = await adapter.startTask(taskInput());
-    const events = await collectRunEvents(run);
-    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
-      "CODEX_WORKTREE_VALIDATION_FAILED",
-    );
-    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
-      false,
-    );
-  });
+  ])(
+    "still creates no Codex task process for %s while strict equivalence is unproven",
+    async () => {
+      const { spawner, calls } = scriptedSpawnerWithExec(
+        "codex-cli 0.144.4",
+        "Logged in using ChatGPT",
+      );
+      const { validator, calls: validationCalls } = strictValidator(false);
+      const adapter = new CodexAdapter({
+        platform: "linux",
+        parentEnv: FOUND_ENV,
+        fs: FS_WITH_CODEX,
+        spawner,
+        gitProbe: ALWAYS_IN_REPO,
+        strictIsolation: {
+          ...STRICT_ISOLATED_ENABLED,
+          validateWorktree: validator,
+        },
+      });
+      const run = await adapter.startTask(taskInput());
+      const events = await collectRunEvents(run);
+      expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+        "CODEX_ISOLATION_UNSUPPORTED",
+      );
+      expect(validationCalls).toEqual([]);
+      expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+        false,
+      );
+    },
+  );
 
-  it("detects TOCTOU worktree changes through the fresh start-time validator", async () => {
+  it("does not use a prior helper-probe success to launch after worktree state changes", async () => {
     let ok = true;
     const { spawner, calls } = scriptedSpawnerWithExec(
       "codex-cli 0.144.4",
@@ -970,19 +964,19 @@ describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
       },
     });
     const first = await adapter.detect();
-    expect(first.availability).toBe("available");
+    expect(first.availability).toBe("unsupported");
     ok = false;
     const run = await adapter.startTask(taskInput());
     const events = await collectRunEvents(run);
     expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
-      "CODEX_WORKTREE_VALIDATION_FAILED",
+      "CODEX_ISOLATION_UNSUPPORTED",
     );
     expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
       false,
     );
   });
 
-  it("prompt is sent through stdin only in strict isolated mode", async () => {
+  it("does not put task prompt text into any zero-model strict preflight command", async () => {
     const { spawner, calls } = scriptedSpawnerWithExec(
       "codex-cli 0.144.4",
       "Logged in using ChatGPT",
@@ -1003,10 +997,10 @@ describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
     });
     const run = await adapter.startTask(input);
     await collectRunEvents(run);
-    const execCall = calls.find(
-      (call) => call.args.includes("exec") && call.args.includes("--json"),
+    expect(JSON.stringify(calls.map((call) => call.args))).not.toContain("PROMPT_SECRET");
+    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+      false,
     );
-    expect(execCall?.args.join(" ")).not.toContain("PROMPT_SECRET");
   });
 
   it("cancellation before the run starts creates no real Codex task process", async () => {
@@ -1162,16 +1156,8 @@ describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
     );
   });
 
-  it("cancellation during worktree validation creates no real Codex task process", async () => {
-    const controller = new AbortController();
-    let markValidationStarted!: () => void;
-    let releaseValidation!: () => void;
-    const validationStarted = new Promise<void>((resolve) => {
-      markValidationStarted = resolve;
-    });
-    const validationRelease = new Promise<void>((resolve) => {
-      releaseValidation = resolve;
-    });
+  it("does not reach worktree validation while strict sandbox equivalence is unproven", async () => {
+    let validationCalled = false;
     const { spawner, calls } = scriptedSpawnerWithExec(
       "codex-cli 0.144.4",
       "Logged in using ChatGPT",
@@ -1184,31 +1170,25 @@ describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
       gitProbe: ALWAYS_IN_REPO,
       strictIsolation: {
         ...STRICT_ISOLATED_ENABLED,
-        validateWorktree: async () => {
-          markValidationStarted();
-          await validationRelease;
-          return { ok: false };
+        validateWorktree: () => {
+          validationCalled = true;
+          return Promise.resolve({ ok: true, worktreeId: "wt-1" });
         },
       },
     });
-    const runPromise = adapter.startTask(taskInput(), { signal: controller.signal });
-    await validationStarted;
-    controller.abort("do not leak");
-    releaseValidation();
-    const run = await runPromise;
+    const run = await adapter.startTask(taskInput());
     const events = await collectRunEvents(run);
-    expect(events).toEqual([expect.objectContaining({ type: "run.cancelled" })]);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_ISOLATION_UNSUPPORTED",
+    );
+    expect(validationCalled).toBe(false);
     expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
       false,
     );
   });
 
-  it("runs a final worktree validation inside the pre-spawn path and fails before task spawn", async () => {
+  it("keeps the adapter-level pre-spawn path dormant until strict sandbox equivalence is proven", async () => {
     let validationCount = 0;
-    let resolveFinalValidation!: () => void;
-    const finalValidationStarted = new Promise<void>((resolve) => {
-      resolveFinalValidation = resolve;
-    });
     const { spawner, calls } = scriptedSpawnerWithExec(
       "codex-cli 0.144.4",
       "Logged in using ChatGPT",
@@ -1221,26 +1201,18 @@ describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
       gitProbe: ALWAYS_IN_REPO,
       strictIsolation: {
         ...STRICT_ISOLATED_ENABLED,
-        validateWorktree: async () => {
+        validateWorktree: () => {
           validationCount += 1;
-          if (validationCount === 1) return { ok: true, worktreeId: "wt-1" };
-          await finalValidationStarted;
-          return { ok: false };
+          return Promise.resolve({ ok: true, worktreeId: "wt-1" });
         },
       },
     });
     const run = await adapter.startTask(taskInput());
-    const eventsPromise = collectRunEvents(run);
-    await Promise.resolve();
-    expect(validationCount).toBe(2);
-    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
-      false,
-    );
-    resolveFinalValidation();
-    const events = await eventsPromise;
+    const events = await collectRunEvents(run);
     expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
-      "CODEX_WORKTREE_VALIDATION_FAILED",
+      "CODEX_ISOLATION_UNSUPPORTED",
     );
+    expect(validationCount).toBe(0);
     expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
       false,
     );

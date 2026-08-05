@@ -1,7 +1,9 @@
 # 0016 — Durable Isolated Codex Execution
 
-Status: Phase 16.4 strict isolated Codex compatibility is implemented on the Phase 16.4 branch and
-is pending review and merge. Real model-backed Codex smoke testing remains deferred.
+Status: Phase 16.4 strict isolated Codex infrastructure is implemented on the Phase 16.4 branch and
+is pending review and merge. Strict Codex availability remains fail-closed until exact sandbox
+equivalence is proven by the explicitly authorized Phase 16.6 verification. Real model-backed Codex
+smoke testing remains deferred.
 
 Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 built
 the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and SQLite
@@ -351,11 +353,12 @@ worker. Restart-safe cleanup and reconciliation belong to Phase 16.5.
 
 ## Phase 16.4 strict isolated Codex compatibility
 
-Phase 16.4 lifts the old default strict Codex capability cap only when Hall Core has durable Phase
-16 worktree isolation configured and the installed Codex CLI passes a bounded, zero-model native
-sandbox compatibility probe. The primary source checkout is still never passed to strict Codex.
-TaskOrchestrator prepares a manager-owned worktree first; the Codex adapter receives only that
-validated worktree path as the provider-neutral `workingDirectory`.
+Phase 16.4 keeps the old default strict Codex capability cap in place while adding the strict
+isolation infrastructure. Hall Core can configure durable Phase 16 worktree isolation and the
+installed Codex CLI can pass a bounded, zero-model native sandbox probe, but that does not prove
+the helper and real execution selectors enforce identical effective policy. Strict Codex therefore
+remains `unsupported` until Phase 16.6 proves equivalence through explicitly authorized
+verification. The primary source checkout is still never passed to strict Codex.
 
 Strict isolated Codex configuration is constructor-time and server-controlled. It is not accepted
 from tasks, REST payloads, browser data, provider output, or arbitrary environment variables. The
@@ -381,15 +384,19 @@ worktrees, symlink/junction escapes, and TOCTOU replacement fail before Codex is
 Detection gates for strict isolated Codex are executable resolution, supported CLI version,
 required `codex exec` flags, ChatGPT authentication, absence of billing-changing environment
 variables, durable Hall isolation, explicit Hall-owned worktree root, a passing native sandbox
-compatibility probe, and the adapter's deterministic JSONL and process-tree cancellation coverage.
+compatibility probe, exact sandbox-equivalence proof, and the adapter's deterministic JSONL and
+process-tree cancellation coverage. Phase 16.4 deliberately leaves the equivalence gate unproven,
+so strict detection returns `unsupported` with a fixed diagnostic and does not mark
+`project.edit` or `command.execute` verified.
 
-The strict sandbox policy is represented once inside the Codex adapter and rendered into both the
-real task argv and the zero-model native probe. The real task uses `codex exec --sandbox
-workspace-write`; the native probe uses the installed CLI's sandbox helper with the corresponding
-workspace profile for this installed CLI (`codex sandbox -P :workspace` on local 0.144.4). Both
-forms use the same fixed approval, network, web-search, and feature-disable policy, and neither uses
-`--dangerously-bypass-approvals-and-sandbox`, `--yolo`, `danger-full-access`, `--add-dir`, remote
-operations, or task-controlled security options.
+The strict sandbox policy is represented once inside the Codex adapter, but shared constants and
+matching selector names are not treated as proof. The real task would use `codex exec --sandbox
+workspace-write`; the native probe uses the installed CLI's sandbox helper
+(`codex sandbox -P :workspace` on local 0.144.4). Both forms use the same fixed approval, network,
+web-search, and feature-disable policy, and neither uses `--dangerously-bypass-approvals-and-sandbox`,
+`--yolo`, `danger-full-access`, `--add-dir`, remote operations, or task-controlled security
+options. Because Codex 0.144.4 does not expose a zero-model command that materializes the exact
+effective `exec` sandbox state for comparison, the adapter fails closed until Phase 16.6.
 
 The probe runs no model. It creates a disposable probe workspace under the canonical Hall-owned
 worktree root, and a pre-existing outside sentinel in the same canonical root but outside that
@@ -405,19 +412,20 @@ falling back to trusted-local or a dangerous bypass. No administrator setup, ACL
 changes, system-user creation, or credential-file reads are performed.
 
 Strict task launch uses a cancellation-aware fresh detection path rather than the public coalesced
-polling detector. Cancellation is checked before subprocess detection starts, after version/help/auth
-checks, during the sandbox probe, during worktree validation, and again inside the lazy run's
-pre-spawn gate. Cancellation emits `run.cancelled`, never a worktree-validation failure, and never
-leaks raw abort reasons.
+polling detector. While exact equivalence is unproven, this path fails before model-backed Codex
+spawn and before claiming edit or command capabilities. Cancellation is still checked before
+subprocess detection starts, after version/help/auth checks, and during the sandbox probe.
+Cancellation emits `run.cancelled` when it wins, never leaks raw abort reasons, and never launches
+a task process.
 
-Strict task launch performs preliminary worktree validation before returning a run handle, then the
-lazy `CodexRun` performs the same strong validation again inside an async pre-spawn gate immediately
-before the structured `spawner.spawn` call. The final gate revalidates task id, Hall agent-run id,
-adapter id, worktree id, exact canonical worktree directory, Git registration, common git dir,
-detached HEAD, base commit, and symlink/junction state through Hall Core's injected manager-backed
-validator. If the final check fails, no Codex task process is spawned and a bounded
-`CODEX_WORKTREE_VALIDATION_FAILED` event is emitted; if cancellation wins, `run.cancelled` is
-emitted instead.
+After Phase 16.6 proves exact equivalence, strict task launch will perform preliminary worktree
+validation before returning a run handle, then the lazy `CodexRun` will perform the same strong
+validation again inside an async pre-spawn gate immediately before the structured `spawner.spawn`
+call. That final gate revalidates task id, Hall agent-run id, adapter id, worktree id, exact
+canonical worktree directory, Git registration, common git dir, detached HEAD, base commit, and
+symlink/junction state through Hall Core's injected manager-backed validator. If the final check
+fails, no Codex task process is spawned and a bounded `CODEX_WORKTREE_VALIDATION_FAILED` event is
+emitted; if cancellation wins, `run.cancelled` is emitted instead.
 
 The strict argv remains fixed and uses structured arguments:
 

@@ -13,6 +13,10 @@ import {
   matchesTrustedLocalFlags,
 } from "./cli-compatibility.js";
 import type { CodexSandboxCompatibilityProbe } from "./sandbox-compatibility-probe.js";
+import {
+  STRICT_CODEX_SANDBOX_POLICY,
+  evaluateStrictCodexSandboxEquivalence,
+} from "./strict-sandbox-policy.js";
 
 /**
  * Phase 10.2 — the trusted-local preconditions `detectCodex` must verify
@@ -157,6 +161,8 @@ export const TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE =
   "Codex trusted-local execution requires a configured workspace root.";
 export const TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE =
   "Codex trusted-local execution was refused because a billing-changing environment variable is present.";
+export const STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE =
+  "Codex strict isolated execution was refused because a billing-changing environment variable is present.";
 export const TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE =
   "Installed Codex cannot guarantee the required trusted-local execution profile.";
 export const STRICT_ISOLATION_DISABLED_MESSAGE =
@@ -169,6 +175,8 @@ export const STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE =
   "Codex strict isolated execution requires a ready Hall worktree validator.";
 export const STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE =
   "Codex strict isolated execution requires a passing native sandbox compatibility probe.";
+export const STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE =
+  "Codex strict isolated execution requires exact sandbox equivalence verification from Phase 16.6.";
 /**
  * The only diagnostic message this adapter ever attaches to an
  * `availability: "available"` result. Deliberately does not use the words
@@ -179,9 +187,6 @@ export const STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE =
  */
 export const TRUSTED_LOCAL_AVAILABLE_MESSAGE =
   "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.";
-export const STRICT_ISOLATED_AVAILABLE_MESSAGE =
-  "Strict isolated mode: Codex runs in a Hall-owned Git worktree with workspace-write sandboxing and network disabled.";
-
 /**
  * Phase 11 — true regardless of this machine's current CLI/auth/sandbox
  * state: JSONL stream mapping and process-tree cancellation are proven by
@@ -310,56 +315,6 @@ function available(diagnosticMessage: string, detectedVersion?: string): AgentDe
       },
     ],
     limitations: [TRUSTED_LOCAL_AVAILABLE_MESSAGE],
-  };
-  return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
-}
-
-function availableStrictIsolated(detectedVersion?: string): AgentDetectionResult {
-  const result: AgentDetectionResult = {
-    installed: true,
-    availability: "available",
-    diagnosticMessage: STRICT_ISOLATED_AVAILABLE_MESSAGE,
-    executionTrust: "isolated",
-    capabilityObservations: [
-      {
-        capability: "project.read",
-        status: "verified",
-        safeSummary: "Verified by the strict isolated sandbox compatibility probe.",
-        evidence: "environment_probe",
-      },
-      {
-        capability: "project.edit",
-        status: "verified",
-        safeSummary: "Verified by the strict isolated sandbox compatibility probe.",
-        evidence: "environment_probe",
-      },
-      {
-        capability: "command.execute",
-        status: "verified",
-        safeSummary: "Verified by the strict isolated sandbox compatibility probe.",
-        evidence: "environment_probe",
-      },
-      {
-        capability: "git.inspect",
-        status: "verified",
-        safeSummary: "Hall validates the detached Git worktree before Codex starts.",
-        evidence: "deterministic_test",
-      },
-      ...BASELINE_OBSERVATIONS,
-      {
-        capability: "session.resume",
-        status: "unsupported",
-        safeSummary: "This adapter never uses `codex exec resume`.",
-        evidence: "declared_only",
-      },
-      {
-        capability: "network.access",
-        status: "unsupported",
-        safeSummary: "Strict isolated Codex execution disables network access.",
-        evidence: "environment_probe",
-      },
-    ],
-    limitations: [STRICT_ISOLATED_AVAILABLE_MESSAGE],
   };
   return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
 }
@@ -588,7 +543,7 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
       return unsupportedRestricted(STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE, detectedVersion);
     }
     if (hasBlockedBillingEnvironmentKey(options.parentEnv)) {
-      return unsupportedRestricted(TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE, detectedVersion);
+      return unsupportedRestricted(STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE, detectedVersion);
     }
     const probe = await options.strictIsolation.sandboxProbe.run({
       executablePath,
@@ -604,7 +559,16 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     if (!probe.ok) {
       return unsupportedRestricted(STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE, detectedVersion);
     }
-    return availableStrictIsolated(detectedVersion);
+    const equivalence = evaluateStrictCodexSandboxEquivalence({
+      execSandboxMode: STRICT_CODEX_SANDBOX_POLICY.execSandboxMode,
+      sandboxPermissionProfile: STRICT_CODEX_SANDBOX_POLICY.sandboxPermissionProfile,
+      establishedBy: "shared_constants",
+    });
+    void equivalence;
+    return unsupportedRestricted(
+      STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE,
+      detectedVersion,
+    );
   }
 
   // Phase 10.2 — trusted-local mode is explicitly enabled. Every check

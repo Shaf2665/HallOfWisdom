@@ -5,15 +5,17 @@ import {
   UNSUPPORTED_ISOLATION_PROFILE_MESSAGE,
   UNVERIFIED_CHATGPT_MESSAGE,
   NOT_CHATGPT_MESSAGE,
-  STRICT_ISOLATED_AVAILABLE_MESSAGE,
   STRICT_ISOLATION_DISABLED_MESSAGE,
   STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE,
   STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE,
+  STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE,
   STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE,
+  STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE,
 } from "./detection.js";
 import type { ProcessSpawner, SpawnedProcessHandle } from "./process-spawner.js";
 import type { FileSystemProbe } from "./executable-resolver.js";
 import type { CodexSandboxCompatibilityProbe } from "./sandbox-compatibility-probe.js";
+import { evaluateStrictCodexSandboxEquivalence } from "./strict-sandbox-policy.js";
 
 class ScriptedHandle implements SpawnedProcessHandle {
   readonly pid = 1234;
@@ -782,7 +784,7 @@ describe("detectCodex — trusted-local mode enabled (Phase 10.2)", () => {
 });
 
 describe("detectCodex — strict isolated mode (Phase 16.4)", () => {
-  it("reports available only after the safe sandbox probe passes", async () => {
+  it("keeps strict detection unsupported even after the helper probe passes when sandbox equivalence is unproven", async () => {
     const result = await detectCodex({
       platform: "linux",
       parentEnv: FOUND_ENV,
@@ -790,14 +792,48 @@ describe("detectCodex — strict isolated mode (Phase 16.4)", () => {
       spawner: trustedLocalSpawner(),
       strictIsolation: strictIsolation(),
     });
-    expect(result.availability).toBe("available");
-    expect(result.executionTrust).toBe("isolated");
-    expect(result.diagnosticMessage).toBe(STRICT_ISOLATED_AVAILABLE_MESSAGE);
-    expect(result.limitations).toEqual([STRICT_ISOLATED_AVAILABLE_MESSAGE]);
+    expect(result.availability).toBe("unsupported");
+    expect(result.executionTrust).toBe("unavailable");
+    expect(result.diagnosticMessage).toBe(STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE);
     const edit = result.capabilityObservations?.find(
       (entry) => entry.capability === "project.edit",
     );
-    expect(edit?.status).toBe("verified");
+    const command = result.capabilityObservations?.find(
+      (entry) => entry.capability === "command.execute",
+    );
+    expect(edit?.status).not.toBe("verified");
+    expect(command?.status).not.toBe("verified");
+    expect(JSON.stringify(result)).not.toContain("SANDBOX_PROBE_PASSED");
+  });
+
+  it("does not treat shared constants alone as exact sandbox equivalence proof", () => {
+    expect(
+      evaluateStrictCodexSandboxEquivalence({
+        execSandboxMode: "workspace-write",
+        sandboxPermissionProfile: ":workspace",
+        establishedBy: "shared_constants",
+      }),
+    ).toEqual({ ok: false, code: "CODEX_STRICT_SANDBOX_EQUIVALENCE_UNPROVEN" });
+  });
+
+  it("fails closed if the helper probe profile changes without the real exec sandbox mode", () => {
+    expect(
+      evaluateStrictCodexSandboxEquivalence({
+        execSandboxMode: "workspace-write",
+        sandboxPermissionProfile: ":changed-workspace",
+        establishedBy: "shared_constants",
+      }),
+    ).toEqual({ ok: false, code: "CODEX_STRICT_SANDBOX_SELECTOR_MISMATCH" });
+  });
+
+  it("fails closed if the real exec sandbox mode changes without the helper probe profile", () => {
+    expect(
+      evaluateStrictCodexSandboxEquivalence({
+        execSandboxMode: "read-only",
+        sandboxPermissionProfile: ":workspace",
+        establishedBy: "shared_constants",
+      }),
+    ).toEqual({ ok: false, code: "CODEX_STRICT_SANDBOX_SELECTOR_MISMATCH" });
   });
 
   it("fails when strict isolation is disabled by server composition", async () => {
@@ -871,7 +907,7 @@ describe("detectCodex — strict isolated mode (Phase 16.4)", () => {
     expect(JSON.stringify(result)).not.toContain(code);
   });
 
-  it("requires ChatGPT authentication before the sandbox probe can make strict mode available", async () => {
+  it("requires ChatGPT authentication before the strict sandbox probe can run", async () => {
     const result = await detectCodex({
       platform: "linux",
       parentEnv: FOUND_ENV,
@@ -903,9 +939,7 @@ describe("detectCodex — strict isolated mode (Phase 16.4)", () => {
       }),
     });
     expect(result.availability).toBe("unsupported");
-    expect(result.diagnosticMessage).toBe(
-      "Codex trusted-local execution was refused because a billing-changing environment variable is present.",
-    );
+    expect(result.diagnosticMessage).toBe(STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE);
     expect(probeCalled).toBe(false);
     expect(JSON.stringify(result)).not.toContain("sk-secret");
   });
