@@ -118,6 +118,17 @@ export interface RouteAndAssignResult {
   readonly generatedAt: string;
 }
 
+interface ActiveTaskExecution {
+  readonly taskId: string;
+  readonly runId: string;
+  readonly adapterId: string;
+  readonly agentId: string;
+  readonly controller: AbortController;
+  readonly sequenceBase: number;
+  cancellationActor: TaskCancellationActor | undefined;
+  promise: Promise<void> | undefined;
+}
+
 /**
  * Provider-neutral: never references Mock Agent, `MockAgentAdapter`, or
  * any adapter-specific type. Resolves adapters purely through the
@@ -136,12 +147,10 @@ export class TaskOrchestrator {
   readonly #executionCoordinator: IsolatedAgentExecutionCoordinator | undefined;
   readonly #artifactTerminalizer: AgentExecutionArtifactTerminalizer | undefined;
 
-  readonly #activeControllers = new Map<string, AbortController>();
-  readonly #activeExecutions = new Map<string, Promise<void>>();
-  readonly #activeCancellationActors = new Map<
-    string,
-    { readonly runId: string | undefined; readonly actor: TaskCancellationActor }
-  >();
+  readonly #activeExecutionsByRunId = new Map<string, ActiveTaskExecution>();
+  readonly #activeRunIdByTaskId = new Map<string, string>();
+  readonly #pendingCancellationActorsByTaskId = new Map<string, TaskCancellationActor>();
+  readonly #reportedStaleExecutionDiagnostics = new Set<string>();
 
   /**
    * The canonical, absolute working directory validated for a task that
@@ -154,29 +163,6 @@ export class TaskOrchestrator {
    * handed to Hall Runner).
    */
   readonly #pendingWorkingDirectories = new Map<string, string>();
-
-  /**
-   * Phase 15.2 — the per-task sequence offset the CURRENT run's events
-   * must be shifted by before reaching `EventStore`. Every adapter's
-   * `EventFactory` (see `@hall-of-wisdom/agent-adapter-sdk`) always
-   * starts its own sequence counter at `0` for whatever run it was
-   * given — it has no notion of "this is attempt 2, start at 2," and
-   * changing that contract would mean threading a starting offset
-   * through every adapter package, which this class deliberately does
-   * not require. Instead, `startTask()` captures
-   * `eventStore.nextSequence(taskId)` once, right before the adapter is
-   * invoked, and `#handleEvent()` adds it to every event's own
-   * adapter-local `sequence` before storing/publishing — so `EventStore`
-   * still sees one continuous, ever-increasing per-task sequence
-   * (attempt 1's events at 0..N, attempt 2's at N+1..M, ...) while the
-   * adapter itself only ever has to know how to number ITS OWN run.
-   * Absent (defaults to `0` at every read site) for a task's first-ever
-   * run, and for any run whose orchestrator instance was freshly
-   * constructed (e.g. after a restart) — `startTask()` always
-   * re-establishes it fresh before that run's first event can arrive, so
-   * a missing entry here is never itself a source of drift.
-   */
-  readonly #runSequenceBase = new Map<string, number>();
 
   constructor(options: TaskOrchestratorOptions) {
     this.#taskStore = options.taskStore;
@@ -428,13 +414,6 @@ export class TaskOrchestrator {
       workingDirectory,
     });
 
-    // Phase 15.2 — establish this run's sequence offset BEFORE the
-    // adapter can produce a single event: see `#runSequenceBase`'s doc
-    // comment. `eventStore.nextSequence(taskId)` is exactly "how many
-    // events this task already has" — 0 for a first-ever run, or
-    // continuing past a prior attempt's events for a governed retry.
-    this.#runSequenceBase.set(taskId, this.#eventStore.nextSequence(taskId));
-
     this.#beginExecution(taskId, adapter.descriptor.adapterId, taskInput, workingDirectory);
 
     return { task: record.task, runId };
@@ -502,6 +481,7 @@ export class TaskOrchestrator {
       }
     }
 
+    this.#pendingCancellationActorsByTaskId.delete(taskId);
     return record;
   }
 
@@ -666,26 +646,39 @@ export class TaskOrchestrator {
       return { alreadyRequested: true };
     }
     this.#taskStore.setCancellationRequested(taskId);
-    this.#activeCancellationActors.set(taskId, { runId: record.runId, actor });
-    this.#activeControllers.get(taskId)?.abort("task cancellation requested");
+    if (record.runId === undefined) {
+      this.#pendingCancellationActorsByTaskId.set(taskId, actor);
+      return { alreadyRequested: false };
+    }
+    const active = this.#activeExecutionsByRunId.get(record.runId);
+    if (active?.taskId === taskId) {
+      active.cancellationActor ??= actor;
+      active.controller.abort("task cancellation requested");
+    }
     return { alreadyRequested: false };
   }
 
   /** Aborts every active run and waits (bounded by `timeoutMs`) for them to reach a terminal state. */
   async shutdown(timeoutMs: number): Promise<void> {
-    for (const [taskId, controller] of this.#activeControllers.entries()) {
+    for (const active of this.#activeExecutionsByRunId.values()) {
       try {
-        const record = this.#taskStore.get(taskId);
-        if (!record.cancellationRequested && !isTerminalTaskStatus(record.task.status)) {
-          this.#activeCancellationActors.set(taskId, { runId: record.runId, actor: "system" });
-          this.#taskStore.setCancellationRequested(taskId);
+        const record = this.#taskStore.get(active.taskId);
+        if (
+          this.#recordMatchesActiveRun(record, active) &&
+          !record.cancellationRequested &&
+          !isTerminalTaskStatus(record.task.status)
+        ) {
+          active.cancellationActor ??= "system";
+          this.#taskStore.setCancellationRequested(active.taskId);
         }
       } catch {
         // Best-effort shutdown; aborting the controller is still safe.
       }
-      controller.abort("server shutdown");
+      active.controller.abort("server shutdown");
     }
-    const pending = Array.from(this.#activeExecutions.values());
+    const pending = Array.from(this.#activeExecutionsByRunId.values())
+      .map((active) => active.promise)
+      .filter((promise): promise is Promise<void> => promise !== undefined);
     if (pending.length === 0) return;
     await Promise.race([
       Promise.allSettled(pending),
@@ -815,24 +808,48 @@ export class TaskOrchestrator {
     taskInput: AgentTaskInput,
     approvedSourceWorkingDirectory: string,
   ): void {
+    if (this.#activeExecutionsByRunId.has(taskInput.runId)) {
+      throw new InternalServerError("Task run is already active.");
+    }
+    const taskRecord = this.#taskStore.get(taskId);
+    if (
+      taskRecord.runId !== taskInput.runId ||
+      taskRecord.adapterId !== adapterId ||
+      taskRecord.agentId !== taskInput.agentIdentity.agentId
+    ) {
+      throw new TaskStateConflictError(taskId, taskRecord.task.status, "started");
+    }
     const controller = new AbortController();
-    this.#activeControllers.set(taskId, controller);
-
-    const execution = this.#execute(
+    const pendingCancellationActor = taskRecord.cancellationRequested
+      ? this.#pendingCancellationActorsByTaskId.get(taskId)
+      : undefined;
+    const active: ActiveTaskExecution = {
       taskId,
+      runId: taskInput.runId,
       adapterId,
-      taskInput,
-      approvedSourceWorkingDirectory,
-      controller.signal,
-    ).finally(() => {
-      const actor = this.#activeCancellationActors.get(taskId);
-      if (actor === undefined || actor.runId === taskInput.runId) {
-        this.#activeCancellationActors.delete(taskId);
-      }
-      this.#activeControllers.delete(taskId);
-      this.#activeExecutions.delete(taskId);
-    });
-    this.#activeExecutions.set(taskId, execution);
+      agentId: taskInput.agentIdentity.agentId,
+      controller,
+      sequenceBase: this.#eventStore.nextSequence(taskId),
+      cancellationActor: pendingCancellationActor,
+      promise: undefined,
+    };
+    this.#pendingCancellationActorsByTaskId.delete(taskId);
+    this.#activeExecutionsByRunId.set(taskInput.runId, active);
+    this.#activeRunIdByTaskId.set(taskId, taskInput.runId);
+
+    const execution = this.#execute(active, taskInput, approvedSourceWorkingDirectory).finally(
+      () => {
+        this.#activeExecutionsByRunId.delete(taskInput.runId);
+        if (this.#activeRunIdByTaskId.get(taskId) === taskInput.runId) {
+          this.#activeRunIdByTaskId.delete(taskId);
+        }
+        this.#reportedStaleExecutionDiagnostics.delete(`${taskInput.runId}:event`);
+        this.#reportedStaleExecutionDiagnostics.delete(`${taskInput.runId}:error`);
+        this.#reportedStaleExecutionDiagnostics.delete(`${taskInput.runId}:event-store`);
+        this.#reportedStaleExecutionDiagnostics.delete(`${taskInput.runId}:cancel`);
+      },
+    );
+    active.promise = execution;
   }
 
   #parseCreateRequest(rawRequest: unknown): CreateTaskRequest {
@@ -925,117 +942,110 @@ export class TaskOrchestrator {
   }
 
   async #execute(
-    taskId: string,
-    adapterId: string,
+    active: ActiveTaskExecution,
     taskInput: AgentTaskInput,
     approvedSourceWorkingDirectory: string,
-    signal: AbortSignal,
   ): Promise<void> {
+    const { taskId, adapterId } = active;
+    const signal = active.controller.signal;
     let preparedWorktreeId: string | undefined;
     let terminalEvent: NormalizedAgentEvent | undefined;
     let terminalSnapshot: AgentExecutionTerminalSnapshot | undefined;
+    let runResult: RunTaskResult | undefined;
     try {
-      if (this.#isCancellationRequested(taskId, taskInput.runId)) {
+      if (this.#isCancellationRequested(active)) {
         terminalSnapshot = this.#cancelTaskBeforeAdapterRun(
-          taskId,
+          active,
           "Task execution was cancelled before provider launch.",
         );
-        await this.#terminalizeExecution({ taskId, snapshot: terminalSnapshot });
-        return;
+      } else {
+        await this.#preflightExecution(adapterId, taskInput);
       }
-      await this.#preflightExecution(adapterId, taskInput);
-      if (this.#isCancellationRequested(taskId, taskInput.runId)) {
+      if (terminalSnapshot === undefined && this.#isCancellationRequested(active)) {
         terminalSnapshot = this.#cancelTaskBeforeAdapterRun(
-          taskId,
+          active,
           "Task execution was cancelled before isolated worktree preparation.",
         );
-        await this.#terminalizeExecution({ taskId, snapshot: terminalSnapshot });
-        return;
       }
-      let prepared;
-      try {
-        prepared = await this.#prepareExecution(
-          adapterId,
+      if (terminalSnapshot === undefined) {
+        const prepared = await this.#prepareExecutionOrCancel(
+          active,
           taskInput,
           approvedSourceWorkingDirectory,
-          signal,
         );
-      } catch (error) {
-        if (this.#isCancellationRequested(taskId, taskInput.runId)) {
+        if (prepared === undefined) {
           terminalSnapshot = this.#cancelTaskBeforeAdapterRun(
-            taskId,
+            active,
             "Task execution was cancelled during isolated worktree preparation.",
           );
-          await this.#terminalizeExecution({ taskId, snapshot: terminalSnapshot });
-          return;
+        } else {
+          preparedWorktreeId = prepared.worktreeId;
+          if (this.#isCancellationRequested(active)) {
+            terminalSnapshot = this.#cancelTaskBeforeAdapterRun(
+              active,
+              "Task execution was cancelled before provider launch.",
+              preparedWorktreeId,
+            );
+          }
+          if (terminalSnapshot === undefined) {
+            runResult = await runTask({
+              registry: this.#registry,
+              adapterId,
+              taskInput: prepared.taskInput,
+              options: { signal },
+              onEvent: (event) => {
+                const snapshot = this.#handleEvent(active, event, preparedWorktreeId);
+                if (snapshot !== undefined) {
+                  terminalSnapshot = snapshot;
+                }
+                if (isTerminalEventType(event.type)) {
+                  terminalEvent = event;
+                }
+              },
+            });
+            if (
+              shouldSynthesizeMissingTerminalFailure(terminalSnapshot, terminalEvent, runResult)
+            ) {
+              terminalSnapshot = this.#failTaskWithInfrastructureFailure(
+                active,
+                this.#taskStore.get(taskId),
+                runResult.failure?.code ?? "TASK_EXECUTION_FAILED",
+                runResult.failure?.message ??
+                  "Hall Core could not complete this task due to an unexpected internal error.",
+                "Hall Runner returned a failed result without a normalized terminal event.",
+                preparedWorktreeId,
+              );
+              terminalEvent = undefined;
+            }
+          }
         }
-        throw error;
       }
-      preparedWorktreeId = prepared.worktreeId;
-      if (this.#isCancellationRequested(taskId, taskInput.runId)) {
-        terminalSnapshot = this.#cancelTaskBeforeAdapterRun(
-          taskId,
-          "Task execution was cancelled before provider launch.",
-          preparedWorktreeId,
-        );
-        await this.#terminalizeExecution({ taskId, snapshot: terminalSnapshot });
-        return;
-      }
-      const runResult = await runTask({
-        registry: this.#registry,
-        adapterId,
-        taskInput: prepared.taskInput,
-        options: { signal },
-        onEvent: (event) => {
-          const snapshot = this.#handleEvent(taskId, event, adapterId, preparedWorktreeId);
-          if (snapshot !== undefined) {
-            terminalSnapshot = snapshot;
-          }
-          if (isTerminalEventType(event.type)) {
-            terminalEvent = event;
-          }
-        },
-      });
-      if (
-        terminalSnapshot === undefined &&
-        terminalEvent === undefined &&
-        runResult.terminalEventType === "run.failed"
-      ) {
-        terminalSnapshot = this.#failTaskWithInfrastructureFailure(
-          taskId,
-          this.#taskStore.get(taskId),
-          runResult.failure?.code ?? "TASK_EXECUTION_FAILED",
-          runResult.failure?.message ??
-            "Hall Core could not complete this task due to an unexpected internal error.",
-          "Hall Runner returned a failed result without a normalized terminal event.",
-          preparedWorktreeId,
-        );
-        terminalEvent = undefined;
-      }
-      const matchingRunResult =
-        terminalSnapshot?.terminalEvent.type === runResult.terminalEventType
-          ? runResult
-          : undefined;
-      await this.#terminalizeExecution({
-        taskId,
-        snapshot:
-          terminalSnapshot !== undefined && matchingRunResult !== undefined
-            ? enrichTerminalSnapshotWithRunResult(terminalSnapshot, matchingRunResult)
-            : terminalSnapshot,
-        runResult: matchingRunResult,
-      });
     } catch (error) {
-      this.#onExecutionError?.(taskId, error);
-      const syntheticTerminalSnapshot = this.#failTaskOnUnhandledExecutionError(
-        taskId,
-        error,
-        preparedWorktreeId,
-      );
-      await this.#terminalizeExecution({
-        taskId,
-        snapshot: terminalSnapshot ?? syntheticTerminalSnapshot,
-      });
+      if (this.#currentRecordStillBelongsToActive(active)) {
+        this.#onExecutionError?.(taskId, error);
+        const syntheticTerminalSnapshot = this.#failTaskOnUnhandledExecutionError(
+          active,
+          error,
+          preparedWorktreeId,
+        );
+        terminalSnapshot ??= syntheticTerminalSnapshot;
+      } else {
+        this.#reportStaleExecutionDiagnostic(active, "error");
+      }
     }
+    const matchingRunResult =
+      terminalSnapshot !== undefined &&
+      terminalSnapshot.terminalEvent.type === runResult?.terminalEventType
+        ? runResult
+        : undefined;
+    await this.#terminalizeExecution({
+      taskId,
+      snapshot:
+        terminalSnapshot !== undefined && matchingRunResult !== undefined
+          ? enrichTerminalSnapshotWithRunResult(terminalSnapshot, matchingRunResult)
+          : terminalSnapshot,
+      runResult: matchingRunResult,
+    });
   }
 
   async #preflightExecution(adapterId: string, taskInput: AgentTaskInput): Promise<void> {
@@ -1071,9 +1081,9 @@ export class TaskOrchestrator {
     }
   }
 
-  #isCancellationRequested(taskId: string, runId: string): boolean {
-    const record = this.#taskStore.get(taskId);
-    return record.runId === runId && record.cancellationRequested;
+  #isCancellationRequested(active: ActiveTaskExecution): boolean {
+    const record = this.#taskStore.get(active.taskId);
+    return this.#recordMatchesActiveRun(record, active) && record.cancellationRequested;
   }
 
   async #prepareExecution(
@@ -1092,6 +1102,26 @@ export class TaskOrchestrator {
       signal,
     });
     return { taskInput: prepared.taskInput, worktreeId: prepared.worktreeId };
+  }
+
+  async #prepareExecutionOrCancel(
+    active: ActiveTaskExecution,
+    taskInput: AgentTaskInput,
+    approvedSourceWorkingDirectory: string,
+  ): Promise<
+    { readonly taskInput: AgentTaskInput; readonly worktreeId: string | undefined } | undefined
+  > {
+    try {
+      return await this.#prepareExecution(
+        active.adapterId,
+        taskInput,
+        approvedSourceWorkingDirectory,
+        active.controller.signal,
+      );
+    } catch (error) {
+      if (this.#isCancellationRequested(active)) return undefined;
+      throw error;
+    }
   }
 
   async #terminalizeExecution(input: {
@@ -1115,12 +1145,24 @@ export class TaskOrchestrator {
   }
 
   #handleEvent(
-    taskId: string,
+    active: ActiveTaskExecution,
     rawEvent: NormalizedAgentEvent,
-    adapterId: string,
     worktreeId: string | undefined,
   ): AgentExecutionTerminalSnapshot | undefined {
+    const taskId = active.taskId;
+    if (
+      rawEvent.runId !== active.runId ||
+      rawEvent.taskId !== taskId ||
+      rawEvent.agentId !== active.agentId
+    ) {
+      this.#reportStaleExecutionDiagnostic(active, "event");
+      return undefined;
+    }
     const record = this.#taskStore.get(taskId);
+    if (!this.#recordMatchesActiveRun(record, active)) {
+      this.#reportStaleExecutionDiagnostic(active, "event");
+      return undefined;
+    }
     if (record.runId === undefined || record.agentId === undefined) {
       // Defense in depth: `#handleEvent` is only ever wired up from
       // `#execute`, which only ever runs after `runId`/`agentId` are set
@@ -1138,8 +1180,8 @@ export class TaskOrchestrator {
     // produced, so a genuine redelivery of the same adapter event still
     // maps to the same adjusted sequence and is still correctly detected
     // as a duplicate by `EventStore.append()`.
-    const sequenceBase = this.#runSequenceBase.get(taskId) ?? 0;
-    const actor = this.#cancellationActorFor(taskId, record.runId);
+    const sequenceBase = active.sequenceBase;
+    const actor = this.#cancellationActorFor(active, record.runId);
     const rawWithCancellationActor =
       rawEvent.type === "run.cancelled" && record.cancellationRequested
         ? {
@@ -1162,13 +1204,13 @@ export class TaskOrchestrator {
     let appendResult;
     try {
       appendResult = this.#eventStore.append(taskId, event, {
-        runId: record.runId,
+        runId: active.runId,
         taskId,
-        agentId: record.agentId,
+        agentId: active.agentId,
       });
     } catch (error) {
       if (error instanceof EventStoreError) {
-        return this.#handleEventStoreFailure(taskId, error, worktreeId);
+        return this.#handleEventStoreFailure(active, error, worktreeId);
       }
       throw error;
     }
@@ -1179,7 +1221,7 @@ export class TaskOrchestrator {
     const terminalSnapshot = isTerminalEventType(event.type)
       ? buildAgentExecutionTerminalSnapshot({
           preTerminalRecord: record,
-          adapterId,
+          adapterId: active.adapterId,
           event,
           worktreeId,
         })
@@ -1249,15 +1291,20 @@ export class TaskOrchestrator {
    *   capacity/invariant-failure workflow below.
    */
   #handleEventStoreFailure(
-    taskId: string,
+    active: ActiveTaskExecution,
     error: EventStoreError,
     worktreeId: string | undefined,
   ): AgentExecutionTerminalSnapshot | undefined {
     try {
+      const taskId = active.taskId;
       const record = this.#taskStore.get(taskId);
+      if (!this.#recordMatchesActiveRun(record, active)) {
+        this.#reportStaleExecutionDiagnostic(active, "event-store");
+        return undefined;
+      }
       if (isTerminalTaskStatus(record.task.status)) return;
       return this.#failTaskWithInfrastructureFailure(
-        taskId,
+        active,
         record,
         error.code,
         error.message,
@@ -1271,7 +1318,7 @@ export class TaskOrchestrator {
       // was reached rather than crash task execution or produce an
       // unhandled rejection.
       console.error(
-        `Hall Core failed to finalize task "${taskId}" after an event-store error: ${formatUnknownError(unexpected)}`,
+        `Hall Core failed to finalize task "${active.taskId}" after an event-store error: ${formatUnknownError(unexpected)}`,
       );
       return undefined;
     }
@@ -1288,16 +1335,21 @@ export class TaskOrchestrator {
    * settled, this is a no-op — the first terminal outcome still wins.
    */
   #failTaskOnUnhandledExecutionError(
-    taskId: string,
+    active: ActiveTaskExecution,
     error: unknown,
     worktreeId: string | undefined,
   ): AgentExecutionTerminalSnapshot | undefined {
     try {
+      const taskId = active.taskId;
       const record = this.#taskStore.get(taskId);
+      if (!this.#recordMatchesActiveRun(record, active)) {
+        this.#reportStaleExecutionDiagnostic(active, "error");
+        return undefined;
+      }
       if (isTerminalTaskStatus(record.task.status)) return undefined;
       const failure = infrastructureFailureFromError(error);
       return this.#failTaskWithInfrastructureFailure(
-        taskId,
+        active,
         record,
         failure.code,
         failure.clientSafeMessage,
@@ -1306,7 +1358,7 @@ export class TaskOrchestrator {
       );
     } catch (unexpected) {
       console.error(
-        `Hall Core failed to finalize task "${taskId}" after an unhandled execution error: ${formatUnknownError(unexpected)}`,
+        `Hall Core failed to finalize task "${active.taskId}" after an unhandled execution error: ${formatUnknownError(unexpected)}`,
       );
       return undefined;
     }
@@ -1324,13 +1376,18 @@ export class TaskOrchestrator {
    * server-side only.
    */
   #failTaskWithInfrastructureFailure(
-    taskId: string,
+    active: ActiveTaskExecution,
     record: TaskRecord,
     code: string,
     clientSafeMessage: string,
     serverLogDetail: string,
     worktreeId: string | undefined,
   ): AgentExecutionTerminalSnapshot | undefined {
+    const taskId = active.taskId;
+    if (!this.#recordMatchesActiveRun(record, active)) {
+      this.#reportStaleExecutionDiagnostic(active, "error");
+      return undefined;
+    }
     if (
       record.runId === undefined ||
       record.agentId === undefined ||
@@ -1347,7 +1404,7 @@ export class TaskOrchestrator {
     // that keeps running after this point cannot replace this result (any
     // further event it produces will be rejected once the terminal event
     // below is stored).
-    this.#activeControllers.get(taskId)?.abort(`Hall Core infrastructure failure: ${code}`);
+    active.controller.abort(`Hall Core infrastructure failure: ${code}`);
 
     console.error(
       `Task "${taskId}" failed at the Hall Core infrastructure level (${code}): ${serverLogDetail}`,
@@ -1364,9 +1421,9 @@ export class TaskOrchestrator {
 
     try {
       const result = this.#eventStore.append(taskId, failureEvent, {
-        runId: record.runId,
+        runId: active.runId,
         taskId,
-        agentId: record.agentId,
+        agentId: active.agentId,
       });
       if (result.stored) {
         this.#eventBus.publish(taskId, failureEvent);
@@ -1392,18 +1449,23 @@ export class TaskOrchestrator {
     this.#taskStore.updateStatus(taskId, "failed");
     return buildAgentExecutionTerminalSnapshot({
       preTerminalRecord: record,
-      adapterId: record.adapterId,
+      adapterId: active.adapterId,
       event: failureEvent,
       worktreeId,
     });
   }
 
   #cancelTaskBeforeAdapterRun(
-    taskId: string,
+    active: ActiveTaskExecution,
     reason: string,
     worktreeId?: string,
   ): AgentExecutionTerminalSnapshot | undefined {
+    const taskId = active.taskId;
     const record = this.#taskStore.get(taskId);
+    if (!this.#recordMatchesActiveRun(record, active)) {
+      this.#reportStaleExecutionDiagnostic(active, "cancel");
+      return undefined;
+    }
     if (isTerminalTaskStatus(record.task.status)) return undefined;
     if (
       record.runId === undefined ||
@@ -1420,14 +1482,14 @@ export class TaskOrchestrator {
       taskId,
       agentId: record.agentId,
       sequence: this.#eventStore.nextSequence(taskId),
-      cancelledBy: this.#cancellationActorFor(taskId, record.runId),
+      cancelledBy: this.#cancellationActorFor(active, record.runId),
       reason,
     });
     try {
       const result = this.#eventStore.append(taskId, cancellationEvent, {
-        runId: record.runId,
+        runId: active.runId,
         taskId,
-        agentId: record.agentId,
+        agentId: active.agentId,
       });
       if (result.stored) {
         this.#eventBus.publish(taskId, cancellationEvent);
@@ -1442,17 +1504,43 @@ export class TaskOrchestrator {
     this.#taskStore.updateStatus(taskId, "cancelled");
     return buildAgentExecutionTerminalSnapshot({
       preTerminalRecord: record,
-      adapterId: record.adapterId,
+      adapterId: active.adapterId,
       event: cancellationEvent,
       worktreeId,
     });
   }
 
-  #cancellationActorFor(taskId: string, runId: string | undefined): TaskCancellationActor {
-    const requested = this.#activeCancellationActors.get(taskId);
-    if (requested === undefined) return "system";
-    if (requested.runId !== undefined && requested.runId !== runId) return "system";
-    return requested.actor;
+  #cancellationActorFor(
+    active: ActiveTaskExecution,
+    runId: string | undefined,
+  ): TaskCancellationActor {
+    if (runId !== active.runId) return "system";
+    return active.cancellationActor ?? "system";
+  }
+
+  #recordMatchesActiveRun(record: TaskRecord, active: ActiveTaskExecution): boolean {
+    return (
+      record.runId === active.runId &&
+      record.adapterId === active.adapterId &&
+      record.agentId === active.agentId
+    );
+  }
+
+  #currentRecordStillBelongsToActive(active: ActiveTaskExecution): boolean {
+    try {
+      return this.#recordMatchesActiveRun(this.#taskStore.get(active.taskId), active);
+    } catch {
+      return false;
+    }
+  }
+
+  #reportStaleExecutionDiagnostic(active: ActiveTaskExecution, kind: string): void {
+    const key = `${active.runId}:${kind}`;
+    if (this.#reportedStaleExecutionDiagnostics.has(key)) return;
+    this.#reportedStaleExecutionDiagnostics.add(key);
+    const message = `Ignored stale ${kind} callback for a superseded task run.`;
+    this.#onExecutionError?.(active.taskId, new Error(message));
+    console.error(`Task "${active.taskId}": ${message}`);
   }
 }
 
@@ -1474,4 +1562,16 @@ function infrastructureFailureFromError(error: unknown): {
     clientSafeMessage:
       "Hall Core could not complete this task due to an unexpected internal error.",
   };
+}
+
+function shouldSynthesizeMissingTerminalFailure(
+  terminalSnapshot: AgentExecutionTerminalSnapshot | undefined,
+  terminalEvent: NormalizedAgentEvent | undefined,
+  runResult: RunTaskResult,
+): boolean {
+  return (
+    terminalSnapshot === undefined &&
+    terminalEvent === undefined &&
+    runResult.terminalEventType === "run.failed"
+  );
 }

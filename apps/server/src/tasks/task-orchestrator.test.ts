@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentRegistry, EXIT_CODES } from "@hall-of-wisdom/hall-runner";
+import { AgentRegistry, EXIT_CODES, isTerminalEventType } from "@hall-of-wisdom/hall-runner";
 import { MockAgentAdapter } from "@hall-of-wisdom/mock-agent";
 import {
   EventFactory,
@@ -26,7 +26,39 @@ import { runMigrations } from "../persistence/migration-runner.js";
 import { SqliteTaskStore } from "./sqlite-task-store.js";
 import { SqliteEventStore } from "../events/sqlite-event-store.js";
 import { InMemoryAgentExecutionArtifactStore } from "../execution-artifacts/in-memory-agent-execution-artifact-store.js";
+import type { AgentExecutionArtifactRecord } from "../execution-artifacts/agent-execution-artifact-record.js";
 import { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
+
+interface Deferred<T = void> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value?: T | PromiseLike<T>) => void;
+  readonly reject: (reason?: unknown) => void;
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value?: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = (value) => {
+      promiseResolve(value as T | PromiseLike<T>);
+    };
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
+}
+
+function waitForAbort(signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    signal?.addEventListener(
+      "abort",
+      () => {
+        resolve();
+      },
+      { once: true },
+    );
+  });
+}
 
 /**
  * A deliberately non-cooperative fake adapter: its generator never checks
@@ -64,6 +96,54 @@ function buildNonCooperativeAdapter(
         currentState: "running" as const,
         cancel: (): void => {
           // Deliberately a no-op: this fake adapter never honors cancellation.
+        },
+      });
+    },
+  };
+}
+
+function buildOverlappingRetryAdapter(signals: {
+  readonly releaseFirstRunTail: Promise<void>;
+  readonly secondRunStarted: Deferred;
+  readonly secondRunAbortSeen: Deferred;
+}): AgentAdapter {
+  let startCount = 0;
+  return {
+    descriptor: new MockAgentAdapter().descriptor,
+    detect: () => Promise.resolve({ installed: true, availability: "available" }),
+    startTask: (input: AgentTaskInput, options) => {
+      startCount += 1;
+      const factory = new EventFactory({
+        runId: input.runId,
+        taskId: input.hallTask.taskId,
+        agentId: input.agentIdentity.agentId,
+      });
+      async function* firstRun(): AsyncGenerator<NormalizedAgentEvent> {
+        yield factory.runStarted();
+        yield factory.runFailed({
+          code: "FIRST_RUN_RETRYABLE_FAILURE",
+          message: "first run failed before retry",
+          retryable: true,
+        });
+        await signals.releaseFirstRunTail;
+        throw new Error("late first-run adapter tail");
+      }
+      async function* secondRun(): AsyncGenerator<NormalizedAgentEvent> {
+        yield factory.runStarted();
+        signals.secondRunStarted.resolve();
+        await waitForAbort(options?.signal);
+        signals.secondRunAbortSeen.resolve();
+        yield factory.runCancelled("user", "second run cancelled");
+      }
+      return Promise.resolve({
+        runId: input.runId,
+        events: startCount === 1 ? firstRun() : secondRun(),
+        completion: new Promise<NormalizedAgentEvent>(() => {
+          // Runner-service consumes the async iterator to terminal state.
+        }),
+        currentState: "running" as const,
+        cancel: (): void => {
+          // Cancellation is exercised through the AbortSignal in this fixture.
         },
       });
     },
@@ -525,6 +605,116 @@ describe("TaskOrchestrator shutdown", () => {
     const record = taskStore.get(task.taskId);
     expect(record.failure?.code).toBe("TASK_EXECUTION_FAILED");
     expect(record.terminalEventType).toBe("run.failed");
+  });
+});
+
+describe("TaskOrchestrator overlapping retry run fencing", () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hall-core-run-fence-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it("old run tail errors and finally cleanup cannot fail or detach the current retry run", async () => {
+    const releaseFirstRunTail = deferred();
+    const secondRunStarted = deferred();
+    const secondRunAbortSeen = deferred();
+    const onExecutionError = vi.fn();
+    const registry = new AgentRegistry();
+    registry.register(
+      buildOverlappingRetryAdapter({
+        releaseFirstRunTail: releaseFirstRunTail.promise,
+        secondRunStarted,
+        secondRunAbortSeen,
+      }),
+    );
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const eventStore = new EventStore({ maxEventsPerTask: 100 });
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore,
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot: tempRoot,
+      onExecutionError,
+    });
+
+    const { task, runId: firstRunId } = orchestrator.createTask(validCreateTaskBody());
+    expect(firstRunId).toBeDefined();
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "failed");
+
+    orchestrator.prepareRetry(task.taskId);
+    const secondRun = await orchestrator.startTask(task.taskId);
+    expect(secondRun.runId).not.toBe(firstRunId);
+    await secondRunStarted.promise;
+
+    releaseFirstRunTail.resolve();
+    await waitUntil(() =>
+      onExecutionError.mock.calls.some(([, error]) =>
+        error instanceof Error ? error.message.includes("superseded task run") : false,
+      ),
+    );
+
+    expect(taskStore.get(task.taskId).runId).toBe(secondRun.runId);
+    expect(taskStore.get(task.taskId).task.status).toBe("running");
+
+    orchestrator.requestCancellation(task.taskId, "user");
+    await secondRunAbortSeen.promise;
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "cancelled");
+
+    const events = eventStore.list(task.taskId);
+    expect(events.map((event) => event.sequence)).toEqual([0, 1, 2, 3]);
+    expect(events.map((event) => event.runId)).toEqual([
+      firstRunId,
+      firstRunId,
+      secondRun.runId,
+      secondRun.runId,
+    ]);
+    const terminalEvents = events.filter((event) => isTerminalEventType(event.type));
+    expect(terminalEvents.map((event) => event.type)).toEqual(["run.failed", "run.cancelled"]);
+    const cancelledEvent = terminalEvents.find((event) => event.type === "run.cancelled");
+    expect(cancelledEvent?.payload.cancelledBy).toBe("user");
+    expect(onExecutionError).not.toHaveBeenCalledWith(
+      task.taskId,
+      expect.objectContaining({ message: "late first-run adapter tail" }),
+    );
+    await expect(orchestrator.shutdown(50)).resolves.toBeUndefined();
+  });
+
+  it("artifact terminalization failures are fail-soft after the authoritative task state is terminal", async () => {
+    class ThrowingTerminalizer extends AgentExecutionArtifactTerminalizer {
+      override terminalize(): Promise<AgentExecutionArtifactRecord> {
+        return Promise.reject(new Error("simulated artifact persistence failure"));
+      }
+    }
+    const onExecutionError = vi.fn();
+    const registry = new AgentRegistry();
+    registry.register(new MockAgentAdapter({ scenario: "success", progressMessageCount: 0 }));
+    const taskStore = new TaskStore({ maxTasks: 10 });
+    const orchestrator = new TaskOrchestrator({
+      taskStore,
+      eventStore: new EventStore({ maxEventsPerTask: 100 }),
+      eventBus: new EventBus({ maxSubscribersPerTask: 10 }),
+      registry,
+      workspaceRoot: tempRoot,
+      onExecutionError,
+      artifactTerminalizer: new ThrowingTerminalizer({
+        store: new InMemoryAgentExecutionArtifactStore(),
+      }),
+    });
+
+    const { task } = orchestrator.createTask(validCreateTaskBody());
+    await waitUntil(() => taskStore.get(task.taskId).task.status === "completed");
+    await waitUntil(() => onExecutionError.mock.calls.length > 0);
+
+    const record = taskStore.get(task.taskId);
+    expect(record.task.status).toBe("completed");
+    expect(record.terminalEventType).toBe("run.completed");
+    expect(record.failure).toBeUndefined();
   });
 });
 

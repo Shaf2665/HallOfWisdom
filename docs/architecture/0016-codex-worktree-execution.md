@@ -247,6 +247,25 @@ while worktree preparation is still pending, or after the worktree manager has d
 `run.cancelled` terminal event and does not launch the adapter. Any raw preparation exception text
 remains internal and is not used as the cancellation reason.
 
+Active execution bookkeeping is also run-local. TaskOrchestrator tracks the active controller,
+promise, cancellation actor, and adapter-local event-sequence offset by Hall agent-run id, with a
+task-to-current-run index used only for lookup. Cleanup after an old run settles uses compare-delete
+semantics, so a delayed `finally` from attempt N cannot remove attempt N+1's controller, promise,
+cancellation actor, or sequence offset. Governed retry clears only pre-run cancellation state; it
+does not inherit a stale actor from the failed attempt. Server shutdown re-reads the task record and
+marks cancellation only when the persisted task still names the same active run it is about to
+abort.
+
+Every provider callback is fenced by task id, run id, agent id, and adapter id before it can append
+an event, publish to subscribers, mutate task status, or synthesize an infrastructure failure. If a
+late callback or Hall Runner error belongs to a superseded run, TaskOrchestrator ignores it and emits
+at most a bounded internal diagnostic for that stale callback kind. It never records raw provider
+output, raw command text, absolute paths, or provider stack traces in the replacement diagnostic, and
+it never lets the stale callback fail, cancel, complete, or detach the current retry run. The
+adapter-local event sequence offset is captured on the active run record when that run starts, so
+retry attempts continue the task's durable event stream without sharing mutable task-scoped sequence
+state.
+
 Terminal artifact creation is deliberately ordered after authoritative terminal state. The
 orchestrator first receives or derives the terminal outcome from normalized Hall event semantics,
 persists the existing task/run/event terminal state, and only then invokes the artifact
