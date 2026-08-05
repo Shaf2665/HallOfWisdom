@@ -79,8 +79,6 @@ const DISABLED_FEATURES = [
   "multi_agent",
 ] as const;
 
-const SANDBOX_MODE = "workspace-write";
-
 /**
  * The complete, fixed `codex exec` argv, given only the already-validated
  * canonical working directory. The task prompt is never included here —
@@ -101,14 +99,9 @@ export function buildCodexArgv(workingDirectory: string): readonly string[] {
     "--ignore-rules",
     "--strict-config",
     "--sandbox",
-    SANDBOX_MODE,
-    "-c",
-    'approval_policy="never"',
-    "-c",
-    "sandbox_workspace_write.network_access=false",
-    "-c",
-    'web_search="disabled"',
-    ...DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
+    STRICT_CODEX_SANDBOX_POLICY.execSandboxMode,
+    ...strictCodexConfigArgs(),
+    ...strictCodexFeatureDisableArgs(),
     "--cd",
     workingDirectory,
     "-",
@@ -120,7 +113,7 @@ export function buildCodexArgv(workingDirectory: string): readonly string[] {
  * when the operator has explicitly enabled trusted-local mode at Hall Core
  * startup (`--enable-codex-trusted-local`) and every trusted-local
  * precondition in `detection.ts` has passed; `buildCodexArgv` above remains
- * the untouched, always-available strict-mode profile. See
+ * the untouched strict-mode argv builder. See
  * `docs/architecture/0010-paperclip-compatible-codex-mode.md`.
  *
  * `--dangerously-bypass-approvals-and-sandbox` (confirmed present, exact
@@ -167,3 +160,8 @@ export function buildCodexTrustedLocalArgv(workingDirectory: string): readonly s
     "-",
   ];
 }
+import {
+  STRICT_CODEX_SANDBOX_POLICY,
+  strictCodexConfigArgs,
+  strictCodexFeatureDisableArgs,
+} from "./strict-sandbox-policy.js";

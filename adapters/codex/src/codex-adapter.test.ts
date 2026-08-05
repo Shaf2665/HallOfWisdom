@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentTaskInput } from "@hall-of-wisdom/agent-adapter-sdk";
 import { CodexAdapter } from "./codex-adapter.js";
+import type { CodexStrictWorktreeValidator } from "./codex-adapter.js";
 import type { ProcessSpawner, SpawnedProcessHandle } from "./process-spawner.js";
 import type { FileSystemProbe } from "./executable-resolver.js";
 import type { GitRepositoryProbe } from "./git-repository-check.js";
@@ -55,6 +56,29 @@ class ScriptedHandle implements SpawnedProcessHandle {
   }
 }
 
+class CancellableHandle implements SpawnedProcessHandle {
+  readonly pid: number | undefined = undefined;
+  readonly stdout = new EventEmitter() as unknown as NodeJS.ReadableStream;
+  readonly stderr = new EventEmitter() as unknown as NodeJS.ReadableStream;
+  readonly stdin = { end: () => undefined, write: () => true } as unknown as NodeJS.WritableStream;
+  #exitCallback: ((code: number | null, signal: NodeJS.Signals | null) => void) | undefined;
+  killCount = 0;
+
+  onExit(callback: (code: number | null, signal: NodeJS.Signals | null) => void): void {
+    this.#exitCallback = callback;
+  }
+
+  onError(): void {
+    // unused
+  }
+
+  kill(): boolean {
+    this.killCount += 1;
+    this.#exitCallback?.(null, "SIGTERM");
+    return true;
+  }
+}
+
 function fakeFs(existingPaths: readonly string[]): FileSystemProbe {
   const set = new Set(existingPaths.map((p) => p.toLowerCase()));
   return { isFile: (p) => set.has(p.toLowerCase()) };
@@ -73,6 +97,7 @@ const VALID_EXEC_HELP_TEXT = [
   "--ignore-rules",
   "--strict-config",
   "--sandbox",
+  "--disable",
   "--cd",
   "-c, --config",
 ].join("\n");
@@ -557,6 +582,14 @@ const MINIMAL_VALID_TASK_JSONL =
   "\n";
 
 const TRUSTED_LOCAL_ENABLED = { enabled: true, loopbackBound: true, workspaceRoot: "D:\\fixture" };
+const STRICT_ISOLATED_ENABLED = {
+  enabled: true,
+  durableStorage: true,
+  worktreeRoot: "D:\\hall-worktrees",
+  worktreeRootReady: true,
+  validatorAvailable: true,
+  sandboxProbe: { run: () => Promise.resolve({ ok: true, code: "SANDBOX_PROBE_PASSED" }) },
+};
 
 /**
  * Answers --version, exec --help, and login status exactly like the
@@ -599,6 +632,20 @@ function fakeWritabilityProbe(writable: boolean): {
         calls.push(dir);
         return writable;
       },
+    },
+    calls,
+  };
+}
+
+function strictValidator(ok: boolean): {
+  validator: CodexStrictWorktreeValidator;
+  calls: string[];
+} {
+  const calls: string[] = [];
+  return {
+    validator: (input) => {
+      calls.push(input.workingDirectory);
+      return Promise.resolve({ ok, ...(ok ? { worktreeId: "wt-1" } : {}) });
     },
     calls,
   };
@@ -821,6 +868,355 @@ describe("CodexAdapter — trusted-local mode (Phase 10.2)", () => {
       expect(execCall?.args[cdIndex + 1]).toBe(canonicalWorkingDirectory);
     },
   );
+});
+
+describe("CodexAdapter — strict isolated mode (Phase 16.4)", () => {
+  it("keeps strict execution fail-closed when sandbox equivalence is unproven, with zero model-backed task processes", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const { validator, calls: validationCalls } = strictValidator(true);
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: { ...STRICT_ISOLATED_ENABLED, validateWorktree: validator },
+    });
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events).toHaveLength(1);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_ISOLATION_UNSUPPORTED",
+    );
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.message).toBe(
+      "Codex strict isolated execution requires exact sandbox equivalence verification from Phase 16.6.",
+    );
+    expect(validationCalls).toEqual([]);
+
+    const execCall = calls.find(
+      (call) => call.args.includes("exec") && call.args.includes("--json"),
+    );
+    expect(execCall).toBeUndefined();
+    const serializedCalls = JSON.stringify(calls.map((call) => call.args));
+    expect(serializedCalls).not.toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(serializedCalls).not.toContain("--yolo");
+    expect(serializedCalls).not.toContain("danger-full-access");
+    expect(serializedCalls).not.toContain("sandbox_workspace_write.network_access=true");
+    expect(serializedCalls).not.toContain("--search");
+    expect(serializedCalls).not.toContain('web_search="live"');
+  });
+
+  it.each([
+    "primary checkout",
+    "sibling worktree substitution",
+    "symlink or junction escape",
+    "unregistered worktree",
+    "attached worktree",
+  ])(
+    "still creates no Codex task process for %s while strict equivalence is unproven",
+    async () => {
+      const { spawner, calls } = scriptedSpawnerWithExec(
+        "codex-cli 0.144.4",
+        "Logged in using ChatGPT",
+      );
+      const { validator, calls: validationCalls } = strictValidator(false);
+      const adapter = new CodexAdapter({
+        platform: "linux",
+        parentEnv: FOUND_ENV,
+        fs: FS_WITH_CODEX,
+        spawner,
+        gitProbe: ALWAYS_IN_REPO,
+        strictIsolation: {
+          ...STRICT_ISOLATED_ENABLED,
+          validateWorktree: validator,
+        },
+      });
+      const run = await adapter.startTask(taskInput());
+      const events = await collectRunEvents(run);
+      expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+        "CODEX_ISOLATION_UNSUPPORTED",
+      );
+      expect(validationCalls).toEqual([]);
+      expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+        false,
+      );
+    },
+  );
+
+  it("does not use a prior helper-probe success to launch after worktree state changes", async () => {
+    let ok = true;
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: () => Promise.resolve({ ok, ...(ok ? { worktreeId: "wt-1" } : {}) }),
+      },
+    });
+    const first = await adapter.detect();
+    expect(first.availability).toBe("unsupported");
+    ok = false;
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_ISOLATION_UNSUPPORTED",
+    );
+    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+      false,
+    );
+  });
+
+  it("does not put task prompt text into any zero-model strict preflight command", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: strictValidator(true).validator,
+      },
+    });
+    const input = taskInput({
+      hallTask: { ...taskInput().hallTask, description: "PROMPT_SECRET" },
+    });
+    const run = await adapter.startTask(input);
+    await collectRunEvents(run);
+    expect(JSON.stringify(calls.map((call) => call.args))).not.toContain("PROMPT_SECRET");
+    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+      false,
+    );
+  });
+
+  it("cancellation before the run starts creates no real Codex task process", async () => {
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const controller = new AbortController();
+    controller.abort();
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: strictValidator(true).validator,
+      },
+    });
+    const run = await adapter.startTask(taskInput(), { signal: controller.signal });
+    const events = await collectRunEvents(run);
+    expect(events.some((event) => event.type === "run.cancelled")).toBe(true);
+    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+      false,
+    );
+  });
+
+  it("cancellation during version detection creates no real Codex task process", async () => {
+    const controller = new AbortController();
+    const versionHandle = new CancellableHandle();
+    let markVersionSpawned!: () => void;
+    const versionSpawned = new Promise<void>((resolve) => {
+      markVersionSpawned = resolve;
+    });
+    const mutableCalls: string[][] = [];
+    const spawner: ProcessSpawner = {
+      spawn: (_executablePath, args) => {
+        mutableCalls.push([...args]);
+        if (args.includes("--version")) {
+          markVersionSpawned();
+          return versionHandle;
+        }
+        return new ScriptedHandle("", 0);
+      },
+    };
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: strictValidator(true).validator,
+      },
+    });
+    const runPromise = adapter.startTask(taskInput(), { signal: controller.signal });
+    await versionSpawned;
+    controller.abort("do not leak");
+    const run = await runPromise;
+    const events = await collectRunEvents(run);
+    expect(events).toEqual([expect.objectContaining({ type: "run.cancelled" })]);
+    expect(mutableCalls.some((args) => args.includes("exec") && args.includes("--json"))).toBe(
+      false,
+    );
+    expect(JSON.stringify(events)).not.toContain("do not leak");
+  });
+
+  it("cancellation during login detection creates no real Codex task process", async () => {
+    const controller = new AbortController();
+    const loginHandle = new CancellableHandle();
+    let markLoginSpawned!: () => void;
+    const loginSpawned = new Promise<void>((resolve) => {
+      markLoginSpawned = resolve;
+    });
+    const calls: string[][] = [];
+    const spawner: ProcessSpawner = {
+      spawn: (_executablePath, args) => {
+        calls.push([...args]);
+        if (args.includes("--version")) return new ScriptedHandle("codex-cli 0.144.4", 0);
+        if (args.includes("exec") && args.includes("--help"))
+          return new ScriptedHandle(TRUSTED_LOCAL_EXEC_HELP_TEXT, 0);
+        if (args.includes("login") && args.includes("status")) {
+          markLoginSpawned();
+          return loginHandle;
+        }
+        return new ScriptedHandle("", 0, false);
+      },
+    };
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: strictValidator(true).validator,
+      },
+    });
+    const runPromise = adapter.startTask(taskInput(), { signal: controller.signal });
+    await loginSpawned;
+    controller.abort("do not leak");
+    const run = await runPromise;
+    const events = await collectRunEvents(run);
+    expect(events).toEqual([expect.objectContaining({ type: "run.cancelled" })]);
+    expect(calls.some((args) => args.includes("exec") && args.includes("--json"))).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("do not leak");
+  });
+
+  it("cancellation during the sandbox probe creates no real Codex task process", async () => {
+    const controller = new AbortController();
+    let markProbeStarted!: () => void;
+    let releaseProbe!: () => void;
+    const probeStarted = new Promise<void>((resolve) => {
+      markProbeStarted = resolve;
+    });
+    const probeRelease = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        sandboxProbe: {
+          run: async () => {
+            markProbeStarted();
+            await probeRelease;
+            return { ok: false, code: "SANDBOX_PROBE_CANCELLED" };
+          },
+        },
+        validateWorktree: strictValidator(true).validator,
+      },
+    });
+    const runPromise = adapter.startTask(taskInput(), { signal: controller.signal });
+    await probeStarted;
+    controller.abort("do not leak");
+    releaseProbe();
+    const run = await runPromise;
+    const events = await collectRunEvents(run);
+    expect(events).toEqual([expect.objectContaining({ type: "run.cancelled" })]);
+    expect(calls.some((args) => args.args.includes("exec") && args.args.includes("--json"))).toBe(
+      false,
+    );
+  });
+
+  it("does not reach worktree validation while strict sandbox equivalence is unproven", async () => {
+    let validationCalled = false;
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: () => {
+          validationCalled = true;
+          return Promise.resolve({ ok: true, worktreeId: "wt-1" });
+        },
+      },
+    });
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_ISOLATION_UNSUPPORTED",
+    );
+    expect(validationCalled).toBe(false);
+    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+      false,
+    );
+  });
+
+  it("keeps the adapter-level pre-spawn path dormant until strict sandbox equivalence is proven", async () => {
+    let validationCount = 0;
+    const { spawner, calls } = scriptedSpawnerWithExec(
+      "codex-cli 0.144.4",
+      "Logged in using ChatGPT",
+    );
+    const adapter = new CodexAdapter({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner,
+      gitProbe: ALWAYS_IN_REPO,
+      strictIsolation: {
+        ...STRICT_ISOLATED_ENABLED,
+        validateWorktree: () => {
+          validationCount += 1;
+          return Promise.resolve({ ok: true, worktreeId: "wt-1" });
+        },
+      },
+    });
+    const run = await adapter.startTask(taskInput());
+    const events = await collectRunEvents(run);
+    expect(events[0]?.type === "run.failed" && events[0].payload.failure.code).toBe(
+      "CODEX_ISOLATION_UNSUPPORTED",
+    );
+    expect(validationCount).toBe(0);
+    expect(calls.some((call) => call.args.includes("exec") && call.args.includes("--json"))).toBe(
+      false,
+    );
+  });
 });
 
 describe("CodexAdapter — Phase 10.3 detection stability", () => {

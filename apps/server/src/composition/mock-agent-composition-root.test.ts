@@ -109,13 +109,13 @@ describe("createMockAgentServerComposition", () => {
     ).toThrow(ServerCliError);
   });
 
-  it("rejects durable server composition when Codex isolation would be enabled without a worktree root", () => {
+  it("allows durable server composition without deriving a Codex worktree root implicitly", () => {
     expect(() =>
       createServerComposition({
         ...buildOptions("success"),
         db: openMigratedDatabase(),
       }),
-    ).toThrow(ServerCliError);
+    ).not.toThrow();
   });
 
   it("allows SQLite isolated execution with an explicit worktree root", () => {

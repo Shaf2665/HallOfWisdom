@@ -12,6 +12,11 @@ import {
   matchesIsolationFlags,
   matchesTrustedLocalFlags,
 } from "./cli-compatibility.js";
+import type { CodexSandboxCompatibilityProbe } from "./sandbox-compatibility-probe.js";
+import {
+  STRICT_CODEX_SANDBOX_POLICY,
+  evaluateStrictCodexSandboxEquivalence,
+} from "./strict-sandbox-policy.js";
 
 /**
  * Phase 10.2 — the trusted-local preconditions `detectCodex` must verify
@@ -29,6 +34,16 @@ export interface TrustedLocalDetectionOptions {
   readonly workspaceRoot: string;
 }
 
+export interface StrictIsolatedDetectionOptions {
+  readonly enabled: boolean;
+  readonly durableStorage: boolean;
+  readonly worktreeRoot: string;
+  readonly worktreeRootReady?: boolean | undefined;
+  readonly validatorAvailable?: boolean | undefined;
+  readonly sandboxProbe: CodexSandboxCompatibilityProbe;
+  readonly sandboxProbeTimeoutMs?: number | undefined;
+}
+
 export interface DetectionOptions {
   readonly platform: NodeJS.Platform;
   readonly parentEnv: Readonly<NodeJS.ProcessEnv>;
@@ -41,6 +56,8 @@ export interface DetectionOptions {
   /** Phase 10.3 — see `DEFAULT_VERSION_RETRY_DELAY_MS`'s doc comment. */
   readonly versionRetryDelayMs?: number;
   readonly trustedLocal?: TrustedLocalDetectionOptions;
+  readonly strictIsolation?: StrictIsolatedDetectionOptions;
+  readonly signal?: AbortSignal | undefined;
 }
 
 const DEFAULT_VERSION_TIMEOUT_MS = 5000;
@@ -144,8 +161,22 @@ export const TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE =
   "Codex trusted-local execution requires a configured workspace root.";
 export const TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE =
   "Codex trusted-local execution was refused because a billing-changing environment variable is present.";
+export const STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE =
+  "Codex strict isolated execution was refused because a billing-changing environment variable is present.";
 export const TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE =
   "Installed Codex cannot guarantee the required trusted-local execution profile.";
+export const STRICT_ISOLATION_DISABLED_MESSAGE =
+  "Codex strict isolated execution requires durable Hall worktree isolation.";
+export const STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE =
+  "Codex strict isolated execution requires SQLite durability.";
+export const STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE =
+  "Codex strict isolated execution requires a configured Hall-owned worktree root.";
+export const STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE =
+  "Codex strict isolated execution requires a ready Hall worktree validator.";
+export const STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE =
+  "Codex strict isolated execution requires a passing native sandbox compatibility probe.";
+export const STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE =
+  "Codex strict isolated execution requires exact sandbox equivalence verification from Phase 16.6.";
 /**
  * The only diagnostic message this adapter ever attaches to an
  * `availability: "available"` result. Deliberately does not use the words
@@ -156,7 +187,6 @@ export const TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE =
  */
 export const TRUSTED_LOCAL_AVAILABLE_MESSAGE =
   "Trusted-local mode: Codex sandbox and approval protections are bypassed. Codex runs with the Hall Core user's filesystem permissions.";
-
 /**
  * Phase 11 — true regardless of this machine's current CLI/auth/sandbox
  * state: JSONL stream mapping and process-tree cancellation are proven by
@@ -314,6 +344,7 @@ async function runVersionProbeWithBoundedRetry(
   env: Readonly<Record<string, string>>,
   timeoutMs: number,
   retryDelayMs: number,
+  signal: AbortSignal | undefined,
 ) {
   const first = await runBoundedProcess({
     spawner,
@@ -322,12 +353,21 @@ async function runVersionProbeWithBoundedRetry(
     cwd,
     env,
     timeoutMs,
+    ...(signal !== undefined ? { signal } : {}),
   });
-  if (!isRetryableProbeFailure(first)) return first;
+  if (first.aborted === true || !isRetryableProbeFailure(first)) return first;
   await new Promise<void>((resolve) => {
     setTimeout(resolve, retryDelayMs);
   });
-  return runBoundedProcess({ spawner, executablePath, args: ["--version"], cwd, env, timeoutMs });
+  return runBoundedProcess({
+    spawner,
+    executablePath,
+    args: ["--version"],
+    cwd,
+    env,
+    timeoutMs,
+    ...(signal !== undefined ? { signal } : {}),
+  });
 }
 
 function extractVersion(stdout: string): string | undefined {
@@ -336,6 +376,10 @@ function extractVersion(stdout: string): string | undefined {
   return firstLine.length > MAX_DETECTED_VERSION_LENGTH
     ? firstLine.slice(0, MAX_DETECTED_VERSION_LENGTH)
     : firstLine;
+}
+
+function isSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
 }
 
 /**
@@ -353,6 +397,10 @@ function extractVersion(stdout: string): string | undefined {
  * module doc comment on `environment.ts`.
  */
 export async function detectCodex(options: DetectionOptions): Promise<AgentDetectionResult> {
+  if (isSignalAborted(options.signal)) {
+    return unsupported("Codex execution was cancelled before detection completed.");
+  }
+
   const pathValue = getEnvValueCaseInsensitive(options.parentEnv, "PATH") ?? "";
   const pathExt = getEnvValueCaseInsensitive(options.parentEnv, "PATHEXT");
   const resolution = resolveCodexExecutable({
@@ -378,8 +426,12 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     env,
     options.versionTimeoutMs ?? DEFAULT_VERSION_TIMEOUT_MS,
     options.versionRetryDelayMs ?? DEFAULT_VERSION_RETRY_DELAY_MS,
+    options.signal,
   );
 
+  if (versionResult.aborted === true || isSignalAborted(options.signal)) {
+    return unsupported("Codex execution was cancelled before detection completed.");
+  }
   if (isRetryableProbeFailure(versionResult)) {
     return unavailable("Codex CLI could not be started.");
   }
@@ -402,7 +454,11 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     env,
     detectedVersionString: detectedVersion,
     ...(options.helpTimeoutMs !== undefined ? { helpTimeoutMs: options.helpTimeoutMs } : {}),
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
   });
+  if (isSignalAborted(options.signal)) {
+    return unsupported("Codex execution was cancelled before detection completed.");
+  }
   if (execHelpText === undefined || !matchesIsolationFlags(execHelpText)) {
     return unsupported(UNSUPPORTED_ISOLATION_PROFILE_MESSAGE, detectedVersion);
   }
@@ -414,8 +470,12 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     cwd,
     env,
     timeoutMs: options.authTimeoutMs ?? DEFAULT_AUTH_TIMEOUT_MS,
+    ...(options.signal !== undefined ? { signal: options.signal } : {}),
   });
 
+  if (authResult.aborted === true || isSignalAborted(options.signal)) {
+    return unsupported("Codex execution was cancelled before detection completed.");
+  }
   if (authResult.spawnError !== undefined || authResult.timedOut) {
     return unsupported(UNVERIFIED_CHATGPT_MESSAGE, detectedVersion);
   }
@@ -458,13 +518,57 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     return unsupported(UNVERIFIED_CHATGPT_MESSAGE, detectedVersion);
   }
 
-  // Installation, isolation-flag support, and ChatGPT authentication are
-  // all confirmed at this point. Phase 10.1's fail-closed default still
-  // applies unconditionally: unless trusted-local mode was explicitly
-  // enabled by the operator at Hall Core startup, this adapter never
-  // reports "available" — see UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE.
   if (options.trustedLocal?.enabled !== true) {
-    return unsupportedRestricted(UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE, detectedVersion);
+    if (options.strictIsolation?.enabled !== true) {
+      return unsupportedRestricted(
+        options.strictIsolation === undefined
+          ? UNVERIFIED_EXECUTION_CAPABILITY_MESSAGE
+          : STRICT_ISOLATION_DISABLED_MESSAGE,
+        detectedVersion,
+      );
+    }
+    if (!options.strictIsolation.durableStorage) {
+      return unsupportedRestricted(STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE, detectedVersion);
+    }
+    if (options.strictIsolation.worktreeRoot.trim().length === 0) {
+      return unsupportedRestricted(
+        STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE,
+        detectedVersion,
+      );
+    }
+    if (
+      options.strictIsolation.worktreeRootReady !== true ||
+      options.strictIsolation.validatorAvailable !== true
+    ) {
+      return unsupportedRestricted(STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE, detectedVersion);
+    }
+    if (hasBlockedBillingEnvironmentKey(options.parentEnv)) {
+      return unsupportedRestricted(STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE, detectedVersion);
+    }
+    const probe = await options.strictIsolation.sandboxProbe.run({
+      executablePath,
+      spawner: options.spawner,
+      parentEnv: options.parentEnv,
+      worktreeRoot: options.strictIsolation.worktreeRoot,
+      timeoutMs: options.strictIsolation.sandboxProbeTimeoutMs,
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+    });
+    if (isSignalAborted(options.signal)) {
+      return unsupported("Codex execution was cancelled before detection completed.");
+    }
+    if (!probe.ok) {
+      return unsupportedRestricted(STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE, detectedVersion);
+    }
+    const equivalence = evaluateStrictCodexSandboxEquivalence({
+      execSandboxMode: STRICT_CODEX_SANDBOX_POLICY.execSandboxMode,
+      sandboxPermissionProfile: STRICT_CODEX_SANDBOX_POLICY.sandboxPermissionProfile,
+      establishedBy: "shared_constants",
+    });
+    void equivalence;
+    return unsupportedRestricted(
+      STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE,
+      detectedVersion,
+    );
   }
 
   // Phase 10.2 — trusted-local mode is explicitly enabled. Every check

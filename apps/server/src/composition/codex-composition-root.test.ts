@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import { registerCodexAdapter } from "./codex-composition-root.js";
 import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import { nodeProcessSpawner, type ProcessSpawner } from "@hall-of-wisdom/codex-adapter";
+import { InMemoryAgentWorktreeStore } from "../agent-worktrees/in-memory-agent-worktree-store.js";
+import type { AgentWorktreeValidator } from "../agent-execution/isolated-agent-execution-coordinator.js";
 
 /**
  * Phase 11.1 — a minimal, deterministic fake `ProcessSpawner`: every
@@ -41,6 +43,60 @@ function alwaysFailingSpawner(): ProcessSpawner {
         onExit(cb) {
           queueMicrotask(() => {
             cb(1, null);
+          });
+        },
+        onError() {
+          /* no error path exercised here */
+        },
+        kill: () => true,
+      };
+    },
+  };
+}
+
+function successfulDetectionSpawner(): ProcessSpawner {
+  return {
+    spawn(_executablePath, args) {
+      const stdoutText = args.includes("--version")
+        ? "codex-cli 0.144.4"
+        : args.includes("exec") && args.includes("--help")
+          ? [
+              "--json",
+              "--ephemeral",
+              "--ignore-user-config",
+              "--ignore-rules",
+              "--strict-config",
+              "--sandbox",
+              "--disable",
+              "--cd",
+              "-c, --config",
+            ].join("\n")
+          : "";
+      const stderrText =
+        args.includes("login") && args.includes("status") ? "Logged in using ChatGPT" : "";
+      const stream = {
+        on(event: string, cb: (...args: unknown[]) => void) {
+          if (event === "data" && stdoutText.length > 0) {
+            queueMicrotask(() => {
+              cb(Buffer.from(stdoutText, "utf8"));
+            });
+          }
+          if (event === "data" && stderrText.length > 0) {
+            queueMicrotask(() => {
+              cb(Buffer.from(stderrText, "utf8"));
+            });
+          }
+          return stream;
+        },
+      } as unknown as NodeJS.ReadableStream;
+      return {
+        pid: 1,
+        stdin: { end: () => undefined, write: () => true } as unknown as NodeJS.WritableStream,
+        stdout: stream,
+        stderr: stream,
+        onExit(cb) {
+          queueMicrotask(() => {
+            cb(0, null);
           });
         },
         onError() {
@@ -100,6 +156,65 @@ describe("registerCodexAdapter", () => {
     const adapter = registry.resolve("hall.codex");
     const result = await adapter.detect();
     expect(result.availability).not.toBe("available");
+  });
+
+  it("keeps strict isolated detection unsupported even when durable storage, root, and probe are configured", async () => {
+    const registry = new AgentRegistry();
+    const worktreeStore = new InMemoryAgentWorktreeStore();
+    const validator: AgentWorktreeValidator = {
+      validateReadyWorktree: () =>
+        Promise.resolve({
+          canonicalOwnedRoot: "D:\\hall-worktrees",
+          canonicalWorktreePath: "D:\\hall-worktrees\\wt_wt-1",
+          agentWorkingDirectory: "D:\\hall-worktrees\\wt_wt-1",
+          record: worktreeStore.createCreating({
+            worktreeId: "unused-record",
+            hallTaskId: "unused-task",
+            hallAgentRunId: "unused-run",
+            canonicalSourceRepositoryRoot: "D:\\repo",
+            sourceWorkingDirectoryRelativePath: ".",
+            baseCommit: "a".repeat(40),
+            canonicalWorktreePath: "D:\\hall-worktrees\\wt_unused-record",
+            createdAt: "2026-08-05T00:00:00.000Z",
+          }),
+        }),
+    };
+    registerCodexAdapter(registry, {
+      workspaceRoot: process.cwd(),
+      durableStorageEnabled: true,
+      agentWorktreeRoot: "D:\\hall-worktrees",
+      worktreeStore,
+      worktreeValidator: validator,
+      sandboxProbe: { run: () => Promise.resolve({ ok: true, code: "SANDBOX_PROBE_PASSED" }) },
+      spawner: successfulDetectionSpawner(),
+    });
+    const result = await registry.resolve("hall.codex").detect();
+    expect(result.availability).toBe("unsupported");
+    expect(result.executionTrust).toBe("unavailable");
+    expect(result.diagnosticMessage).toBe(
+      "Codex strict isolated execution requires exact sandbox equivalence verification from Phase 16.6.",
+    );
+    expect(result.capabilityObservations).not.toContainEqual(
+      expect.objectContaining({ capability: "project.edit", status: "verified" }),
+    );
+    expect(result.capabilityObservations).not.toContainEqual(
+      expect.objectContaining({ capability: "command.execute", status: "verified" }),
+    );
+  });
+
+  it("fails strict isolated detection closed when the explicit worktree root is absent", async () => {
+    const registry = new AgentRegistry();
+    registerCodexAdapter(registry, {
+      workspaceRoot: process.cwd(),
+      durableStorageEnabled: true,
+      sandboxProbe: { run: () => Promise.resolve({ ok: true, code: "SANDBOX_PROBE_PASSED" }) },
+      spawner: successfulDetectionSpawner(),
+    });
+    const result = await registry.resolve("hall.codex").detect();
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(
+      "Codex strict isolated execution requires a configured Hall-owned worktree root.",
+    );
   });
 
   it("does not pass a spawner through to CodexAdapter when none is supplied (production path unaffected)", () => {

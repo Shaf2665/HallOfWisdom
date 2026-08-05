@@ -70,25 +70,33 @@ describe("buildCodexArgv — required fixed profile", () => {
 describe("buildCodexArgv — Phase 10.1: explicit feature disabling", () => {
   const argv = buildCodexArgv(WORKDIR);
 
-  it.each(["hooks", "plugins", "plugin_sharing", "remote_plugin", "multi_agent"])(
-    "includes --disable %s",
-    (feature) => {
-      const index = argv.indexOf("--disable");
-      const disabledFeatures = argv.reduce<string[]>((acc, entry, i) => {
-        if (argv[i - 1] === "--disable") acc.push(entry);
-        return acc;
-      }, []);
-      expect(index).toBeGreaterThanOrEqual(0);
-      expect(disabledFeatures).toContain(feature);
-    },
-  );
+  it.each([
+    "hooks",
+    "plugins",
+    "plugin_sharing",
+    "remote_plugin",
+    "multi_agent",
+    "apps",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "computer_use",
+  ])("includes --disable %s", (feature) => {
+    const index = argv.indexOf("--disable");
+    const disabledFeatures = argv.reduce<string[]>((acc, entry, i) => {
+      if (argv[i - 1] === "--disable") acc.push(entry);
+      return acc;
+    }, []);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(disabledFeatures).toContain(feature);
+  });
 
   it("passes each --disable as a separate argv element paired with its feature name, never a joined string", () => {
     const disablePairs = argv.reduce<[string, string][]>((acc, entry, i) => {
       if (entry === "--disable") acc.push([entry, argv[i + 1] ?? ""]);
       return acc;
     }, []);
-    expect(disablePairs).toHaveLength(5);
+    expect(disablePairs).toHaveLength(10);
     for (const [, feature] of disablePairs) {
       expect(feature.length).toBeGreaterThan(0);
       expect(feature).not.toContain(" ");

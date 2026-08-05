@@ -19,7 +19,15 @@ import {
   TRUSTED_LOCAL_NOT_LOOPBACK_MESSAGE,
   TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE,
   TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE,
+  STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE,
   TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE,
+  STRICT_ISOLATION_DISABLED_MESSAGE,
+  STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE,
+  STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE,
+  STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE,
+  STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE,
+  STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE,
+  type StrictIsolatedDetectionOptions,
   type TrustedLocalDetectionOptions,
 } from "./detection.js";
 import { resolveCodexExecutable, type FileSystemProbe } from "./executable-resolver.js";
@@ -27,6 +35,7 @@ import { realFileSystemProbe } from "./real-file-system-probe.js";
 import { buildChildEnvironment } from "./environment.js";
 import { buildCodexTaskPrompt } from "./prompt-builder.js";
 import { buildCodexArgv, buildCodexTrustedLocalArgv } from "./permission-profile.js";
+import { realCodexSandboxCompatibilityProbe } from "./sandbox-compatibility-probe.js";
 import {
   isInsideGitRepository,
   realGitRepositoryProbe,
@@ -37,7 +46,7 @@ import {
   type WorkspaceWritabilityProbe,
 } from "./workspace-writability-probe.js";
 import { nodeProcessSpawner, type ProcessSpawner } from "./process-spawner.js";
-import { CodexRun } from "./codex-run.js";
+import { CodexRun, type CodexPreSpawnGateResult } from "./codex-run.js";
 import {
   buildFailure,
   CODEX_CLI_NOT_FOUND,
@@ -46,6 +55,7 @@ import {
   CODEX_CHATGPT_AUTH_UNVERIFIED,
   CODEX_ISOLATION_UNSUPPORTED,
   CODEX_WORKSPACE_NOT_WRITABLE,
+  CODEX_WORKTREE_VALIDATION_FAILED,
 } from "./failure-codes.js";
 import { getEnvValueCaseInsensitive } from "./env-lookup.js";
 
@@ -59,11 +69,41 @@ import { getEnvValueCaseInsensitive } from "./env-lookup.js";
  * `docs/architecture/0010-paperclip-compatible-codex-mode.md`.
  */
 export type CodexTrustedLocalConfig = TrustedLocalDetectionOptions;
+export type CodexStrictIsolatedConfig = StrictIsolatedDetectionOptions & {
+  readonly validateWorktree?: CodexStrictWorktreeValidator | undefined;
+};
+
+export interface CodexStrictWorktreeValidationInput {
+  readonly hallTaskId: string;
+  readonly hallAgentRunId: string;
+  readonly adapterId: string;
+  readonly workingDirectory: string;
+  readonly expectedWorktreeId?: string | undefined;
+  readonly signal?: AbortSignal | undefined;
+}
+
+export interface CodexStrictWorktreeValidationResult {
+  readonly ok: boolean;
+  readonly worktreeId?: string | undefined;
+}
+
+export type CodexStrictWorktreeValidator = (
+  input: CodexStrictWorktreeValidationInput,
+) => Promise<CodexStrictWorktreeValidationResult>;
 
 const TRUSTED_LOCAL_DISABLED: CodexTrustedLocalConfig = {
   enabled: false,
   loopbackBound: false,
   workspaceRoot: "",
+};
+
+const STRICT_ISOLATION_DISABLED: CodexStrictIsolatedConfig = {
+  enabled: false,
+  durableStorage: false,
+  worktreeRoot: "",
+  worktreeRootReady: false,
+  validatorAvailable: false,
+  sandboxProbe: realCodexSandboxCompatibilityProbe,
 };
 
 export interface CodexAdapterConfig {
@@ -75,6 +115,7 @@ export interface CodexAdapterConfig {
   readonly writabilityProbe?: WorkspaceWritabilityProbe;
   readonly binaryName?: string;
   readonly trustedLocal?: CodexTrustedLocalConfig;
+  readonly strictIsolation?: CodexStrictIsolatedConfig;
 }
 
 /**
@@ -124,6 +165,42 @@ class PreflightFailedRun implements AgentRunHandle {
   }
 }
 
+class PreflightCancelledRun implements AgentRunHandle {
+  readonly runId: string;
+  readonly events: AsyncIterable<NormalizedAgentEvent>;
+  readonly completion: Promise<NormalizedAgentEvent>;
+
+  constructor(runId: string, taskId: string, agentId: string) {
+    this.runId = runId;
+    const factory = new EventFactory({ runId, taskId, agentId });
+    const guard = new TerminalEventGuard();
+    const event = guard.guardEvent(factory.runCancelled("system", undefined));
+    this.completion = Promise.resolve(event);
+    this.events = {
+      [Symbol.asyncIterator]() {
+        let yielded = false;
+        return {
+          next(): Promise<IteratorResult<NormalizedAgentEvent>> {
+            if (yielded) return Promise.resolve({ value: undefined, done: true });
+            yielded = true;
+            return Promise.resolve({ value: event, done: false });
+          },
+        };
+      },
+    };
+  }
+
+  readonly currentState: RunTerminalState = "cancelled";
+
+  cancel(): void {
+    // Already terminal the moment this object exists; nothing to cancel.
+  }
+}
+
+function isSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
+
 /**
  * Executes the locally installed, ChatGPT-authenticated Codex CLI. See
  * `docs/architecture/0009-codex-adapter.md` for the full design:
@@ -152,6 +229,8 @@ export class CodexAdapter implements AgentAdapter {
    * `codex-adapter.test.ts` for why this matters.
    */
   readonly #trustedLocal: CodexTrustedLocalConfig;
+  readonly #strictIsolation: CodexStrictIsolatedConfig;
+  readonly #strictIsolationConfigured: boolean;
   /**
    * Phase 10.3 — in-flight detection coalescing. When several callers
    * (e.g. overlapping `GET /api/v1/adapters` requests) invoke `detect()`
@@ -178,6 +257,8 @@ export class CodexAdapter implements AgentAdapter {
     this.#writabilityProbe = config.writabilityProbe ?? realWorkspaceWritabilityProbe;
     this.#binaryName = config.binaryName;
     this.#trustedLocal = config.trustedLocal ?? TRUSTED_LOCAL_DISABLED;
+    this.#strictIsolation = config.strictIsolation ?? STRICT_ISOLATION_DISABLED;
+    this.#strictIsolationConfigured = config.strictIsolation !== undefined;
   }
 
   async detect(): Promise<AgentDetectionResult> {
@@ -187,20 +268,26 @@ export class CodexAdapter implements AgentAdapter {
     return promise;
   }
 
-  async #runDetection(): Promise<AgentDetectionResult> {
+  async #runDetection(signal?: AbortSignal): Promise<AgentDetectionResult> {
     try {
-      const result = await detectCodex({
-        platform: this.#platform,
-        parentEnv: this.#parentEnv,
-        fs: this.#fs,
-        spawner: this.#spawner,
-        trustedLocal: this.#trustedLocal,
-        ...(this.#binaryName !== undefined ? { binaryName: this.#binaryName } : {}),
-      });
-      return parseAgentDetectionResult(result);
+      return await this.#detectFresh(signal);
     } finally {
       this.#inFlightDetection = undefined;
     }
+  }
+
+  async #detectFresh(signal?: AbortSignal): Promise<AgentDetectionResult> {
+    const result = await detectCodex({
+      platform: this.#platform,
+      parentEnv: this.#parentEnv,
+      fs: this.#fs,
+      spawner: this.#spawner,
+      trustedLocal: this.#trustedLocal,
+      ...(this.#strictIsolationConfigured ? { strictIsolation: this.#strictIsolation } : {}),
+      ...(this.#binaryName !== undefined ? { binaryName: this.#binaryName } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+    });
+    return parseAgentDetectionResult(result);
   }
 
   async startTask(input: AgentTaskInput, options?: AgentExecutionOptions): Promise<AgentRunHandle> {
@@ -212,10 +299,25 @@ export class CodexAdapter implements AgentAdapter {
       );
     }
 
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
+      );
+    }
+
     // Billing-safety defense in depth: re-verify ChatGPT authentication at
     // the moment of execution, not only whenever the caller last called
     // detect(). Mirrors the Claude Code adapter's own discipline.
-    const detection = await this.detect();
+    const detection = await this.#detectFresh(options?.signal);
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
+      );
+    }
     if (detection.availability !== "available") {
       return new PreflightFailedRun(
         parsedInput.runId,
@@ -245,6 +347,14 @@ export class CodexAdapter implements AgentAdapter {
       );
     }
 
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
+      );
+    }
+
     // Codex normally requires a Git repository; this adapter never passes
     // --skip-git-repo-check for a normal task, trusted-local included.
     // Checked here, before ever spawning Codex, so a non-repository
@@ -260,6 +370,38 @@ export class CodexAdapter implements AgentAdapter {
           "Codex requires the task's working directory to be inside a Git repository.",
         ),
       );
+    }
+
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
+      );
+    }
+
+    let validatedWorktreeId: string | undefined;
+    if (!this.#trustedLocal.enabled) {
+      const worktreeValidation = await this.#validateStrictWorktree(parsedInput, options?.signal);
+      if (worktreeValidation.cancelled) {
+        return new PreflightCancelledRun(
+          parsedInput.runId,
+          parsedInput.hallTask.taskId,
+          parsedInput.agentIdentity.agentId,
+        );
+      }
+      if (!worktreeValidation.ok) {
+        return new PreflightFailedRun(
+          parsedInput.runId,
+          parsedInput.hallTask.taskId,
+          parsedInput.agentIdentity.agentId,
+          buildFailure(
+            CODEX_WORKTREE_VALIDATION_FAILED,
+            "Codex strict isolated execution requires the exact validated Hall worktree.",
+          ),
+        );
+      }
+      validatedWorktreeId = worktreeValidation.worktreeId;
     }
 
     // Phase 10.2 — trusted-local mode's own writability preflight. Never
@@ -282,6 +424,14 @@ export class CodexAdapter implements AgentAdapter {
           CODEX_WORKSPACE_NOT_WRITABLE,
           "Codex trusted-local execution requires the task's working directory to be writable.",
         ),
+      );
+    }
+
+    if (isSignalAborted(options?.signal)) {
+      return new PreflightCancelledRun(
+        parsedInput.runId,
+        parsedInput.hallTask.taskId,
+        parsedInput.agentIdentity.agentId,
       );
     }
 
@@ -311,9 +461,70 @@ export class CodexAdapter implements AgentAdapter {
       runId: parsedInput.runId,
       taskId: parsedInput.hallTask.taskId,
       agentId: parsedInput.agentIdentity.agentId,
+      ...(!this.#trustedLocal.enabled
+        ? {
+            preSpawnGate: (signal) =>
+              this.#validateStrictWorktreeForSpawn(parsedInput, signal, validatedWorktreeId),
+          }
+        : {}),
       ...(options?.signal !== undefined ? { signal: options.signal } : {}),
     });
     return Promise.resolve(run);
+  }
+
+  async #validateStrictWorktree(
+    input: AgentTaskInput,
+    signal: AbortSignal | undefined,
+    expectedWorktreeId?: string,
+  ): Promise<CodexStrictWorktreeValidationResult & { readonly cancelled?: boolean }> {
+    if (isSignalAborted(signal)) return { ok: false, cancelled: true };
+    if (
+      !this.#strictIsolation.enabled ||
+      !this.#strictIsolation.durableStorage ||
+      this.#strictIsolation.worktreeRoot.trim().length === 0 ||
+      this.#strictIsolation.worktreeRootReady !== true ||
+      this.#strictIsolation.validatorAvailable !== true ||
+      this.#strictIsolation.validateWorktree === undefined
+    ) {
+      return { ok: false };
+    }
+    try {
+      const result = await this.#strictIsolation.validateWorktree({
+        hallTaskId: input.hallTask.taskId,
+        hallAgentRunId: input.runId,
+        adapterId: input.agentIdentity.adapterId,
+        workingDirectory: input.workingDirectory,
+        ...(expectedWorktreeId !== undefined ? { expectedWorktreeId } : {}),
+        ...(signal === undefined ? {} : { signal }),
+      });
+      if (isSignalAborted(signal)) return { ok: false, cancelled: true };
+      if (!result.ok) return result;
+      if (result.worktreeId === undefined) return { ok: false };
+      if (expectedWorktreeId !== undefined && result.worktreeId !== expectedWorktreeId) {
+        return { ok: false };
+      }
+      return result;
+    } catch {
+      if (isSignalAborted(signal)) return { ok: false, cancelled: true };
+      return { ok: false };
+    }
+  }
+
+  async #validateStrictWorktreeForSpawn(
+    input: AgentTaskInput,
+    signal: AbortSignal,
+    expectedWorktreeId: string | undefined,
+  ): Promise<CodexPreSpawnGateResult> {
+    const validation = await this.#validateStrictWorktree(input, signal, expectedWorktreeId);
+    if (validation.cancelled) return { ok: false, cancelled: true };
+    if (validation.ok) return { ok: true };
+    return {
+      ok: false,
+      failure: buildFailure(
+        CODEX_WORKTREE_VALIDATION_FAILED,
+        "Codex strict isolated execution requires the exact validated Hall worktree.",
+      ),
+    };
   }
 }
 
@@ -344,7 +555,14 @@ function failureCodeForUnavailableDetection(detection: AgentDetectionResult): st
         detection.diagnosticMessage === TRUSTED_LOCAL_NOT_LOOPBACK_MESSAGE ||
         detection.diagnosticMessage === TRUSTED_LOCAL_WORKSPACE_NOT_CONFIGURED_MESSAGE ||
         detection.diagnosticMessage === TRUSTED_LOCAL_BILLING_ENV_BLOCKED_MESSAGE ||
-        detection.diagnosticMessage === TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE
+        detection.diagnosticMessage === TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_DISABLED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_VALIDATOR_REQUIRED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE ||
+        detection.diagnosticMessage === STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE
       ) {
         return CODEX_ISOLATION_UNSUPPORTED;
       }

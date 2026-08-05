@@ -1,11 +1,10 @@
 # 0009 — Codex Adapter
 
-Status: Draft (Phase 10; hardened in Phase 10.1 — see "Phase 10.1 — Event-channel isolation,
-capability accuracy, and sandbox diagnosis" near the end of this document for what changed and
-why). File-editing capability under the _default, strict_ sandbox profile is a disclosed,
-unresolved gap — see "Phase 10.1" below. By default, `detect()` never reports Codex as
-`"available"`: it always reports `"unsupported"` with a fixed, safe diagnostic, so Hall Web will
-not offer it for assignment by default.
+Status: Draft (Phase 10; hardened in Phase 10.1, Phase 10.2, Phase 10.3, and Phase 16.4). Phase
+16.4 keeps strict Codex fail-closed: durable Hall-owned worktree isolation and the zero-model native
+sandbox probe are present, but they do not prove exact equivalence with real
+`codex exec --sandbox workspace-write` execution. Strict `detect()` remains `unsupported` until the
+explicit Phase 16.6 verification proves the effective policy.
 **Phase 10.2** (see
 [`0010-paperclip-compatible-codex-mode.md`](0010-paperclip-compatible-codex-mode.md)) adds a
 separate, explicitly opt-in "trusted-local" mode that makes Codex assignable by having it bypass
@@ -716,3 +715,48 @@ and deleted `.tmp/codex-sandbox-probe/` (the sandbox-write-permission fixture) a
 task). `.tmp/` is gitignored; none of
 these were ever committed. No real account email, workspace name, `CODEX_HOME` path, or auth-status
 JSON was found in any tracked file, test fixture, or snapshot during review.
+
+## Phase 16.4 — Strict isolated compatibility
+
+Phase 16.4 keeps the default strict Codex availability rule fail-closed. The adapter now has the
+durable worktree and native-probe infrastructure it needs, but strict mode must not report
+`available` merely because the helper probe passes. Availability still requires an exact proof that
+the real `codex exec --sandbox workspace-write` policy and the zero-model helper policy have the
+same effective filesystem and network restrictions; that proof is deferred to the explicitly
+authorized Phase 16.6 verification.
+
+The probe uses the installed `codex sandbox` helper rather than `codex exec`, so it spends no model
+usage. On the local `codex-cli 0.144.4` install, the working helper shape is
+`codex sandbox -P :workspace -C <workspace> ...`. It verifies read/write/delete behavior inside a
+disposable workspace, rejects outside writes, rejects network success, bounds output and time, and
+returns only stable safe probe codes. This is useful native-sandbox evidence, but it is not exact
+equivalence proof for the real execution selector. If equivalence is unproven, strict detection
+fails closed as `unsupported` and does not mark editing or command execution verified.
+
+Once exact equivalence is proven in a later phase, strict task launch performs a fresh detection
+and then calls a server-injected worktree validator before constructing `CodexRun`. That validator
+is built from Hall Core's `AgentWorktreeManager.validateReadyWorktree`, not from adapter-owned
+lexical path checks. While equivalence is unproven, the adapter fails before worktree validation and
+before any model-backed Codex task process is spawned.
+
+The strict argv remains sandboxed and fixed:
+
+```text
+exec --json --ephemeral --ignore-user-config --ignore-rules --strict-config
+  --sandbox workspace-write
+  -c approval_policy="never"
+  -c sandbox_workspace_write.network_access=false
+  -c web_search="disabled"
+  --disable hooks --disable plugins --disable plugin_sharing
+  --disable remote_plugin --disable multi_agent
+  --disable apps --disable browser_use --disable browser_use_external
+  --disable browser_use_full_cdp_access --disable computer_use
+  --cd <validated Hall worktree>
+  -
+```
+
+Strict mode still never uses dangerous bypass flags, `--yolo`, `danger-full-access`,
+`--skip-git-repo-check`, `--search`, session resume, arbitrary extra arguments, arbitrary
+environment variables, task-controlled security options, hooks, plugins, remote plugins, or
+multi-agent Codex features. The prompt remains stdin-only. No real Codex task is run in Phase
+16.4; explicitly authorized model-backed smoke verification is deferred to Phase 16.6.

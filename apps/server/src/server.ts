@@ -26,6 +26,8 @@ import {
 import { runRestartRecovery, type RecoverySummary } from "./recovery/restart-recovery.js";
 import { reconcileAllPlanProgress } from "./ceo-plans/ceo-plan-progress-reconciliation.js";
 import { runCeoPlanExecutionRecovery } from "./ceo-execution/ceo-plan-execution-recovery.js";
+import { canonicalizeHallOwnedRoot } from "./agent-worktrees/path-safety.js";
+import { AgentWorktreePathError } from "./agent-worktrees/agent-worktree-errors.js";
 
 const EXIT_INVALID_INPUT = 2;
 const EXIT_INTERNAL_ERROR = 3;
@@ -133,7 +135,19 @@ export async function runServer(argv: readonly string[]): Promise<number> {
         workspaceRoot,
         comparisonRoot,
       });
-      agentWorktreeRoot = path.join(canonicalDataDir, "agent-worktrees");
+      agentWorktreeRoot =
+        cliOptions.agentWorktreeRoot === undefined
+          ? undefined
+          : canonicalizeHallOwnedRoot({
+              rawOwnedRoot: cliOptions.agentWorktreeRoot,
+              forbiddenRoots: [
+                { canonicalPath: workspaceRoot, label: "workspace root" },
+                { canonicalPath: canonicalDataDir, label: "data directory" },
+                ...(comparisonRoot === undefined
+                  ? []
+                  : [{ canonicalPath: comparisonRoot, label: "comparison root" }]),
+              ],
+            });
       // Phase 13.2 — the filesystem lock, database open, migrations,
       // epoch acquisition, and fence-set sequence lives in one shared
       // function (`openDurableStorage`) so every durable Hall Core entry
@@ -151,7 +165,9 @@ export async function runServer(argv: readonly string[]): Promise<number> {
       ownershipFence = opened.ownershipFence;
     } catch (error) {
       console.error(formatError(error));
-      return error instanceof PersistenceError ? EXIT_INVALID_INPUT : EXIT_INTERNAL_ERROR;
+      return error instanceof PersistenceError || error instanceof AgentWorktreePathError
+        ? EXIT_INVALID_INPUT
+        : EXIT_INTERNAL_ERROR;
     }
   }
 

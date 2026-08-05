@@ -9,6 +9,14 @@ export interface CanonicalOwnedRootInput {
   readonly canonicalSourceRepositoryRoot: string;
 }
 
+export interface CanonicalHallOwnedRootInput {
+  readonly rawOwnedRoot: string;
+  readonly forbiddenRoots: readonly {
+    readonly canonicalPath: string;
+    readonly label: string;
+  }[];
+}
+
 export interface ContainmentCheckOptions {
   readonly rootPath: string;
   readonly candidatePath: string;
@@ -77,6 +85,39 @@ export function canonicalizeOwnedRoot(input: CanonicalOwnedRootInput): string {
   return canonicalOwnedRoot;
 }
 
+export function canonicalizeHallOwnedRoot(input: CanonicalHallOwnedRootInput): string {
+  const normalized = normalizeAbsoluteNonRootPath(input.rawOwnedRoot, "Hall-owned worktree root");
+  assertExistingFinalPathIsNotLink(normalized, "Hall-owned worktree root");
+  const intendedOwnedRoot = canonicalizeIntendedPath(normalized, "Hall-owned worktree root");
+  for (const forbidden of input.forbiddenRoots) {
+    assertMutualNonContainment({
+      a: intendedOwnedRoot,
+      aLabel: "Hall-owned worktree root",
+      b: forbidden.canonicalPath,
+      bLabel: forbidden.label,
+    });
+  }
+
+  fs.mkdirSync(intendedOwnedRoot, { recursive: true });
+  assertExistingFinalPathIsNotLink(intendedOwnedRoot, "Hall-owned worktree root");
+  const canonicalOwnedRoot = canonicalizeExistingDirectory(
+    intendedOwnedRoot,
+    "Hall-owned worktree root",
+  );
+  if (!samePath(canonicalOwnedRoot, intendedOwnedRoot)) {
+    throw new AgentWorktreePathError("Hall-owned worktree root must not be a symlink or junction.");
+  }
+  for (const forbidden of input.forbiddenRoots) {
+    assertMutualNonContainment({
+      a: canonicalOwnedRoot,
+      aLabel: "Hall-owned worktree root",
+      b: forbidden.canonicalPath,
+      bLabel: forbidden.label,
+    });
+  }
+  return canonicalOwnedRoot;
+}
+
 export function assertContainedPath(options: ContainmentCheckOptions): void {
   if (!isPathContained(options.rootPath, options.candidatePath)) {
     throw new AgentWorktreePathError(`${options.description} must remain inside its owned root.`);
@@ -101,6 +142,9 @@ function normalizeAbsoluteNonRootPath(rawPath: string, label: string): string {
   if (rawPath.includes("\0")) {
     throw new AgentWorktreePathError(`${label} must not contain NUL characters.`);
   }
+  if (containsControlCharacter(rawPath)) {
+    throw new AgentWorktreePathError(`${label} must not contain control characters.`);
+  }
   if (!path.isAbsolute(rawPath)) {
     throw new AgentWorktreePathError(`${label} must be absolute.`);
   }
@@ -109,6 +153,27 @@ function normalizeAbsoluteNonRootPath(rawPath: string, label: string): string {
     throw new AgentWorktreePathError(`${label} must not be a filesystem root.`);
   }
   return normalized;
+}
+
+function containsControlCharacter(value: string): boolean {
+  for (const char of value) {
+    const code = char.charCodeAt(0);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function assertExistingFinalPathIsNotLink(rawPath: string, label: string): void {
+  if (!fs.existsSync(rawPath)) return;
+  let stats: fs.Stats;
+  try {
+    stats = fs.lstatSync(rawPath);
+  } catch {
+    throw new AgentWorktreePathError(`${label} must be inspectable.`);
+  }
+  if (stats.isSymbolicLink()) {
+    throw new AgentWorktreePathError(`${label} must not be a symlink or junction.`);
+  }
 }
 
 function canonicalizeIntendedPath(normalizedPath: string, label: string): string {

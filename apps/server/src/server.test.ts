@@ -71,6 +71,23 @@ describe("runServer", () => {
     expect(exitCode).toBe(2);
   });
 
+  it("rejects a Hall-owned agent worktree root nested inside --workspace-root before creating it", async () => {
+    const workspaceRoot = path.join(tempRoot, "workspace");
+    const dataDir = path.join(tempRoot, "data");
+    const nestedWorktreeRoot = path.join(workspaceRoot, ".hall-worktrees");
+    fs.mkdirSync(workspaceRoot);
+    const exitCode = await runServer([
+      "--workspace-root",
+      workspaceRoot,
+      "--data-dir",
+      dataDir,
+      "--agent-worktree-root",
+      nestedWorktreeRoot,
+    ]);
+    expect(exitCode).toBe(2);
+    expect(fs.existsSync(nestedWorktreeRoot)).toBe(false);
+  });
+
   it("boots twice in a row with --data-dir against the same directory, reporting previousShutdown clean on the second boot after a graceful first shutdown", async () => {
     const workspaceRoot = path.join(tempRoot, "workspace");
     fs.mkdirSync(workspaceRoot);

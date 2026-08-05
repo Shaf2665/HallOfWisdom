@@ -50,6 +50,16 @@ const MAX_TOLERATED_MALFORMED_LINES = 5;
  */
 const DEFAULT_POST_EXIT_STDOUT_DRAIN_GRACE_MS = 2000;
 
+export type CodexPreSpawnGateResult =
+  | { readonly ok: true }
+  | {
+      readonly ok: false;
+      readonly cancelled?: boolean;
+      readonly failure?: ReturnType<typeof buildFailure>;
+    };
+
+export type CodexPreSpawnGate = (signal: AbortSignal) => Promise<CodexPreSpawnGateResult>;
+
 export interface CodexRunOptions {
   readonly executablePath: string;
   readonly args: readonly string[];
@@ -67,6 +77,7 @@ export interface CodexRunOptions {
   readonly maxRunDurationMs?: number;
   readonly inactivityTimeoutMs?: number;
   readonly postExitStdoutDrainGraceMs?: number;
+  readonly preSpawnGate?: CodexPreSpawnGate | undefined;
   /** Test-only injection point — see `process-tree.ts`'s `PosixGroupKiller` doc comment. */
   readonly posixGroupKiller?: PosixGroupKiller;
 }
@@ -118,6 +129,7 @@ export class CodexRun implements AgentRunHandle {
 
   #cancellationRecorded = false;
   #cancellationRequested = false;
+  #terminationStarted = false;
   #cancelledBy: "orchestrator" | "system" = "system";
   #cancelReason: string | undefined;
   #malformedLineCount = 0;
@@ -188,14 +200,14 @@ export class CodexRun implements AgentRunHandle {
   async *#run(): AsyncGenerator<NormalizedAgentEvent> {
     if (!this.#started) {
       this.#started = true;
-      this.#start();
+      void this.#start();
     }
     for await (const event of this.#queue) {
       yield event;
     }
   }
 
-  #start(): void {
+  async #start(): Promise<void> {
     if (isAborted(this.#controller.signal)) {
       this.#finishCancelled();
       return;
@@ -208,6 +220,33 @@ export class CodexRun implements AgentRunHandle {
       },
       { once: true },
     );
+
+    const gate = this.#options.preSpawnGate;
+    if (gate !== undefined) {
+      let gateResult: CodexPreSpawnGateResult;
+      try {
+        gateResult = await gate(this.#controller.signal);
+      } catch {
+        gateResult = {
+          ok: false,
+          failure: buildFailure(
+            CODEX_PROCESS_START_FAILED,
+            "Codex could not be safely prepared for execution.",
+          ),
+        };
+      }
+      if (isAborted(this.#controller.signal) || (!gateResult.ok && gateResult.cancelled)) {
+        this.#finishCancelled();
+        return;
+      }
+      if (!gateResult.ok) {
+        this.#finishFailed(
+          gateResult.failure ??
+            buildFailure(CODEX_PROCESS_START_FAILED, "Codex could not be safely prepared."),
+        );
+        return;
+      }
+    }
 
     this.#maxDurationTimer = setTimeout(() => {
       this.#failAndTerminateProcess(
@@ -494,6 +533,8 @@ export class CodexRun implements AgentRunHandle {
   }
 
   #terminateProcess(): void {
+    if (this.#terminationStarted) return;
+    this.#terminationStarted = true;
     const handle = this.#processHandle;
     if (handle === undefined) return;
     handle.kill();

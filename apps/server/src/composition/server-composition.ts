@@ -27,7 +27,9 @@ export type { ComparisonComposition } from "./comparison-composition-root.js";
  */
 export function createServerComposition(options: ServerCompositionOptions): ServerComposition {
   const durableIsolationIds =
-    options.db === undefined ? [] : ["hall.codex", ...(options.isolatedAgentAdapterIds ?? [])];
+    options.db === undefined || options.agentWorktreeRoot === undefined
+      ? [...(options.isolatedAgentAdapterIds ?? [])]
+      : ["hall.codex", ...(options.isolatedAgentAdapterIds ?? [])];
   const composition = createMockAgentServerComposition({
     ...options,
     isolatedAgentAdapterIds: durableIsolationIds,
@@ -36,6 +38,10 @@ export function createServerComposition(options: ServerCompositionOptions): Serv
   registerCodexAdapter(composition.registry, {
     workspaceRoot: options.workspaceRoot,
     enableCodexTrustedLocal: options.enableCodexTrustedLocal,
+    durableStorageEnabled: options.db !== undefined,
+    agentWorktreeRoot: options.agentWorktreeRoot,
+    worktreeStore: composition.agentWorktreeStore,
+    worktreeValidator: composition.agentWorktreeValidator,
   });
 
   if (options.comparisonRoot === undefined) {

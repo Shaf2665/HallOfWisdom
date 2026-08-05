@@ -5,9 +5,17 @@ import {
   UNSUPPORTED_ISOLATION_PROFILE_MESSAGE,
   UNVERIFIED_CHATGPT_MESSAGE,
   NOT_CHATGPT_MESSAGE,
+  STRICT_ISOLATION_DISABLED_MESSAGE,
+  STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE,
+  STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE,
+  STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE,
+  STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE,
+  STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE,
 } from "./detection.js";
 import type { ProcessSpawner, SpawnedProcessHandle } from "./process-spawner.js";
 import type { FileSystemProbe } from "./executable-resolver.js";
+import type { CodexSandboxCompatibilityProbe } from "./sandbox-compatibility-probe.js";
+import { evaluateStrictCodexSandboxEquivalence } from "./strict-sandbox-policy.js";
 
 class ScriptedHandle implements SpawnedProcessHandle {
   readonly pid = 1234;
@@ -103,6 +111,7 @@ const VALID_EXEC_HELP_TEXT = [
   "--ignore-rules",
   "--strict-config",
   "--sandbox",
+  "--disable",
   "--cd",
   "-c, --config",
 ].join("\n");
@@ -519,6 +528,27 @@ const VALID_TRUSTED_LOCAL: import("./detection.js").TrustedLocalDetectionOptions
   workspaceRoot: "/workspace",
 };
 
+function strictIsolation(
+  probe: CodexSandboxCompatibilityProbe = passingProbe(),
+): import("./detection.js").StrictIsolatedDetectionOptions {
+  return {
+    enabled: true,
+    durableStorage: true,
+    worktreeRoot: "/hall-worktrees",
+    worktreeRootReady: true,
+    validatorAvailable: true,
+    sandboxProbe: probe,
+  };
+}
+
+function passingProbe(): CodexSandboxCompatibilityProbe {
+  return { run: () => Promise.resolve({ ok: true, code: "SANDBOX_PROBE_PASSED" }) };
+}
+
+function failingProbe(code = "SANDBOX_PROBE_FAILED"): CodexSandboxCompatibilityProbe {
+  return { run: () => Promise.resolve({ ok: false, code }) };
+}
+
 function trustedLocalSpawner(): ProcessSpawner {
   return scriptedSpawner(
     "codex-cli 0.144.4",
@@ -750,6 +780,182 @@ describe("detectCodex — trusted-local mode enabled (Phase 10.2)", () => {
     });
     expect(result.availability).toBe("available");
     expect(helpSpawnCount).toBe(1);
+  });
+});
+
+describe("detectCodex — strict isolated mode (Phase 16.4)", () => {
+  it("keeps strict detection unsupported even after the helper probe passes when sandbox equivalence is unproven", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      strictIsolation: strictIsolation(),
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.executionTrust).toBe("unavailable");
+    expect(result.diagnosticMessage).toBe(STRICT_ISOLATION_SANDBOX_EQUIVALENCE_UNPROVEN_MESSAGE);
+    const edit = result.capabilityObservations?.find(
+      (entry) => entry.capability === "project.edit",
+    );
+    const command = result.capabilityObservations?.find(
+      (entry) => entry.capability === "command.execute",
+    );
+    expect(edit?.status).not.toBe("verified");
+    expect(command?.status).not.toBe("verified");
+    expect(JSON.stringify(result)).not.toContain("SANDBOX_PROBE_PASSED");
+  });
+
+  it("does not treat shared constants alone as exact sandbox equivalence proof", () => {
+    expect(
+      evaluateStrictCodexSandboxEquivalence({
+        execSandboxMode: "workspace-write",
+        sandboxPermissionProfile: ":workspace",
+        establishedBy: "shared_constants",
+      }),
+    ).toEqual({ ok: false, code: "CODEX_STRICT_SANDBOX_EQUIVALENCE_UNPROVEN" });
+  });
+
+  it("fails closed if the helper probe profile changes without the real exec sandbox mode", () => {
+    expect(
+      evaluateStrictCodexSandboxEquivalence({
+        execSandboxMode: "workspace-write",
+        sandboxPermissionProfile: ":changed-workspace",
+        establishedBy: "shared_constants",
+      }),
+    ).toEqual({ ok: false, code: "CODEX_STRICT_SANDBOX_SELECTOR_MISMATCH" });
+  });
+
+  it("fails closed if the real exec sandbox mode changes without the helper probe profile", () => {
+    expect(
+      evaluateStrictCodexSandboxEquivalence({
+        execSandboxMode: "read-only",
+        sandboxPermissionProfile: ":workspace",
+        establishedBy: "shared_constants",
+      }),
+    ).toEqual({ ok: false, code: "CODEX_STRICT_SANDBOX_SELECTOR_MISMATCH" });
+  });
+
+  it("fails when strict isolation is disabled by server composition", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      strictIsolation: { ...strictIsolation(), enabled: false },
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(STRICT_ISOLATION_DISABLED_MESSAGE);
+  });
+
+  it("fails without durable SQLite configuration", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      strictIsolation: { ...strictIsolation(), durableStorage: false },
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(STRICT_ISOLATION_DURABILITY_REQUIRED_MESSAGE);
+  });
+
+  it("fails without an explicit Hall-owned worktree root", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      strictIsolation: { ...strictIsolation(), worktreeRoot: "   " },
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(STRICT_ISOLATION_WORKTREE_ROOT_REQUIRED_MESSAGE);
+  });
+
+  it("fails without a canonical ready Hall-owned worktree root and validator", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      strictIsolation: {
+        ...strictIsolation(),
+        worktreeRootReady: false,
+        validatorAvailable: false,
+      },
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(
+      "Codex strict isolated execution requires a ready Hall worktree validator.",
+    );
+  });
+
+  it.each([
+    ["generic probe failure", "SANDBOX_PROBE_FAILED"],
+    ["inability to write inside", "SANDBOX_PROBE_COMMAND_FAILED"],
+    ["ability to write outside", "SANDBOX_PROBE_OUTSIDE_WRITE"],
+  ])("blocks availability on %s", async (_label, code) => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      strictIsolation: strictIsolation(failingProbe(code)),
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(STRICT_ISOLATION_SANDBOX_PROBE_FAILED_MESSAGE);
+    expect(JSON.stringify(result)).not.toContain(code);
+  });
+
+  it("requires ChatGPT authentication before the strict sandbox probe can run", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: scriptedSpawner(
+        "codex-cli 0.144.4",
+        "Logged in using an API key",
+        0,
+        TRUSTED_LOCAL_EXEC_HELP_TEXT,
+      ),
+      strictIsolation: strictIsolation(),
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(NOT_CHATGPT_MESSAGE);
+  });
+
+  it("rejects billing-changing environment variables before probing the sandbox", async () => {
+    let probeCalled = false;
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: { ...FOUND_ENV, OPENAI_API_KEY: "sk-secret" },
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      strictIsolation: strictIsolation({
+        run: () => {
+          probeCalled = true;
+          return Promise.resolve({ ok: true, code: "SANDBOX_PROBE_PASSED" });
+        },
+      }),
+    });
+    expect(result.availability).toBe("unsupported");
+    expect(result.diagnosticMessage).toBe(STRICT_ISOLATION_BILLING_ENV_BLOCKED_MESSAGE);
+    expect(probeCalled).toBe(false);
+    expect(JSON.stringify(result)).not.toContain("sk-secret");
+  });
+
+  it("trusted-local remains explicitly opt-in and separate when enabled", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+      strictIsolation: strictIsolation(failingProbe()),
+    });
+    expect(result.availability).toBe("available");
+    expect(result.executionTrust).toBe("trusted_local");
+    expect(result.diagnosticMessage).toContain("Trusted-local mode");
   });
 });
 

@@ -1,9 +1,24 @@
 import type { AgentRegistry } from "@hall-of-wisdom/hall-runner";
-import { CodexAdapter, type ProcessSpawner } from "@hall-of-wisdom/codex-adapter";
+import {
+  CODEX_ADAPTER_ID,
+  CodexAdapter,
+  realCodexSandboxCompatibilityProbe,
+  type CodexSandboxCompatibilityProbe,
+  type CodexStrictWorktreeValidator,
+  type ProcessSpawner,
+} from "@hall-of-wisdom/codex-adapter";
+import type { AgentWorktreeValidator } from "../agent-execution/isolated-agent-execution-coordinator.js";
+import type { AgentWorktreeStorePort } from "../agent-worktrees/agent-worktree-store-port.js";
+import { samePath } from "../agent-worktrees/path-safety.js";
 
 export interface RegisterCodexAdapterOptions {
   /** Canonical, already-validated Hall Core workspace root. */
   readonly workspaceRoot: string;
+  readonly durableStorageEnabled?: boolean | undefined;
+  readonly agentWorktreeRoot?: string | undefined;
+  readonly worktreeStore?: AgentWorktreeStorePort | undefined;
+  readonly worktreeValidator?: AgentWorktreeValidator | undefined;
+  readonly sandboxProbe?: CodexSandboxCompatibilityProbe | undefined;
   /** `--enable-codex-trusted-local` at Hall Core startup only. Defaults to false. */
   readonly enableCodexTrustedLocal?: boolean | undefined;
   /**
@@ -50,6 +65,12 @@ export function registerCodexAdapter(
   registry: AgentRegistry,
   options: RegisterCodexAdapterOptions,
 ): void {
+  const strictValidator = buildStrictWorktreeValidator(
+    options.worktreeStore,
+    options.worktreeValidator,
+  );
+  const strictRootReady =
+    options.agentWorktreeRoot !== undefined && options.agentWorktreeRoot !== "";
   registry.register(
     new CodexAdapter({
       trustedLocal: {
@@ -61,7 +82,44 @@ export function registerCodexAdapter(
         loopbackBound: true,
         workspaceRoot: options.workspaceRoot,
       },
+      strictIsolation: {
+        enabled: options.enableCodexTrustedLocal !== true,
+        durableStorage: options.durableStorageEnabled === true,
+        worktreeRoot: options.agentWorktreeRoot ?? "",
+        worktreeRootReady: strictRootReady,
+        validatorAvailable: strictValidator !== undefined,
+        sandboxProbe: options.sandboxProbe ?? realCodexSandboxCompatibilityProbe,
+        validateWorktree: strictValidator,
+      },
       ...(options.spawner === undefined ? {} : { spawner: options.spawner }),
     }),
   );
+}
+
+function buildStrictWorktreeValidator(
+  store: AgentWorktreeStorePort | undefined,
+  validator: AgentWorktreeValidator | undefined,
+): CodexStrictWorktreeValidator | undefined {
+  if (store === undefined || validator === undefined) return undefined;
+  return async (input) => {
+    if (input.adapterId !== CODEX_ADAPTER_ID) return { ok: false };
+    const record = store.findActiveByAgentRunId(input.hallAgentRunId);
+    if (
+      record?.hallTaskId !== input.hallTaskId ||
+      record.hallAgentRunId !== input.hallAgentRunId ||
+      record.status !== "ready" ||
+      (input.expectedWorktreeId !== undefined && record.worktreeId !== input.expectedWorktreeId)
+    ) {
+      return { ok: false };
+    }
+    const handle = await validator.validateReadyWorktree({
+      hallTaskId: input.hallTaskId,
+      hallAgentRunId: input.hallAgentRunId,
+      requireHeadAtBase: true,
+      signal: input.signal,
+      worktreeId: record.worktreeId,
+    });
+    const ok = samePath(handle.agentWorkingDirectory, input.workingDirectory);
+    return { ok, ...(ok ? { worktreeId: record.worktreeId } : {}) };
+  };
 }

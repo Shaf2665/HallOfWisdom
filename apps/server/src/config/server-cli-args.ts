@@ -43,6 +43,7 @@ const serverCliOptionsSchema = z
     // Never settable via any client input — process-startup-only, exactly
     // like `--workspace-root`.
     dataDir: boundedNonBlankString(4096).optional(),
+    agentWorktreeRoot: boundedNonBlankString(4096).optional(),
   })
   .strict();
 
@@ -121,6 +122,7 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
         "enable-codex-trusted-local": { type: "boolean" },
         "comparison-root": { type: "string" },
         "data-dir": { type: "string" },
+        "agent-worktree-root": { type: "string" },
       },
       strict: true,
       allowPositionals: false,
@@ -147,6 +149,9 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
       ? {}
       : { comparisonRoot: values["comparison-root"] }),
     ...(values["data-dir"] === undefined ? {} : { dataDir: values["data-dir"] }),
+    ...(values["agent-worktree-root"] === undefined
+      ? {}
+      : { agentWorktreeRoot: values["agent-worktree-root"] }),
   };
 
   const result = serverCliOptionsSchema.safeParse(candidate);
