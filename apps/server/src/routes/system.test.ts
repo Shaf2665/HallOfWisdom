@@ -35,6 +35,7 @@ const SAMPLE_RECOVERY: RecoverySummary = {
     unsafe_path: 0,
   },
   orphanWorktreeCount: 0,
+  agentWorktree: undefined,
 };
 
 describe("GET /api/v1/system/storage", () => {

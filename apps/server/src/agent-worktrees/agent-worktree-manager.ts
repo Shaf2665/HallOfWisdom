@@ -35,6 +35,9 @@ export interface AgentWorktreeManagerOptions {
 export interface CreateAgentWorktreeInput {
   readonly hallTaskId: string;
   readonly hallAgentRunId: string;
+  /** Phase 16.5 — captured immutably on the created record; see `AgentWorktreeRecord.adapterId`'s doc comment. */
+  readonly adapterId?: string | undefined;
+  readonly agentId?: string | undefined;
   readonly sourceWorkingDirectory: string;
   readonly signal?: AbortSignal | undefined;
 }
@@ -118,6 +121,8 @@ export class AgentWorktreeManager {
       worktreeId,
       hallTaskId: input.hallTaskId,
       hallAgentRunId: input.hallAgentRunId,
+      ...(input.adapterId !== undefined ? { adapterId: input.adapterId } : {}),
+      ...(input.agentId !== undefined ? { agentId: input.agentId } : {}),
       canonicalSourceRepositoryRoot: sourceRepositoryRoot,
       sourceWorkingDirectoryRelativePath: relativeWorkingDirectory,
       baseCommit,

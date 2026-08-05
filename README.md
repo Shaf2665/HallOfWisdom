@@ -74,15 +74,15 @@ pnpm --filter @hall-of-wisdom/hall-core run dev -- `
 
 ## Current Development Phase
 
-Current Development Phase: **Phase 16.4 — Strict Isolated Codex Compatibility**
+Current Development Phase: **Phase 16.5 — Restart-Safe Worktree Reconciliation and Cleanup**
 
-Last Completed and Merged Phase: **Phase 16.3 — Provider-Neutral Isolated Execution Orchestration and Terminal Artifact Integration**
+Last Completed and Merged Phase: **Phase 16.4 — Strict Isolated Codex Compatibility Infrastructure**
 
-Phase 16.4 is under development on `phase-16-4-codex-strict-isolated-compatibility` and is pending review and merge. It does not run a real model-backed Codex task; that remains deferred to Phase 16.6.
+Phase 16.5 is under development on `phase-16-5-restart-safe-worktree-reconciliation` and is pending review and merge. It does not implement Phase 16.6 and does not run a real model-backed Codex task.
 
 ## Current Project Status
 
-Implemented through Phase 16.3:
+Implemented through Phase 16.4:
 
 - TypeScript pnpm monorepo
 - provider-neutral protocol and adapter SDK
@@ -105,8 +105,9 @@ Implemented through Phase 16.3:
 - immutable bounded execution artifacts
 - Phase 16.3 isolated orchestration
 - run-specific retry and cancellation fencing
+- Phase 16.4 strict isolated Codex compatibility infrastructure (still fail-closed pending Phase 16.6)
 
-Phase 16.4 adds strict isolated Codex infrastructure behind durable Hall-owned worktree configuration and a zero-model native sandbox probe. That helper probe is not exact proof that `codex sandbox -P :workspace` and real `codex exec --sandbox workspace-write` enforce identical effective policy, so strict Codex availability remains fail-closed as `unsupported` until the explicitly authorized Phase 16.6 verification. It does not add UI, routes, public protocol fields, automatic worktree cleanup, restart reconciliation for Phase 16 worktrees, or real Codex smoke testing.
+Phase 16.5 makes isolated worktree lifecycle management restart-safe. After an isolated run reaches an authoritative terminal outcome (completed, failed, or cancelled), Hall Core persists (or idempotently confirms) the immutable execution artifact first and only then requests worktree cleanup — cleanup failure is fail-soft: it never changes the task's outcome, never touches the artifact, never blocks a governed retry, and leaves the worktree recoverable on the next restart. On every durable startup, after task/event reconciliation, Hall Core also reconciles every persisted agent worktree: an interrupted `creating` worktree is marked with a stable code and safely cleaned; `creation_failed`/`cleanup_pending` worktrees resume cleanup; `cleanup_failed` worktrees get one retry per boot; a `ready` worktree whose run already reached a terminal event gets its execution artifact reconstructed (only from exact durable evidence — immutable adapter/agent identity captured at worktree creation, never a newer retry's mutable assignment) and is then cleaned; a worktree lacking that immutable identity (a legacy row) is retained and reported blocked, never guessed at; a `cleaned` worktree whose path unexpectedly reappears is reported, never deleted or transitioned backward; and unrecognized directories under the owned root are counted as orphans and left untouched. Cleanup only ever removes an exact, safety-validated `wt_<id>` worktree through `git worktree remove --force` — never a recursive filesystem delete, never an unknown directory. Phase 16.6 (explicitly authorized real Codex smoke verification and exact sandbox-equivalence proof) remains deferred and out of scope here.
 
 ## Features
 
@@ -137,6 +138,15 @@ TaskOrchestrator
   -> normalized events
   -> authoritative terminal task/event state
   -> immutable execution artifact
+  -> worktree cleanup request (fail-soft)
+
+Restart:
+  task/event reconciliation
+    -> agent-worktree reconciliation (missing-artifact recovery, interrupted-worktree
+       classification, safe cleanup resumption)
+    -> comparison reconciliation
+    -> bounded recovery summary
+    -> server starts
 ```
 
 ## Usage
@@ -183,12 +193,12 @@ Useful focused commands:
 
 ```powershell
 pnpm --filter @hall-of-wisdom/codex-adapter run test
-pnpm --filter @hall-of-wisdom/hall-core run test -- src/agent-execution src/agent-worktrees src/tasks src/composition
+pnpm --filter @hall-of-wisdom/hall-core run test -- src/agent-worktrees src/agent-execution src/execution-artifacts src/recovery src/tasks src/composition
 ```
 
 ## Security Limitations
 
-Hall binds locally to `127.0.0.1` and is still a prototype. It has no production authentication layer. SQLite durability is optional. Phase 16 worktrees are retained after terminal execution; automatic cleanup and restart reconciliation are deferred to Phase 16.5. Strict Codex remains unsupported until Hall can prove exact equivalence for the real `codex exec --sandbox workspace-write` policy in Phase 16.6; the zero-model helper probe alone is necessary evidence but not sufficient.
+Hall binds locally to `127.0.0.1` and is still a prototype. It has no production authentication layer. SQLite durability is optional. Phase 16 worktrees are now cleaned up automatically — after artifact persistence at runtime, and via restart reconciliation for anything a crash interrupted — but cleanup is deliberately conservative: it only ever removes an exact, safety-validated worktree through `git worktree remove --force`, never a recursive filesystem delete, and it retains (rather than deletes) any worktree whose identity, artifact match, or on-disk safety cannot be proven. Strict Codex remains unsupported until Hall can prove exact equivalence for the real `codex exec --sandbox workspace-write` policy in Phase 16.6; the zero-model helper probe alone is necessary evidence but not sufficient.
 
 Trusted-local Codex mode is separate and explicitly opt-in. It bypasses Codex's sandbox and approval enforcement and runs with the Hall Core process user's filesystem permissions. Do not confuse it with strict isolated mode.
 
@@ -196,15 +206,14 @@ Hall does not claim generic secret detection. It prevents unsafe storage categor
 
 ## Phase Roadmap
 
-Completed major phases include the monorepo foundation, adapter SDK, Mock Agent, Hall Runner, Hall Core, Hall Web, Claude Code and Codex adapters, routing, comparison worktrees, durable SQLite recovery, CEO planning, autonomous CEO plan execution, Hall-owned agent worktrees, bounded execution artifacts, and isolated orchestration.
+Completed major phases include the monorepo foundation, adapter SDK, Mock Agent, Hall Runner, Hall Core, Hall Web, Claude Code and Codex adapters, routing, comparison worktrees, durable SQLite recovery, CEO planning, autonomous CEO plan execution, Hall-owned agent worktrees, bounded execution artifacts, isolated orchestration, and strict isolated Codex compatibility infrastructure.
 
 Current:
 
-- Phase 16.4 — Strict Isolated Codex Compatibility
+- Phase 16.5 — Restart-Safe Worktree Reconciliation and Cleanup
 
 Upcoming:
 
-- Phase 16.5 — restart-safe cleanup and reconciliation for Phase 16 worktrees and missing artifacts
-- Phase 16.6 — explicitly authorized real Codex smoke verification
+- Phase 16.6 — explicitly authorized real Codex smoke verification and exact sandbox-equivalence proof
 
 Deferred future work includes additional coding-agent adapters, production authentication, richer policy controls, public artifact routes/UI, merge workflows, and deployment integrations.

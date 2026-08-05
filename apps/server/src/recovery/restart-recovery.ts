@@ -10,6 +10,10 @@ import type { ComparisonStorePort } from "../comparisons/comparison-store-port.j
 import type { ComparisonInternalPathsPort } from "../comparisons/comparison-internal-paths-port.js";
 import type { NormalizedEventStorePort } from "../events/event-store-port.js";
 import type { GitWorktreeManager } from "../comparisons/git-worktree-manager.js";
+import type { AgentWorktreeStorePort } from "../agent-worktrees/agent-worktree-store-port.js";
+import type { AgentWorktreeManager } from "../agent-worktrees/agent-worktree-manager.js";
+import type { AgentExecutionArtifactStorePort } from "../execution-artifacts/agent-execution-artifact-store-port.js";
+import type { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
 import { reconcileTasks } from "./reconcile-tasks.js";
 import { reconcileComparisons } from "./reconcile-comparisons.js";
 import {
@@ -17,6 +21,10 @@ import {
   scanOrphanWorktrees,
   type WorktreeHealth,
 } from "./classify-comparison-worktrees.js";
+import {
+  reconcileAgentWorktrees,
+  type AgentWorktreeReconciliationSummary,
+} from "./reconcile-agent-worktrees.js";
 
 export type PreviousShutdownKind = "clean" | "unclean" | "first_start";
 
@@ -35,6 +43,8 @@ export interface RecoverySummary {
   readonly interruptedCandidateRunCount: number;
   readonly worktreeHealthCounts: Readonly<Record<WorktreeHealth, number>>;
   readonly orphanWorktreeCount: number;
+  /** Phase 16.5 — `undefined` when isolated agent-worktree execution was not composed this boot. */
+  readonly agentWorktree: AgentWorktreeReconciliationSummary | undefined;
 }
 
 export interface RestartRecoveryComparisonInput {
@@ -42,6 +52,15 @@ export interface RestartRecoveryComparisonInput {
   readonly comparisonEventStore: NormalizedEventStorePort;
   readonly comparisonInternalPaths: ComparisonInternalPathsPort;
   readonly gitWorktreeManager: GitWorktreeManager;
+}
+
+/** Phase 16.5 — present only when isolated Codex worktree execution is actually composed (durable storage + an explicit Hall-owned worktree root). */
+export interface RestartRecoveryAgentWorktreeInput {
+  readonly agentWorktreeStore: AgentWorktreeStorePort;
+  readonly agentWorktreeManager: AgentWorktreeManager;
+  readonly agentWorktreeRoot: string;
+  readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
+  readonly agentExecutionArtifactTerminalizer: AgentExecutionArtifactTerminalizer;
 }
 
 export interface RestartRecoveryInput {
@@ -54,6 +73,8 @@ export interface RestartRecoveryInput {
   readonly taskEventStore: NormalizedEventStorePort;
   /** `undefined` when this Hall Core instance was not configured with comparisons enabled (no `--comparison-root`) — comparison reconciliation, worktree classification, and orphan scanning are all skipped entirely. */
   readonly comparison: RestartRecoveryComparisonInput | undefined;
+  /** Omitted (or `undefined`) when isolated agent-worktree execution is not composed this boot — agent-worktree reconciliation is skipped entirely. Optional, unlike `comparison`, so every existing caller that predates Phase 16.5 keeps compiling unchanged. */
+  readonly agentWorktree?: RestartRecoveryAgentWorktreeInput | undefined;
 }
 
 export interface RestartRecoveryResult {
@@ -119,6 +140,25 @@ export async function runRestartRecovery(
 
   const taskSummary = reconcileTasks(input.taskStore, input.taskEventStore);
 
+  // Phase 16.5 — deliberately runs AFTER `reconcileTasks` above and BEFORE
+  // comparison reconciliation: agent-worktree reconciliation depends on
+  // `reconcileTasks` having already turned any genuinely mid-flight run's
+  // event stream terminal (a synthetic `run.failed`), and is otherwise
+  // independent of comparisons. See `reconcile-agent-worktrees.ts`'s doc
+  // comment.
+  const agentWorktreeSummary =
+    input.agentWorktree !== undefined
+      ? await reconcileAgentWorktrees({
+          agentWorktreeStore: input.agentWorktree.agentWorktreeStore,
+          agentWorktreeManager: input.agentWorktree.agentWorktreeManager,
+          agentWorktreeRoot: input.agentWorktree.agentWorktreeRoot,
+          taskEventStore: input.taskEventStore,
+          agentExecutionArtifactStore: input.agentWorktree.agentExecutionArtifactStore,
+          agentExecutionArtifactTerminalizer:
+            input.agentWorktree.agentExecutionArtifactTerminalizer,
+        })
+      : undefined;
+
   let comparisonSummary = {
     comparisonsScanned: 0,
     interruptedPreparationsMarkedFailed: [] as readonly string[],
@@ -179,6 +219,7 @@ export async function runRestartRecovery(
     interruptedCandidateRunCount: comparisonSummary.interruptedCandidateRunsMarkedFailed.length,
     worktreeHealthCounts,
     orphanWorktreeCount,
+    agentWorktree: agentWorktreeSummary,
   };
 
   recordRecoverySummary(input.db, input.bootId, JSON.stringify(summary));

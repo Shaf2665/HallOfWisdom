@@ -1081,6 +1081,8 @@ function readyWorktreeRecord(input: {
     worktreeId: input.worktreeId,
     hallTaskId: input.hallTaskId,
     hallAgentRunId: input.hallAgentRunId,
+    adapterId: undefined,
+    agentId: undefined,
     canonicalSourceRepositoryRoot: fs.realpathSync.native(input.source),
     sourceWorkingDirectoryRelativePath: ".",
     baseCommit: BASE_COMMIT,

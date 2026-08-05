@@ -113,6 +113,22 @@ export function runAgentWorktreeStoreContractTests(
       expect(failed.safeFailureSummary?.length).toBeLessThanOrEqual(501);
     });
 
+    it("persists immutable adapter/agent identity captured at creation, and leaves it undefined when omitted", () => {
+      const store = buildStore();
+      const withIdentity = store.createCreating({
+        ...recordInput("wt-1", "run-1", NOW),
+        adapterId: "hall.codex",
+        agentId: "agent-1",
+      });
+      expect(withIdentity.adapterId).toBe("hall.codex");
+      expect(withIdentity.agentId).toBe("agent-1");
+      expect(store.get("wt-1").adapterId).toBe("hall.codex");
+
+      const withoutIdentity = store.createCreating(recordInput("wt-2", "run-2", NOW));
+      expect(withoutIdentity.adapterId).toBeUndefined();
+      expect(withoutIdentity.agentId).toBeUndefined();
+    });
+
     it("findActiveByAgentRunId returns only active records", () => {
       const store = buildStore();
       store.createCreating(recordInput("wt-1", "run-1", NOW));
