@@ -53,13 +53,24 @@ export interface ConfigurationFingerprint {
  * root` flag, or a genuinely different data directory) must never be
  * treated as "isolation is now disabled" rather than a configuration
  * error — that would leave real Git worktrees permanently unreconciled
- * without the operator ever deciding that. The same reasoning applies to a
- * database that never got as far as recording a root at all but already
- * holds `agent_worktrees` rows (an interrupted first enablement, or a
- * database written by code that predates this fingerprint field): an
- * omitted root here is rejected too, never silently treated as "isolation
- * was never enabled" — that would compose no agent-worktree manager and
- * skip Phase 16 reconciliation for rows that still durably exist.
+ * without the operator ever deciding that.
+ *
+ * The same reasoning applies whenever the database already holds
+ * `agent_worktrees` rows but has never durably recorded a root — an
+ * interrupted first enablement, a database written by code that predates
+ * this fingerprint field, or (the fully missing case) a database where
+ * `workspaceRoot` itself was never recorded either yet, so it would
+ * otherwise take the brand-new-database bootstrap path below without ever
+ * being checked. This is why the root-omission-with-existing-rows check
+ * below runs unconditionally, before either the brand-new-database or the
+ * existing-database branch, rather than being nested inside the
+ * existing-database branch alone: an omitted root here is rejected
+ * regardless of whether `workspaceRoot` happens to already be recorded,
+ * never silently treated as "isolation was never enabled" — that would
+ * compose no agent-worktree manager and skip Phase 16 reconciliation for
+ * rows that still durably exist. Never derives a root from those rows'
+ * stored paths (see `assertAgentWorktreeRootIdentity`'s own doc comment on
+ * why this module never guesses).
  *
  * All validation for one call happens before any write, and every write
  * this call performs happens inside one outer transaction (see
@@ -74,12 +85,28 @@ export function checkOrRecordConfigurationFingerprint(
   const storedComparisonRoot = getValue(db, COMPARISON_ROOT_KEY);
   const storedAgentWorktreeRoot = getValue(db, AGENT_WORKTREE_ROOT_KEY);
 
+  // Runs first, unconditionally — see this function's doc comment on "the
+  // fully missing fingerprint case." Independent of whether workspaceRoot
+  // (or anything else) has ever been recorded: the only things that
+  // matter are whether a root was ever durably recorded, whether one was
+  // supplied this boot, and whether rows already exist that would be
+  // silently orphaned by accepting the omission.
+  if (
+    storedAgentWorktreeRoot === undefined &&
+    fingerprint.agentWorktreeRoot === undefined &&
+    hasAnyAgentWorktreeRows(db)
+  ) {
+    throw new ConfigurationFingerprintMismatchError("agentWorktreeRoot");
+  }
+
   if (storedWorkspaceRoot === undefined) {
-    // Brand-new database: nothing recorded yet for any field. A freshly
-    // created database cannot yet hold any `agent_worktrees` rows, but the
-    // identity check still runs unconditionally so there is exactly one
-    // code path that ever bootstraps `agentWorktreeRoot` — never two
-    // subtly different ones.
+    // Brand-new database: nothing recorded yet for any field. The
+    // omitted-root-with-existing-rows case was already rejected above if
+    // applicable; a freshly created database with no rows at all (the
+    // ordinary case) or a supplied root both reach here safely. The
+    // identity check still runs unconditionally when a root IS supplied,
+    // so there is exactly one code path that ever bootstraps
+    // `agentWorktreeRoot` — never two subtly different ones.
     if (fingerprint.agentWorktreeRoot !== undefined) {
       assertAgentWorktreeRootIdentity(db, fingerprint.agentWorktreeRoot);
     }
@@ -130,17 +157,11 @@ export function checkOrRecordConfigurationFingerprint(
     // root blindly: prove every persisted worktree's reconstructed
     // `wt_<worktreeId>` path actually belongs to it first.
     assertAgentWorktreeRootIdentity(db, fingerprint.agentWorktreeRoot);
-  } else if (hasAnyAgentWorktreeRows(db)) {
-    // Not recorded, and none supplied THIS boot either — but the database
-    // already holds `agent_worktrees` rows from before a root was ever
-    // durably recorded. Accepting this startup would compose no
-    // agent-worktree manager and silently skip Phase 16 reconciliation for
-    // those rows forever. Never derives a root from them (see
-    // `assertAgentWorktreeRootIdentity`'s own doc comment on why this
-    // module never guesses); the operator must supply the exact proven
-    // root explicitly for this database to become usable again.
-    throw new ConfigurationFingerprintMismatchError("agentWorktreeRoot");
   }
+  // The remaining case — storedAgentWorktreeRoot undefined AND
+  // fingerprint.agentWorktreeRoot undefined — was already proven safe (no
+  // existing rows) by the unconditional check at the top of this
+  // function; nothing further to validate here.
 
   // Writes happen only after every check above has passed, and both keys
   // in this call are written inside one outer transaction — a

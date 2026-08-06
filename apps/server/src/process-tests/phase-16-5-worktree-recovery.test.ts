@@ -15,6 +15,7 @@ import {
   waitUntil,
 } from "./process-test-support.js";
 import { HallDatabase } from "../persistence/database.js";
+import { runMigrations } from "../persistence/migration-runner.js";
 import { AgentWorktreeManager } from "../agent-worktrees/agent-worktree-manager.js";
 import { SqliteAgentWorktreeStore } from "../agent-worktrees/sqlite-agent-worktree-store.js";
 import {
@@ -379,6 +380,122 @@ describe("Phase 16.5 legacy database with worktree rows rejects an omitted agent
     const afterRecovery = inspectLegacyRootState(dataDir, legacyWorktreeId);
     expect(afterRecovery.agentWorktreeRootRecorded).toBe(agentWorktreeRoot);
   }, 60000);
+});
+
+/**
+ * Post-merge Phase 16.5 hardening (final review correction) — the
+ * narrower sibling of the scenario above: a database that never had ANY
+ * fingerprint recorded at all (not even `workspaceRoot`) but already
+ * holds an `agent_worktrees` row, started with the root omitted, must be
+ * refused the same way. This exercises the brand-new-database bootstrap
+ * branch of `checkOrRecordConfigurationFingerprint` — a genuinely
+ * different code path than the scenario above, which always exercises
+ * the existing-database comparison branch (its boot 1 already recorded
+ * `workspaceRoot` before the legacy row is seeded). A single boot attempt
+ * only, deliberately, so this does not duplicate that scenario's full
+ * three-boot flow.
+ */
+describe("Phase 16.5 completely fresh database with worktree rows rejects an omitted agent-worktree root", () => {
+  beforeAll(() => {
+    requireBuiltDist();
+  });
+
+  let tempRoot: string;
+  const spawned: ChildProcess[] = [];
+
+  afterEach(async () => {
+    for (const child of spawned.splice(0)) {
+      await killAndWait(child);
+    }
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it("refuses to start when no fingerprint of any kind was ever recorded but a worktree row exists and the root is omitted", async () => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hall-phase16-5-fresh-legacy-root-"));
+    const workspaceRoot = path.join(tempRoot, "workspace");
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    initGitRepo(workspaceRoot);
+
+    const dataDir = path.join(tempRoot, "data");
+    const agentWorktreeRootRaw = path.join(tempRoot, "agent-worktrees");
+    fs.mkdirSync(agentWorktreeRootRaw, { recursive: true });
+    const agentWorktreeRoot = fs.realpathSync.native(agentWorktreeRootRaw);
+    const port = 47182;
+
+    const argsWithoutRoot = [
+      "--workspace-root",
+      workspaceRoot,
+      "--data-dir",
+      dataDir,
+      "--port",
+      String(port),
+      "--mock-scenario",
+      "success",
+    ];
+
+    // Seed the database directly (migrations only — no server has ever
+    // booted against this data directory, so no fingerprint of any kind
+    // has ever been recorded) with a real worktree row.
+    const legacyWorktreeId = "fresh-legacy-worktree-1";
+    const legacyWorktreePath = path.join(agentWorktreeRoot, `wt_${legacyWorktreeId}`);
+    fs.mkdirSync(dataDir, { recursive: true });
+    {
+      const db = HallDatabase.open({ dataDir, busyTimeoutMs: 5000 });
+      try {
+        runMigrations(db);
+        db.prepare(
+          `INSERT INTO agent_worktrees (
+            worktree_id, hall_task_id, hall_agent_run_id, source_repository_root,
+            source_working_directory_relative_path, base_commit, worktree_path,
+            status, created_at, revision
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, 0)`,
+        ).run(
+          legacyWorktreeId,
+          "legacy-task-1",
+          "legacy-run-1",
+          fs.realpathSync.native(workspaceRoot),
+          ".",
+          "0".repeat(40),
+          legacyWorktreePath,
+          "2026-08-06T00:00:00.000Z",
+        );
+      } finally {
+        db.close();
+      }
+    }
+
+    const attempt = await attemptStart(argsWithoutRoot, port, 8000);
+    spawned.push(attempt.child);
+    expect(attempt.started).toBe(false);
+    const exitCode = await waitForNonZeroExit(attempt.child, 10000);
+    expect(exitCode).toBe(2);
+
+    await expect(fetch(`http://127.0.0.1:${String(port)}/api/v1/health`)).rejects.toBeTruthy();
+
+    const db = HallDatabase.open({ dataDir, busyTimeoutMs: 5000 });
+    try {
+      const bootRow = db.prepare("SELECT COUNT(*) AS count FROM boots").get() as {
+        count: number;
+      };
+      expect(bootRow.count).toBe(0);
+      const rootRow = db
+        .prepare(
+          "SELECT value FROM server_metadata WHERE key = 'configFingerprint.agentWorktreeRoot'",
+        )
+        .get();
+      expect(rootRow).toBeUndefined();
+      const workspaceRootRow = db
+        .prepare("SELECT value FROM server_metadata WHERE key = 'configFingerprint.workspaceRoot'")
+        .get();
+      expect(workspaceRootRow).toBeUndefined();
+      const worktreeRow = db
+        .prepare("SELECT status FROM agent_worktrees WHERE worktree_id = ?")
+        .get(legacyWorktreeId) as { status: string } | undefined;
+      expect(worktreeRow?.status).toBe("ready");
+    } finally {
+      db.close();
+    }
+  }, 30000);
 });
 
 function inspectLegacyRootState(

@@ -466,4 +466,84 @@ describe("checkOrRecordConfigurationFingerprint", () => {
       expect(rows).toEqual([]);
     });
   });
+
+  describe("fully missing fingerprint case (post-merge Phase 16.5 hardening — final review correction)", () => {
+    it("rejects an omitted root on a completely fresh database (no fingerprint keys recorded at all) that already has agent_worktrees rows", () => {
+      const db = openMigratedDatabase();
+      // No prior checkOrRecordConfigurationFingerprint call whatsoever —
+      // not even workspaceRoot has ever been recorded. Simulates a
+      // database where migrations ran and a worktree row was inserted
+      // (e.g. by an older code path) before the fingerprint was ever
+      // durably recorded even once.
+      insertAgentWorktreeRow(db, {
+        worktreeId: "wt-1",
+        worktreePath: "C:\\hall-owned\\wt_wt-1",
+      });
+      expect(() => {
+        checkOrRecordConfigurationFingerprint(db, {
+          workspaceRoot: "/ws",
+          comparisonRoot: undefined,
+          agentWorktreeRoot: undefined,
+        });
+      }).toThrow(ConfigurationFingerprintMismatchError);
+    });
+
+    it("does not write any fingerprint key — including workspaceRoot — on that rejection", () => {
+      const db = openMigratedDatabase();
+      insertAgentWorktreeRow(db, {
+        worktreeId: "wt-1",
+        worktreePath: "C:\\hall-owned\\wt_wt-1",
+      });
+      expect(() => {
+        checkOrRecordConfigurationFingerprint(db, {
+          workspaceRoot: "/ws",
+          comparisonRoot: undefined,
+          agentWorktreeRoot: undefined,
+        });
+      }).toThrow(ConfigurationFingerprintMismatchError);
+
+      const rows = db
+        .prepare("SELECT key FROM server_metadata WHERE key LIKE 'configFingerprint.%'")
+        .all() as { key: string }[];
+      expect(rows).toEqual([]);
+    });
+
+    it("remains recoverable — a later call with the exact proven root still succeeds", () => {
+      const db = openMigratedDatabase();
+      insertAgentWorktreeRow(db, {
+        worktreeId: "wt-1",
+        worktreePath: "C:\\hall-owned\\wt_wt-1",
+      });
+      expect(() => {
+        checkOrRecordConfigurationFingerprint(db, {
+          workspaceRoot: "/ws",
+          comparisonRoot: undefined,
+          agentWorktreeRoot: undefined,
+        });
+      }).toThrow(ConfigurationFingerprintMismatchError);
+
+      expect(() => {
+        checkOrRecordConfigurationFingerprint(db, {
+          workspaceRoot: "/ws",
+          comparisonRoot: undefined,
+          agentWorktreeRoot: "C:\\hall-owned",
+        });
+      }).not.toThrow();
+    });
+
+    it("a completely new, empty database (no rows at all) with an omitted root still succeeds", () => {
+      const db = openMigratedDatabase();
+      expect(() => {
+        checkOrRecordConfigurationFingerprint(db, {
+          workspaceRoot: "/ws",
+          comparisonRoot: undefined,
+          agentWorktreeRoot: undefined,
+        });
+      }).not.toThrow();
+      const rows = db
+        .prepare("SELECT key FROM server_metadata WHERE key LIKE 'configFingerprint.%'")
+        .all() as { key: string }[];
+      expect(rows.map((row) => row.key).sort()).toEqual(["configFingerprint.workspaceRoot"]);
+    });
+  });
 });

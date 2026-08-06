@@ -444,6 +444,27 @@ root") that seeds a real row via the real built binary, confirms a second boot w
 refused (no health response, no new boot row, the row itself untouched), then confirms a third boot
 with the correct root recovers cleanly.
 
+**The fully missing fingerprint case (final review correction).** The check above was originally
+nested inside the existing-database comparison branch alone, guarded by `storedWorkspaceRoot !==
+undefined`. That left one narrower gap: a database where **no** fingerprint key had ever been
+recorded — not even `workspaceRoot` — but `agent_worktrees` rows already existed (an out-of-band
+insert before the fingerprint mechanism ever ran once) would take the brand-new-database bootstrap
+branch instead, which never checked for existing rows at all, and would boot successfully with the
+root omitted. The `hasAnyAgentWorktreeRows` check now runs once, unconditionally, before either
+branch — it depends only on whether a root was ever recorded and whether one was supplied this boot,
+never on whether `workspaceRoot` happens to already be recorded — so both the "recorded, then
+omitted," the "never recorded, existing database," and the "never recorded anything at all" cases all
+fail closed the same way, and no fingerprint write (including `workspaceRoot` itself) survives a
+rejected call. A completely empty database with no worktree rows at all still bootstraps normally
+with an omitted root, exactly as before. Covered by four new tests in
+`server-metadata-repository.test.ts` (rejects the fully-missing case; writes nothing on rejection;
+remains recoverable with the exact proven root afterward; a truly empty database still succeeds) and
+a narrow real-process test (`phase-16-5-worktree-recovery.test.ts`, "completely fresh database ...
+rejects an omitted agent-worktree root") that seeds a worktree row via direct migration + SQL insert
+with no server ever having booted against that data directory first, then confirms a single boot
+attempt is refused (exit code `2`, no boot record, no fingerprint key of any kind recorded) —
+deliberately a single boot attempt, not a duplicate of the three-boot scenario above.
+
 **Atomic fingerprint writes (post-merge Phase 16.5 hardening).** Before this hardening pass, each of
 `workspaceRoot`/`comparisonRoot`/`agentWorktreeRoot`'s conditional writes went through its own
 independent `withTransaction` call — validation for one logical startup call happened up front, but
@@ -474,23 +495,72 @@ this with one strict parser, shared by all three call sites through a single pri
 `git worktree list --porcelain -z` form: every attribute line is NUL-terminated instead of
 newline-terminated, and each worktree record is terminated by one additional NUL beyond its last
 attribute — a structure that survives paths containing spaces, newlines, or non-ASCII characters
-without any escaping ambiguity (confirmed directly against a real Git 2.54 invocation). The parser
-fails closed with a bounded `GIT_WORKTREE_LIST_MALFORMED` code — never a silently empty or partial
-list — on any output that does not exactly match that structure: a record whose first attribute
-isn't a non-empty, absolute `worktree ` path; more than one `worktree ` attribute in a single record
-(what a corrupted or single-NUL-instead-of-double record separator would look like once parsed); the
-same worktree path registered in more than one record; or output that ends mid-record instead of on a
-record boundary. This applies even when Git's own exit code is `0` — a bounded failure is reported
-exactly like a hard Git failure or truncated output, never treated as "zero registrations." Genuinely
-empty output (a database with isolation configured but nothing ever created yet) still parses to an
-empty list, since that is not itself malformed. Never exposes raw Git output or the parsed paths
-themselves in its own error messages — only the bounded failure code. Covered directly by
-`worktree-list-parser.test.ts` (pure parser tests: valid single/multiple records, spaces, non-ASCII,
-empty output, missing/duplicate `worktree` fields, relative paths, malformed separators, incomplete
-records) and by manager-level tests in `agent-worktree-manager.test.ts` (real multi-worktree Git
-output including spaces and non-ASCII paths, truncated output, exit-code-zero malformed output) and
-`reconcile-agent-worktrees.test.ts` (malformed output increments
-`registrationInspectionFailureCount` rather than `orphanWorktreeRegistrationCount` staying at zero).
+without any escaping ambiguity (confirmed directly against a real Git 2.54 invocation). Never exposes
+raw Git output or the parsed paths themselves in its own error messages — only the bounded failure
+code.
+
+_Empty output (final review correction)._ The parser originally treated zero-byte stdout as a
+trivially valid empty registration list. That was wrong: a successful `git worktree list --porcelain
+-z` invocation against any repository — even a fresh one — always reports at least one record (the
+primary checkout, or a bare record for a bare repository), so genuinely empty stdout with a `0` exit
+code is never legitimate proof that nothing is registered; it can only mean the parser was invoked
+against something other than real `worktree list -z` output. Empty stdout now fails closed with the
+same bounded `GIT_WORKTREE_LIST_MALFORMED` code as every other malformed shape, both at the direct
+parser level and everywhere that flows through it: `AgentWorktreeManager.cleanupWorktree` no longer
+risks reading empty output as "not registered, therefore already cleaned" for a worktree whose path
+is also missing — the registration check now throws before that comparison is ever reached, so the
+record is left exactly where cleanup left it, never marked `cleaned`; and restart's orphan/
+reappearance scan (`inspectGitRegistrations`) counts it as a bounded inspection failure through the
+same catch path it already uses for a hard Git failure or truncated output, never a silent zero.
+
+_Complete record validation (final review correction)._ The parser originally validated only a
+record's first (`worktree`) attribute and rejected duplicate registered paths — every other attribute
+was accepted unconditionally, including unknown labels, duplicate `HEAD`/`branch`/`detached`
+attributes, and structurally impossible combinations (a `bare` record also carrying `HEAD`, or a
+non-bare record with neither `branch` nor `detached`). The parser now validates a record's complete
+attribute set against the documented `git-worktree(1)` porcelain vocabulary — `HEAD <object-id>`,
+`branch <ref>`, `bare`, `detached`, `locked [<reason>]`, `prunable [<reason>]` — and fails closed on
+anything outside it: an attribute label that isn't one of those six is rejected rather than silently
+skipped, so a future Git format addition Hall doesn't yet understand fails closed instead of silently
+passing through unvalidated; no label may appear twice; `HEAD` and `branch` require a non-empty
+value (`HEAD`'s value must additionally be a valid 40-character SHA-1 or 64-character SHA-256 hex
+object id — never hard-coded to only one length); `bare`/`detached` must carry no value; a record must
+be either a bare record (`worktree` + `bare` and nothing else — Hall has no defined semantics for
+`bare` combined with anything else, including `locked`/`prunable`, since real Git never emits that
+combination for a primary bare repository) or a non-bare record with `HEAD` and exactly one of
+`branch`/`detached` (`locked`/`prunable` optional on top, with any reason text — including one
+containing spaces, newlines, or non-ASCII characters — preserved and accepted without alteration).
+Duplicate registered paths are compared with the same platform-correct, case-aware equality
+(`samePath`) every other path comparison in this package uses, not raw string equality, so two
+records that differ only by case on a case-insensitive filesystem (Windows, macOS) are still caught as
+duplicates. This applies even when Git's own exit code is `0` — a bounded failure is reported exactly
+like a hard Git failure or truncated output, never treated as "zero registrations." Covered directly
+by `worktree-list-parser.test.ts` (pure parser tests, organized by valid platform-native/POSIX/
+Windows-specific records and malformed byte-layout/complete-record-validation cases: branch and
+detached worktrees, bare repositories, locked/prunable with and without a reason, SHA-1 and SHA-256
+HEAD values, every duplicate-label and missing/conflicting-state combination, unknown attributes,
+empty output, and Windows-case-variant duplicate paths gated to `win32`) and by manager-level tests in
+`agent-worktree-manager.test.ts` (real multi-worktree Git output including spaces and non-ASCII
+paths, truncated output, exit-code-zero malformed output, exit-code-zero empty output, and cleanup's
+missing-path-plus-empty-output case) and `reconcile-agent-worktrees.test.ts` (malformed and empty
+output both increment `registrationInspectionFailureCount` rather than `orphanWorktreeRegistrationCount`
+staying at zero).
+
+_Cross-platform test coverage (final review correction)._ The parser's own tests previously
+hard-coded Windows-style paths (`C:\repo`) in every "valid" case, which would fail on POSIX because
+`path.isAbsolute`/`path.resolve` are the current platform's `node:path` — a Windows-style backslash
+path is not absolute on Linux or macOS. Generic "valid record" tests now build paths with
+`path.resolve(path.sep, ...)`, which resolves to a real absolute path on whichever platform the test
+actually runs on (`/repo` on POSIX, `D:\repo` — or whichever drive — on Windows), so the same test
+body exercises real platform-native path validation everywhere. `it.runIf(process.platform ===
+"win32")` and `it.runIf(process.platform !== "win32")` gate the handful of cases that are genuinely
+platform-specific by construction: a literal drive-letter path, and the Windows-case-insensitive
+duplicate-path check (POSIX filesystems are case-sensitive by default, so the same input would not be
+a duplicate there). This correction was scoped to the parser and the parser-adjacent manager tests
+added by this hotfix; it deliberately does not touch the pre-existing `agentWorktreeRoot` fingerprint
+tests above, which compare fingerprint strings directly (`assertAgentWorktreeRootIdentity`/
+`hasAnyAgentWorktreeRows` never call `path.isAbsolute`) and predate this hotfix's own work — a
+separate, pre-existing platform limitation of the base Phase 16.5 merge, out of scope here.
 
 Phase 16.6 (explicitly authorized real Codex smoke verification and exact sandbox-equivalence
 proof) is unaffected by and unrelated to this phase, and has not been started.
@@ -1042,8 +1112,8 @@ wait out the real 20-second ownership-staleness default — Phase 13.2 added the
 alongside the original three). See "Testing," item 4, above for what each of those four tests in
 `src/process-tests/` proves.
 
-**(Phase 16.5)** `phase-16-5-worktree-recovery.test.ts` adds two real-process scenarios (six total
-across the directory, up from the original four), both for restart-safe worktree reconciliation,
+**(Phase 16.5)** `phase-16-5-worktree-recovery.test.ts` adds three real-process scenarios (seven
+total across the directory, up from the original four), all for restart-safe worktree reconciliation,
 driven entirely through the actual
 `dist/server.js` binary and a real, disposable Git repository — no model-backed provider task is
 ever run. It uses `spawnRealServerWithStdin`/`gracefulStop` (the documented stdin `"SHUTDOWN\n"`
@@ -1069,6 +1139,16 @@ directly via SQL; a second boot attempt, still omitting the root, is proven refu
 `2`, and direct database inspection afterward confirms the boot count is still `1` and the seeded row
 is byte-for-byte untouched; a third boot supplying the exact proven root then succeeds and durably
 records it.
+
+**(final review correction)** The third scenario, a separate describe block in the same file, proves
+the narrower "fully missing fingerprint" rejection (see "The fully missing fingerprint case" above):
+a data directory is seeded directly — migrations run and a real `agent_worktrees` row inserted via SQL
+— with no server ever having booted against it, so no fingerprint of any kind (not even
+`workspaceRoot`) has ever been recorded. A single boot attempt with the root omitted is proven refused
+the same way (exit code `2`, no health response), and direct inspection afterward confirms zero boot
+rows, no `agentWorktreeRoot` or `workspaceRoot` fingerprint key recorded, and the seeded row untouched.
+Deliberately a single boot attempt rather than the second scenario's three-boot flow, since its only
+purpose is to prove the brand-new-database bootstrap branch is now covered too.
 
 ## Security review performed this phase
 

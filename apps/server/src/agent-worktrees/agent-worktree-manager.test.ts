@@ -691,11 +691,12 @@ describe("listRegisteredWorktreePaths (post-merge Phase 16.5 hardening)", () => 
   });
 
   it("fails closed on truncated Git worktree-list output rather than returning a partial list", async () => {
+    const sourceRepositoryRoot = path.resolve(path.sep, "repo");
     const runner = new ScriptedGitRunner([
       {
         exitCode: 0,
         signal: null,
-        stdout: "worktree C:\\repo\0",
+        stdout: `worktree ${sourceRepositoryRoot}\0`,
         stderr: "",
         stdoutTruncated: true,
         timedOut: false,
@@ -707,7 +708,7 @@ describe("listRegisteredWorktreePaths (post-merge Phase 16.5 hardening)", () => 
       gitRunner: runner,
       ownedRoot: makeTempDir("hall owned worktrees "),
     });
-    await expect(manager.listRegisteredWorktreePaths("C:\\repo")).rejects.toMatchObject({
+    await expect(manager.listRegisteredWorktreePaths(sourceRepositoryRoot)).rejects.toMatchObject({
       safeFailureCode: "GIT_WORKTREE_LIST_TRUNCATED",
     });
   });
@@ -719,9 +720,62 @@ describe("listRegisteredWorktreePaths (post-merge Phase 16.5 hardening)", () => 
       gitRunner: runner,
       ownedRoot: makeTempDir("hall owned worktrees "),
     });
-    await expect(manager.listRegisteredWorktreePaths("C:\\repo")).rejects.toMatchObject({
+    await expect(
+      manager.listRegisteredWorktreePaths(path.resolve(path.sep, "repo")),
+    ).rejects.toMatchObject({
       safeFailureCode: "GIT_WORKTREE_LIST_MALFORMED",
     });
+  });
+
+  it("fails closed on exit-code-zero EMPTY output — never interpreted as proof that no registrations exist", async () => {
+    const runner = new ScriptedGitRunner([ok("")]);
+    const manager = new AgentWorktreeManager({
+      store: new InMemoryAgentWorktreeStore(),
+      gitRunner: runner,
+      ownedRoot: makeTempDir("hall owned worktrees "),
+    });
+    await expect(
+      manager.listRegisteredWorktreePaths(path.resolve(path.sep, "repo")),
+    ).rejects.toMatchObject({
+      safeFailureCode: "GIT_WORKTREE_LIST_MALFORMED",
+    });
+  });
+});
+
+describe("cleanupWorktree (post-merge Phase 16.5 hardening — empty registration output)", () => {
+  it("does not mark a missing worktree cleaned when Git registration inspection returns empty malformed output", async () => {
+    const ownedRoot = makeTempDir("hall owned worktrees ");
+    const sourceRepo = makeTempDir("fake source repo ");
+    const missingWorktreePath = path.join(ownedRoot, "wt_missing-empty-output");
+    // Deliberately never created on disk — `pathExists` must resolve to
+    // `false`, the exact precondition the original defect required.
+    const store = new InMemoryAgentWorktreeStore();
+    const creating = store.createCreating({
+      worktreeId: "missing-empty-output",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: sourceRepo,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: missingWorktreePath,
+      createdAt: BASE_NOW,
+    });
+    store.markReady({
+      worktreeId: "missing-empty-output",
+      expectedRevision: creating.revision,
+      readyAt: BASE_NOW,
+    });
+    const runner = new ScriptedGitRunner([ok("")]);
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    await expect(manager.cleanupWorktree("missing-empty-output")).rejects.toMatchObject({
+      safeFailureCode: "GIT_WORKTREE_LIST_MALFORMED",
+    });
+    // The whole point of this test: a missing path plus malformed (empty)
+    // registration output must never be read as "not registered either,
+    // therefore already cleaned" — it must fail closed instead, leaving
+    // the record exactly where cleanup left it (never `cleaned`).
+    expect(store.get("missing-empty-output").status).not.toBe("cleaned");
   });
 });
 
@@ -852,9 +906,21 @@ function exit(exitCode: number, stdout: string, stderr: string): GitCommandResul
   return { exitCode, signal: null, stdout, stderr, timedOut: false, spawnError: undefined };
 }
 
-/** Builds valid `git worktree list --porcelain -z` output for one worktree per path, matching the real NUL-delimited byte structure `worktree-list-parser.ts` requires — see that module's doc comment. */
+/**
+ * Builds valid `git worktree list --porcelain -z` output for one worktree
+ * per path, matching the real NUL-delimited byte structure
+ * `worktree-list-parser.ts` requires — see that module's doc comment. Every
+ * worktree `AgentWorktreeManager.createWorktree` creates is always detached
+ * (`git worktree add --detach`), so each record includes `HEAD`/`detached`
+ * — the exact attribute set the strict parser now requires for a
+ * structurally complete, non-bare record — rather than the minimal
+ * `worktree <path>` line alone, which the parser correctly rejects.
+ */
 function porcelainZ(paths: readonly string[]): string {
-  return paths.map((worktreePath) => `worktree ${worktreePath}\0\0`).join("");
+  const sampleHead = "a".repeat(40);
+  return paths
+    .map((worktreePath) => `worktree ${worktreePath}\0HEAD ${sampleHead}\0detached\0\0`)
+    .join("");
 }
 
 type GitRunnerCall = Parameters<GitCommandRunner["run"]>[0];
