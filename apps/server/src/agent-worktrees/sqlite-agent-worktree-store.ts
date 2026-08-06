@@ -26,6 +26,8 @@ interface AgentWorktreeRow {
   readonly worktree_id: string;
   readonly hall_task_id: string;
   readonly hall_agent_run_id: string;
+  readonly adapter_id: string | null;
+  readonly agent_id: string | null;
   readonly source_repository_root: string;
   readonly source_working_directory_relative_path: string;
   readonly base_commit: string;
@@ -60,6 +62,8 @@ export class SqliteAgentWorktreeStore implements AgentWorktreeStorePort {
               worktree_id,
               hall_task_id,
               hall_agent_run_id,
+              adapter_id,
+              agent_id,
               source_repository_root,
               source_working_directory_relative_path,
               base_commit,
@@ -67,12 +71,14 @@ export class SqliteAgentWorktreeStore implements AgentWorktreeStorePort {
               status,
               created_at,
               revision
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'creating', ?, 0)`,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'creating', ?, 0)`,
           )
           .run(
             input.worktreeId,
             input.hallTaskId,
             input.hallAgentRunId,
+            input.adapterId ?? null,
+            input.agentId ?? null,
             input.canonicalSourceRepositoryRoot,
             input.sourceWorkingDirectoryRelativePath,
             input.baseCommit,
@@ -221,6 +227,8 @@ function rowToRecord(row: AgentWorktreeRow): AgentWorktreeRecord {
     worktreeId: row.worktree_id,
     hallTaskId: row.hall_task_id,
     hallAgentRunId: row.hall_agent_run_id,
+    adapterId: row.adapter_id ?? undefined,
+    agentId: row.agent_id ?? undefined,
     canonicalSourceRepositoryRoot: row.source_repository_root,
     sourceWorkingDirectoryRelativePath: row.source_working_directory_relative_path,
     baseCommit: row.base_commit,

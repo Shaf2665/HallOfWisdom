@@ -13,6 +13,18 @@ export interface AgentWorktreeRecord {
   readonly worktreeId: string;
   readonly hallTaskId: string;
   readonly hallAgentRunId: string;
+  /**
+   * Phase 16.5 — immutable, captured once at worktree creation. Unlike
+   * `TaskRecord.adapterId`/`agentId`, this never changes when the task is
+   * later retried under a new run — restart reconciliation depends on that
+   * immutability to identify which adapter/agent owned this exact worktree's
+   * run without ever trusting a newer, unrelated retry's current
+   * assignment. `undefined` only for a worktree row created before this
+   * field existed (a legacy row) — reconciliation must never guess a value
+   * for it.
+   */
+  readonly adapterId: string | undefined;
+  readonly agentId: string | undefined;
   readonly canonicalSourceRepositoryRoot: string;
   readonly sourceWorkingDirectoryRelativePath: string;
   readonly baseCommit: string;
@@ -31,6 +43,8 @@ export interface CreateAgentWorktreeRecordInput {
   readonly worktreeId: string;
   readonly hallTaskId: string;
   readonly hallAgentRunId: string;
+  readonly adapterId?: string | undefined;
+  readonly agentId?: string | undefined;
   readonly canonicalSourceRepositoryRoot: string;
   readonly sourceWorkingDirectoryRelativePath: string;
   readonly baseCommit: string;

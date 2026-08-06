@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { HallDatabase } from "./database.js";
 import { runMigrations } from "./migration-runner.js";
-import { MIGRATIONS } from "./migrations.js";
+import { HIGHEST_KNOWN_SCHEMA_VERSION, MIGRATIONS } from "./migrations.js";
 
 function migratedDb(): HallDatabase {
   const db = HallDatabase.openInMemory();
@@ -113,7 +113,7 @@ describe("migration 8 — agent execution artifacts", () => {
   });
 
   it("runs after migration 7 in the ordered migration list", () => {
-    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 
   it("migrates a pre-migration-8 database forward without dropping existing tables", () => {
@@ -130,7 +130,7 @@ describe("migration 8 — agent execution artifacts", () => {
     const version = db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get() as {
       version: number;
     };
-    expect(version.version).toBe(8);
+    expect(version.version).toBe(HIGHEST_KNOWN_SCHEMA_VERSION);
     expect(
       db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?")

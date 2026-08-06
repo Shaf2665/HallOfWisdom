@@ -104,6 +104,23 @@ export interface ServerComposition {
   readonly agentWorktreeValidator: AgentWorktreeValidator | undefined;
   readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
   /**
+   * Phase 16.5 — present only when isolated execution is actually
+   * composed (durable storage + an explicit Hall-owned worktree root).
+   * Restart reconciliation (`server.ts`) uses this exact instance's
+   * `cleanupWorktree` for startup cleanup resumption — never a second,
+   * independently-constructed manager over the same owned root.
+   */
+  readonly agentWorktreeManager: AgentWorktreeManager | undefined;
+  /**
+   * Phase 16.5 — the same terminalizer instance `TaskOrchestrator` uses at
+   * runtime, reused by restart reconciliation to idempotently create (or
+   * confirm a semantic match for) a missing execution artifact from
+   * durable evidence. Always present (mirrors `TaskOrchestrator`'s own
+   * unconditional construction above) — a no-op when no worktree ever
+   * needs reconciling.
+   */
+  readonly agentExecutionArtifactTerminalizer: AgentExecutionArtifactTerminalizer;
+  /**
    * Arms the task-mutation bridge that lets `ceoExecution.scheduler` react
    * to child-task completions. Deliberately NOT armed automatically by
    * this function — the caller (`server.ts`) must call this only AFTER
@@ -166,6 +183,8 @@ export interface CoreStoresComposition {
   readonly agentWorktreeStore: AgentWorktreeStorePort;
   readonly agentWorktreeValidator: AgentWorktreeValidator | undefined;
   readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
+  readonly agentWorktreeManager: AgentWorktreeManager | undefined;
+  readonly agentExecutionArtifactTerminalizer: AgentExecutionArtifactTerminalizer;
 }
 
 /**
@@ -295,6 +314,8 @@ export function createCoreStoresComposition(
     agentWorktreeStore,
     agentWorktreeValidator: agentWorktreeManager,
     agentExecutionArtifactStore,
+    agentWorktreeManager,
+    agentExecutionArtifactTerminalizer: artifactTerminalizer,
   };
 }
 

@@ -625,6 +625,28 @@ const MIGRATION_8: Migration = {
   },
 };
 
+/**
+ * Migration 9 — Phase 16.5's immutable adapter/agent identity, captured at
+ * worktree-creation time. `TaskRecord.adapterId`/`agentId` are mutable and
+ * get overwritten by a governed retry's new run, so they cannot be trusted
+ * to identify which adapter/agent actually owned an OLDER run's worktree
+ * after a restart (see `docs/architecture/0016-codex-worktree-execution.md`,
+ * "Phase 16.5"). Both columns are nullable: a row created before this
+ * migration has no way to backfill this identity safely, and restart
+ * reconciliation must treat a legacy `NULL` the same as "cannot be safely
+ * reconstructed" rather than guessing.
+ */
+const MIGRATION_9: Migration = {
+  version: 9,
+  description: "Phase 16.5: immutable adapter/agent identity on agent worktrees.",
+  up(db) {
+    db.exec(`
+      ALTER TABLE agent_worktrees ADD COLUMN adapter_id TEXT;
+      ALTER TABLE agent_worktrees ADD COLUMN agent_id TEXT;
+    `);
+  },
+};
+
 /** Ordered by `version`, ascending — `migration-runner.ts` applies whichever ones a given database hasn't recorded yet, one transaction each. */
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -635,6 +657,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_6,
   MIGRATION_7,
   MIGRATION_8,
+  MIGRATION_9,
 ];
 
 export const HIGHEST_KNOWN_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

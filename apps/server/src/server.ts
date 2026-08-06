@@ -235,6 +235,16 @@ export async function runServer(argv: readonly string[]): Promise<number> {
                 gitWorktreeManager: composition.comparison.gitWorktreeManager,
               }
             : undefined,
+        agentWorktree:
+          composition.agentWorktreeManager !== undefined && agentWorktreeRoot !== undefined
+            ? {
+                agentWorktreeStore: composition.agentWorktreeStore,
+                agentWorktreeManager: composition.agentWorktreeManager,
+                agentWorktreeRoot,
+                agentExecutionArtifactStore: composition.agentExecutionArtifactStore,
+                agentExecutionArtifactTerminalizer: composition.agentExecutionArtifactTerminalizer,
+              }
+            : undefined,
       });
       composition.comparison?.comparisonOrchestrator.rehydrateInternalPaths(
         recovery.internalPathsForRehydration,

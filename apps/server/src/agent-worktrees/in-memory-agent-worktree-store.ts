@@ -30,6 +30,8 @@ export class InMemoryAgentWorktreeStore implements AgentWorktreeStorePort {
     }
     const record: AgentWorktreeRecord = {
       ...input,
+      adapterId: input.adapterId,
+      agentId: input.agentId,
       status: "creating",
       revision: 0,
       readyAt: undefined,

@@ -2,7 +2,10 @@
 
 Status: Phase 13, Phase 13.1 — Durable Browser Restart, Process-Test Reliability and
 Single-Instance Ownership — and Phase 13.2 — Durable Ownership Fencing and Full Comparison Restart
-Verification — are all complete. Phase 13.1 closed three verification gaps the original Phase 13
+Verification — are all complete. Phase 16.5 (pending review and merge, see "Agent-worktree
+reconciliation (Phase 16.5)" below) extends this document's restart-recovery pipeline with a fourth
+reconciliation pass, alongside task and comparison reconciliation, for Hall-owned isolated agent
+worktrees and their execution artifacts. Phase 13.1 closed three verification gaps the original Phase 13
 report disclosed rather than papering over: it added exclusive single-instance ownership of a
 durable `--data-dir` (this document did not previously claim, and the architecture did not
 previously provide, any protection against two Hall Core processes sharing one database — see
@@ -111,7 +114,9 @@ Pure SQLite plumbing, no domain knowledge:
   [`0014-ceo-planning-approval-and-delegation.md`](0014-ceo-planning-approval-and-delegation.md));
   migration 4 adds `ceo_plans.last_progress_fingerprint` (nullable `TEXT`), the idempotency guard
   behind Phase 14.1's event-driven progress synchronizer — see `0014`'s "Progress synchronization"
-  section.
+  section; migration 9 (Phase 16.5) adds nullable `agent_worktrees.adapter_id`/`agent_id` columns —
+  see "Agent-worktree reconciliation (Phase 16.5)" below for why they exist and why they are
+  nullable.
 - **`migration-runner.ts`** — reads `schema_migrations`' recorded max version, applies whichever
   migrations are missing, one transaction per migration, recording the version row only on success.
   Fails closed (`UnsupportedSchemaVersionError`) if the database's recorded version exceeds the highest
@@ -181,11 +186,13 @@ shows it only succeeds at actually removing them once rehydration has run first.
 `runRestartRecovery()` (`restart-recovery.ts`) runs once, at composition time, before `app.listen()`:
 
 1. **Configuration fingerprint check** (`server-metadata-repository.ts`). A reused `--data-dir`'s
-   recorded `workspaceRoot`/`comparisonRoot` (canonical paths) must match this startup's — a
-   mismatch fails closed with `ConfigurationFingerprintMismatchError` rather than silently operating
-   on state that was written against a different filesystem layout. Recorded on first use; a startup
-   that omits `--comparison-root` is still allowed even if one was previously recorded (comparisons
-   are optional at every startup, durable or not).
+   recorded `workspaceRoot`/`comparisonRoot`/`agentWorktreeRoot` (canonical paths) must match this
+   startup's — a mismatch fails closed with `ConfigurationFingerprintMismatchError` rather than
+   silently operating on state that was written against a different filesystem layout. Recorded on
+   first use; a startup that omits `--comparison-root` is still allowed even if one was previously
+   recorded (comparisons are optional at every startup, durable or not) — `--agent-worktree-root` is
+   stricter and may not be omitted once recorded; see "Agent-worktree-root durable fingerprint"
+   under "Agent-worktree reconciliation (Phase 16.5)" below for why.
 2. **Previous boot lookup** (`boot-repository.ts`). The `boots` table holds one row per process
    lifetime, in strict `rowid` order (never `started_at`, which can tie under fast restarts).
    `getPreviousBoot` determines `previousShutdown: "clean" | "unclean" | "first_start"` from
@@ -198,12 +205,18 @@ shows it only succeeds at actually removing them once rehydration has run first.
    passed through.
 3. **Record this boot started.**
 4. **Reconcile tasks** (`reconcile-tasks.ts`) — see "Reconciliation" below.
-5. **Reconcile comparisons** (`reconcile-comparisons.ts`) — only if a full bundled
+5. **Reconcile agent worktrees** (Phase 16.5, `reconcile-agent-worktrees.ts`) — only if a full
+   bundled `{agentWorktreeStore, agentWorktreeManager, agentWorktreeRoot,
+agentExecutionArtifactStore, agentExecutionArtifactTerminalizer}` input was provided (i.e.,
+   isolated agent-worktree execution is composed at all this startup). Deliberately runs
+   immediately after task reconciliation and before comparison reconciliation — see "Agent-worktree
+   reconciliation (Phase 16.5)" below for why the ordering against step 4 specifically matters.
+6. **Reconcile comparisons** (`reconcile-comparisons.ts`) — only if a full bundled
    `{comparisonStore, comparisonEventStore, comparisonInternalPaths, gitWorktreeManager}` input was
    provided (i.e., comparisons are composed at all this startup).
-6. **Classify comparison worktrees + scan for orphans** (`classify-comparison-worktrees.ts`) — see
+7. **Classify comparison worktrees + scan for orphans** (`classify-comparison-worktrees.ts`) — see
    below.
-7. **Persist a bounded recovery summary** (counts only, never a path or `bootId`) and return it.
+8. **Persist a bounded recovery summary** (counts only, never a path or `bootId`) and return it.
 
 ## Reconciliation — projections are caches, the event log is truth
 
@@ -260,6 +273,157 @@ toplevel, so this closes the gap without weakening the check for real worktrees.
 `scanOrphanWorktrees` separately counts (never names or paths) `comparisonRoot`'s direct children
 that aren't in any persisted worktree record, tolerating a missing `comparisonRoot` by returning 0
 rather than throwing.
+
+## Agent-worktree reconciliation (Phase 16.5) — `apps/server/src/recovery/reconcile-agent-worktrees.ts`
+
+Phase 16.1–16.4 built durable Hall-owned isolated Git worktrees and immutable execution artifacts
+(see [`0016-codex-worktree-execution.md`](0016-codex-worktree-execution.md)) but left their
+lifecycle unsafe across a crash: a worktree interrupted mid-creation, mid-cleanup, or never cleaned
+up at all simply sat there forever, and a crash between authoritative task terminalization and
+artifact persistence could leave a terminal run with no artifact and no path to recover one safely.
+Phase 16.5 closes both gaps with a fourth reconciliation pass, `reconcileAgentWorktrees`, composed
+into `runRestartRecovery` only when isolated agent-worktree execution is actually configured this
+boot (durable storage, an explicit Hall-owned worktree root, and the worktree
+store/manager/artifact-store/terminalizer all present).
+
+**Ordering matters.** This pass runs immediately after `reconcileTasks` and before comparison
+reconciliation. It depends on `reconcileTasks` having already turned any genuinely mid-flight run's
+event stream terminal — a synthetic `run.failed` carrying `HALL_RESTART_INTERRUPTED_RUN` — so by
+the time agent-worktree reconciliation looks for "the exact terminal event for this Hall agent-run
+ID," one already exists for a run that really was still running at crash time. This function never
+synthesizes a terminal outcome itself; it only ever looks for one that already exists in the event
+log, which is why the ordering is load-bearing rather than incidental.
+
+**Deterministic, per-record, keyed off currently-persisted status** — the same "idempotent by
+construction, not by tracking whether the previous shutdown was unclean" discipline `reconcileTasks`
+already established:
+
+- **`creating`** — treated as interrupted creation, never reused. Recorded with the stable code
+  `HALL_RESTART_INTERRUPTED_WORKTREE_CREATION` (`markCreationFailed`), then handed to
+  `AgentWorktreeManager.cleanupWorktree` exactly like every other cleanup path below. That one
+  function already handles a worktree whose directory never got created (both path and Git
+  registration absent → marked `cleaned` immediately), a worktree Git had already registered before
+  the crash (`git worktree remove --force` succeeds normally), and an unregistered partial
+  directory a crash left behind mid-`git worktree add` (removal fails closed with
+  `cleanup_failed` — never a recursive filesystem delete as a fallback, so an unrelated leftover
+  file next to a genuinely partial worktree survives).
+- **`creation_failed`**, **`cleanup_pending`**, **`cleanup_failed`** — each gets exactly one
+  `cleanupWorktree` attempt per boot, simply because this pass visits every persisted record once.
+  A `cleanup_failed` worktree that fails again stays `cleanup_failed`, recoverable on the next
+  restart — never an unbounded retry loop within one boot.
+- **`ready`** — resolves the exact terminal event for this worktree's `hallAgentRunId` from the
+  task's own event stream (`NormalizedEventStorePort.list(hallTaskId)`, which holds the full,
+  continuous per-task stream across every retry — filtering by `event.runId` finds the exact run
+  regardless of what the task's current, possibly-retried assignment now says). If no terminal
+  event exists yet, or the worktree record predates Phase 16.5's immutable `adapterId`/`agentId`
+  columns (a legacy row), or the event stream's own `agentId` disagrees with the identity captured
+  at worktree creation, reconciliation retains the worktree and counts it as reconciliation-blocked
+  — it never fabricates a terminal outcome or an identity it cannot prove. Otherwise it builds an
+  `AgentExecutionTerminalSnapshot` directly from that durable evidence — deliberately NOT through
+  `buildAgentExecutionTerminalSnapshot`, which validates identity against the CURRENT, possibly
+  superseded `TaskRecord` and would incorrectly reject an old run's reconstruction once a newer
+  retry has moved the task's live assignment on — and hands it to the same
+  `AgentExecutionArtifactTerminalizer` runtime cleanup uses. That terminalizer is already
+  idempotent by `hallAgentRunId`: an existing, semantically matching artifact is accepted
+  (`artifactsConfirmed`); a genuine mismatch throws `AgentExecutionArtifactMismatchError`, which
+  this pass treats as blocked and never deletes the worktree over; a missing artifact is
+  reconstructed from real Git evidence collected through the same worktree (`artifactsRecovered`).
+  Only once that succeeds does cleanup run.
+- **`cleaned`** — normally a no-op. If the recorded path reappears on disk (`fs.lstatSync`
+  succeeding where it should now fail) — **or** Git's own worktree registration for it reappears
+  (see "Git registration reconciliation" below) — this is reported as a bounded inconsistency
+  (`inconsistentCleanedDirectoryCount`/`inconsistentCleanedRegistrationCount`, counted
+  independently) and nothing more: never auto-deleted, never pruned, and the record is never
+  transitioned backward out of `cleaned`.
+
+**Filesystem orphan scanning** mirrors `scanOrphanWorktrees` above: a bounded count of the owned
+root's direct child directories (and, as of this hardening pass, symlink/junction entries — never
+silently skipped purely because they are not an ordinary directory) not backed by any persisted
+worktree record, excluding the one directory the manager itself creates and is never a worktree
+(`_hall_empty_hooks` — see `agent-worktree-manager.ts`'s `canonicalizeEmptyHooksDirectory`).
+Counted, never named, never touched. A missing owned root (isolation configured but nothing ever
+created there yet) is a legitimate zero; a root that exists but could not be listed (permissions,
+an unreadable filesystem) is instead reported through `registrationInspectionFailureCount` — never
+silently folded into the same zero.
+
+**Git registration reconciliation** (added in this hardening pass) inspects Git's own worktree
+registrations, not just the filesystem, through a new read-only
+`AgentWorktreeManager.listRegisteredWorktreePaths(sourceRepositoryRoot)` (the bounded Git runner,
+never a second ad hoc invocation; truncated output fails closed rather than returning a partial
+list). It processes each unique persisted source repository exactly once, in deterministic
+(sorted) order, and only ever classifies a registration that resolves INSIDE the Hall-owned owned
+root — the primary checkout, any comparison worktree, and anything else Git happens to have
+registered elsewhere are read but never touched, counted, or acted on by this feature at all. A
+registration under the owned root with no matching persisted record is counted as an orphan
+registration (`orphanWorktreeRegistrationCount`) — never deleted, never pruned (`git worktree
+prune` is never called). A source repository whose registrations could not be inspected (missing
+repository, a Git failure of any kind, truncated output) contributes to
+`registrationInspectionFailureCount` rather than being silently treated as "no registrations."
+
+**Cleanup security is entirely delegated, never reimplemented here.** Every deletion this pass ever
+performs goes through the pre-existing `AgentWorktreeManager.cleanupWorktree` (Phase 16.1), which
+already reconstructs the expected `wt_<id>` path from the canonical owned root, rejects symlink or
+junction substitution, verifies mutual root containment, verifies Git still registers the worktree,
+and removes it only via `git worktree remove --force` through the bounded Git runner — never `rm
+-rf`, never a directory-name pattern match, never trusting a persisted absolute path without
+reconstructing and re-validating it first. This reconciliation pass decides WHETHER and WHEN to call
+that function; it never decides HOW a worktree is removed.
+
+**Runtime cleanup (the same-session mirror of this restart pass)** lives in
+`TaskOrchestrator#terminalizeExecution` (`apps/server/src/tasks/task-orchestrator.ts`) and
+`IsolatedAgentExecutionCoordinator#cleanupWorktree` (`apps/server/src/agent-execution/`). After an
+isolated run reaches `run.completed`/`run.failed`/`run.cancelled`, the orchestrator first calls the
+artifact terminalizer; only once that resolves without throwing does it request cleanup for the
+exact worktree ID carried on that run's own terminal snapshot — never re-derived from the task's
+current (possibly already-retried) record, so a slow old-run cleanup can never target a newer
+retry's worktree. `IsolatedAgentExecutionCoordinator#cleanupWorktree` never throws back into the
+orchestrator: a cleanup failure is caught, logged, and left for the next restart's reconciliation
+pass — it never changes the task's already-committed terminal status, never touches the artifact,
+and never affects a subsequent governed retry (each retry gets its own fresh worktree, keyed by its
+own `hallAgentRunId`).
+
+**Migration 9** adds nullable `agent_worktrees.adapter_id`/`agent_id` columns, captured once at
+worktree-creation time from the same values `IsolatedAgentExecutionCoordinator.prepare()` already
+has (the adapter id it was asked to isolate, and the agent id from the task's assigned identity).
+They exist because `TaskRecord.adapterId`/`agentId` are mutable — a governed retry overwrites them
+with the new run's identity — so they cannot be trusted to identify which adapter/agent owned an
+OLDER run's worktree once a restart needs to reconstruct that run's artifact. Both columns are
+nullable specifically so existing rows created before this migration keep loading (as `undefined` in
+`AgentWorktreeRecord`) rather than failing closed at the schema level; reconciliation is what treats
+that `undefined` as "cannot be safely reconstructed," never the migration itself.
+
+**Recovery summary.** `RecoverySummary.agentWorktree` (`undefined` when isolated agent-worktree
+execution is not composed this boot) adds bounded counts only —
+`worktreesScanned`/`interruptedCreationCount`/`artifactsRecovered`/`artifactsConfirmed`/
+`cleanupAttempts`/`worktreesCleaned`/`cleanupFailures`/`reconciliationBlockedCount`/
+`inconsistentCleanedDirectoryCount`/`inconsistentCleanedRegistrationCount`/
+`orphanWorktreeDirectoryCount`/`orphanWorktreeRegistrationCount`/
+`registrationInspectionFailureCount` — persisted the same way every other `RecoverySummary` field
+already is, in `boots.recovery_summary_json`. This is deliberately internal: unlike
+`worktreeHealthCounts`/`orphanWorktreeCount` (the comparison-side equivalents, which `GET
+/api/v1/system/storage` already curates into its response), Phase 16.5 does not add these new
+fields to that route's response shape or to Hall Web's `SystemStorageResponse` schema — no new
+route, endpoint field, or UI was added for this phase; the counts exist for the audit trail and for
+tests, not for browser display.
+
+**Agent-worktree-root durable fingerprint** (added in this hardening pass) extends
+`checkOrRecordConfigurationFingerprint` (`server-metadata-repository.ts`, see "Restart recovery"
+above) with a third scoped root, `agentWorktreeRoot`, alongside `workspaceRoot`/`comparisonRoot`.
+It is deliberately stricter than `comparisonRoot`: once recorded, a later startup may not omit it
+(unlike `comparisonRoot`, which may be freely dropped) — Phase 16.5 reconciliation depends on
+knowing exactly where every persisted worktree lives, and silently treating "the flag was omitted"
+as "isolation is now disabled" would leave real Git worktrees permanently unreconciled without an
+operator ever deciding that. On a database that already has persisted `agent_worktrees` rows but no
+recorded fingerprint (a legacy database, or one enabling isolation for the first time after
+already creating worktrees some other way), the newly supplied root is never trusted blindly: every
+persisted row's reconstructed `<root>/wt_<worktreeId>` path must exactly match its stored
+`worktree_path` (case-correct per platform) before the root is recorded at all; a single mismatch
+fails startup closed without recording anything. All validation for one call happens before any
+write, so a `comparisonRoot` conflict can never leave a bootstrapped `agentWorktreeRoot` behind, or
+vice versa.
+
+Phase 16.6 (explicitly authorized real Codex smoke verification and exact sandbox-equivalence
+proof) is unaffected by and unrelated to this phase, and remains deferred.
 
 ## CLI — `--data-dir`
 
@@ -803,10 +967,28 @@ pnpm verify:process-recovery
 
 Equivalent to `pnpm --filter @hall-of-wisdom/hall-core run build && pnpm --filter
 @hall-of-wisdom/hall-core run test:process` — always rebuilds first, so it can never silently pass
-against a stale `dist/`. Takes roughly 65 seconds (three of the four tests each genuinely wait out
-the real 20-second ownership-staleness default — Phase 13.2 added the frozen-owner test alongside the
-original three). See "Testing," item 4, above for what each of the four tests in
+against a stale `dist/`. Takes roughly 65 seconds (three of the four original tests each genuinely
+wait out the real 20-second ownership-staleness default — Phase 13.2 added the frozen-owner test
+alongside the original three). See "Testing," item 4, above for what each of those four tests in
 `src/process-tests/` proves.
+
+**(Phase 16.5)** `phase-16-5-worktree-recovery.test.ts` adds a fifth real-process scenario, this one
+for restart-safe worktree reconciliation specifically, driven entirely through the actual
+`dist/server.js` binary and a real, disposable Git repository — no model-backed provider task is
+ever run. It uses `spawnRealServerWithStdin`/`gracefulStop` (the documented stdin `"SHUTDOWN\n"`
+graceful-shutdown trigger — see "Graceful shutdown from a spawned child process" above) between
+boots specifically so its three real restarts complete in a few seconds rather than each waiting
+out the ownership-staleness window a `SIGKILL` would force: a real Mock Agent task is created and
+completed through the real HTTP API; a real Git worktree tied to that exact completed run is then
+created in-process (through the same `AgentWorktreeManager`/`SqliteAgentWorktreeStore` production
+uses) against the same database file, with no execution artifact yet, plus a second worktree
+staged at the crash boundary "`cleanup_pending` after Git removal committed but before the durable
+`cleaned` status was written"; a real restart then recovers the missing artifact from durable
+evidence, persists it, and safely removes both worktrees; a second real restart proves the result
+is idempotent (no duplicate artifact, no state regression); and direct SQLite/Git/filesystem
+inspection afterward confirms the primary checkout's `HEAD`, tracked files, and working-tree
+cleanliness were never touched, and that a seeded orphan directory under the owned root survived
+every restart untouched.
 
 ## Security review performed this phase
 

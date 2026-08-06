@@ -1124,6 +1124,18 @@ export class TaskOrchestrator {
     }
   }
 
+  /**
+   * Phase 16.5 runtime cleanup ordering: artifact persistence (or
+   * confirmed idempotent match) must succeed BEFORE a worktree cleanup
+   * request is ever issued — never the reverse, and never on a failed or
+   * mismatched artifact. Cleanup itself is fail-soft: any failure is
+   * logged only, never rethrown, never changes the task's already-recorded
+   * terminal outcome, never touches the artifact, and never triggers a
+   * retry. `input.snapshot.hallAgentRunId`/`worktreeId` come from the
+   * terminal snapshot captured for THIS run — never re-read from the
+   * current (possibly retried) task record — so a cleanup request here can
+   * never target a newer run's worktree.
+   */
   async #terminalizeExecution(input: {
     readonly taskId: string;
     readonly snapshot: AgentExecutionTerminalSnapshot | undefined;
@@ -1140,6 +1152,28 @@ export class TaskOrchestrator {
       this.#onExecutionError?.(input.taskId, error);
       console.error(
         `Task "${input.taskId}": artifact terminalization failed after authoritative terminal state was recorded: ${formatUnknownError(error)}`,
+      );
+      return;
+    }
+    await this.#requestWorktreeCleanup(input.taskId, input.snapshot.worktreeId);
+  }
+
+  async #requestWorktreeCleanup(taskId: string, worktreeId: string | undefined): Promise<void> {
+    if (worktreeId === undefined || this.#executionCoordinator === undefined) return;
+    try {
+      const result = await this.#executionCoordinator.cleanupWorktree(worktreeId);
+      if (!result.ok) {
+        console.error(
+          `Task "${taskId}": isolated worktree cleanup did not complete (${result.code}); it remains recoverable on the next restart reconciliation pass.`,
+        );
+      }
+    } catch (error) {
+      // Defense in depth: `cleanupWorktree` is documented to never throw,
+      // but a cleanup failure must never be allowed to propagate into
+      // `#execute`'s already-completed terminal handling regardless.
+      this.#onExecutionError?.(taskId, error);
+      console.error(
+        `Task "${taskId}": isolated worktree cleanup request failed unexpectedly: ${formatUnknownError(error)}`,
       );
     }
   }

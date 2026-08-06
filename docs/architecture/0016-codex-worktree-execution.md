@@ -1,9 +1,10 @@
 # 0016 — Durable Isolated Codex Execution
 
-Status: Phase 16.4 strict isolated Codex infrastructure is implemented on the Phase 16.4 branch and
-is pending review and merge. Strict Codex availability remains fail-closed until exact sandbox
-equivalence is proven by the explicitly authorized Phase 16.6 verification. Real model-backed Codex
-smoke testing remains deferred.
+Status: Phase 16.4 (strict isolated Codex infrastructure) is merged. Phase 16.5 (restart-safe
+worktree reconciliation and cleanup, see "Phase 16.5 — restart-safe worktree reconciliation and
+cleanup" below) is implemented on the Phase 16.5 branch and is pending review and merge. Strict
+Codex availability remains fail-closed until exact sandbox equivalence is proven by the explicitly
+authorized Phase 16.6 verification. Real model-backed Codex smoke testing remains deferred.
 
 Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 built
 the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and SQLite
@@ -450,10 +451,104 @@ or task-controlled security options. `CODEX_HOME` may still be inherited through
 allowlisted environment only so the installed CLI can find the operator's ChatGPT login; Hall does
 not read credential files or expose auth paths.
 
-Phase 16.4 does not add automatic worktree cleanup, startup reconciliation, new routes, UI, public
-protocol fields, TaskOrchestrator adapter branches, or a real Codex smoke test. Phase 16.5 will
-handle restart-safe cleanup and reconciliation. Phase 16.6 will handle explicitly authorized real
-model-backed Codex verification.
+Phase 16.4 did not add automatic worktree cleanup or startup reconciliation — Phase 16.5, directly
+below, adds both. Phase 16.6 will handle explicitly authorized real model-backed Codex verification;
+this document's strict Codex fail-closed behavior is unchanged by Phase 16.5 and remains untouched
+until then.
+
+## Phase 16.5 — restart-safe worktree reconciliation and cleanup
+
+Phase 16.5 makes the worktree lifecycle described above safe across normal completion, failure,
+cancellation, artifact-persistence failure, cleanup failure, process termination, clean restart,
+unclean restart, retry overlap, partial worktree creation, partial cleanup, and a missing execution
+artifact. It does not implement Phase 16.6 and does not run a real model-backed Codex task. See
+[`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md)'s
+"Agent-worktree reconciliation (Phase 16.5)" section for the full design; this section summarizes
+what changed in this package's own ownership area.
+
+**Required lifecycle, now enforced end to end:**
+
+```text
+authoritative task terminal state
+  -> immutable artifact persistence (or confirmed idempotent match)
+  -> exact worktree cleanup request
+  -> safe Git worktree removal (through the existing AgentWorktreeManager.cleanupWorktree)
+  -> durable cleaned status
+```
+
+**Runtime cleanup.** `TaskOrchestrator#terminalizeExecution` now requests worktree cleanup — via a
+new `IsolatedAgentExecutionCoordinator#cleanupWorktree` method — strictly after the execution
+artifact terminalizer resolves without throwing, for completed, failed, and cancelled runs alike.
+Cleanup is fail-soft by construction: it never changes the task's already-recorded terminal outcome,
+never touches the artifact, never triggers a retry, and never affects a newer run, because the
+worktree ID it acts on comes from the terminating run's own captured snapshot, never re-derived from
+the task's current (possibly already-retried) record. A worktree is never cleaned when artifact
+creation failed, the artifact conflicts or mismatches, or task/run/worktree identity is uncertain —
+`AgentExecutionArtifactTerminalizer`'s existing idempotent-by-`hallAgentRunId` semantics already
+guarantee this; Phase 16.5 adds no new bypass of them. **`cleanupWorktree` never reports a false
+success:** if it is called with a real worktree ID but no cleaner is actually available (no worktree
+manager configured, or one that does not implement cleanup), it returns a bounded
+`AGENT_WORKTREE_CLEANER_UNAVAILABLE` failure rather than claiming the worktree was cleaned when
+nothing attempted to clean it — this method is only ever called with a real worktree ID in the first
+place, since `TaskOrchestrator` never calls it at all for a non-isolated execution.
+
+**Startup reconciliation** (`reconcile-agent-worktrees.ts`, new) processes every persisted worktree
+deterministically by status on every durable boot, not only after an unclean shutdown: `creating` is
+treated as interrupted (stable code `HALL_RESTART_INTERRUPTED_WORKTREE_CREATION`) and safely
+transitioned toward cleanup, handling both a missing and a partially created Git worktree without
+ever falling back to recursive deletion; `creation_failed`/`cleanup_pending` resume cleanup;
+`cleanup_failed` gets exactly one retry per boot; `ready` reconstructs a missing artifact only from
+exact durable evidence (never a newer retry's mutable task assignment) and cleans up only after that
+succeeds, or retains and reports a bounded blocked classification if exact reconstruction is
+impossible; `cleaned` is left alone unless its path OR its Git registration unexpectedly reappears,
+either of which is reported (independently counted) but never auto-deleted, never pruned, and never
+transitions the record backward. Unknown directories under the owned root — including symlink and
+junction entries, never silently skipped just because they are not an ordinary directory — are
+scanned read-only and counted as orphans, never deleted; unknown Git worktree registrations under
+the owned root (inspected through a new read-only `AgentWorktreeManager.listRegisteredWorktreePaths`,
+never a second ad hoc Git invocation) are likewise counted as orphans and never deleted or pruned. A
+source repository whose registrations could not be inspected, or an owned root that could not be
+listed, contributes to a bounded inspection-failure count rather than a silent zero.
+
+**Missing-artifact recovery** required a small, minimal schema extension:
+`agent_worktrees.adapter_id`/`agent_id`, added nullable in migration 9, captured once at
+worktree-creation time. `TaskRecord.adapterId`/`agentId` are mutable and get overwritten by a
+governed retry's new run, so they cannot identify which adapter/agent owned an older run's worktree
+after a restart — these two immutable columns close that gap. A worktree row created before this
+migration has `NULL` for both; reconciliation treats that as "cannot be safely reconstructed,"
+retains the worktree, and never guesses.
+
+**Cleanup security is unchanged, not reimplemented.** Every deletion in both the runtime and restart
+paths goes through the pre-existing `AgentWorktreeManager.cleanupWorktree` (Phase 16.1): exact
+`wt_<id>` path reconstruction from the canonical owned root, symlink/junction rejection, mutual root
+containment, Git-registration verification, and removal only via `git worktree remove --force`
+through the bounded Git runner — never `rm -rf`, never a directory-name pattern, never a trusted
+persisted absolute path. Nothing in Phase 16.5 adds a second, weaker deletion path.
+
+**Recovery summary.** `RecoverySummary.agentWorktree` adds bounded counts (worktrees scanned,
+interrupted creations, artifacts recovered/confirmed, cleanup attempts/successes/failures,
+reconciliation-blocked, inconsistent-cleaned directories/registrations, orphan
+directories/registrations, registration-inspection failures) to the same internal, path-free
+mechanism `boots.recovery_summary_json` already used for task and comparison reconciliation. This
+phase deliberately does not expose these new counts through `GET /api/v1/system/storage` or add any
+new route, endpoint field, or UI — see 0013's "Recovery summary" note in that same section.
+
+**Agent-worktree-root durable fingerprint.** The durable configuration fingerprint that already
+scoped a `--data-dir` to `workspaceRoot`/`comparisonRoot` now also scopes it to
+`agentWorktreeRoot` — recorded on first use, required to match exactly on every later startup
+(unlike `comparisonRoot`, omitting it once recorded is itself a fingerprint failure, not a
+tolerated "isolation is now off"), and — for a database with existing `agent_worktrees` rows but no
+recorded root — never accepted until every one of those rows' reconstructed `wt_<worktreeId>` paths
+is proven to belong to the newly supplied root. See
+[`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md)'s
+"Agent-worktree-root durable fingerprint" for the full design.
+
+**Real-process verification.** `pnpm verify:process-recovery` now includes a dedicated Phase 16.5
+scenario driven through the actual built binary: a real completed (Mock Agent, non-isolated) task,
+a real Git worktree created in-process against the same database file with no execution artifact
+yet, a real restart that recovers the artifact and safely cleans up, a second real restart proving
+idempotency, and direct inspection confirming the primary checkout and an unrelated orphan
+directory were both left untouched throughout. No model-backed provider task is run.
 
 ## Lifecycle
 
@@ -624,10 +719,11 @@ fields. If cleanup fails, the record transitions to `cleanup_failed`.
 
 Phase 16.3 collects Git evidence and writes an execution artifact only after TaskOrchestrator has
 persisted authoritative terminal task/run/event state. A crash after authoritative terminalization
-but before artifact creation leaves a terminal run with a missing artifact. Phase 16.3 does not
+but before artifact creation leaves a terminal run with a missing artifact. Phase 16.3 did not
 reconcile that state, relaunch the provider, or infer retry eligibility from the missing artifact.
-Phase 16.5 will reconcile missing artifacts without provider relaunch. The artifact remains
-evidence for later inspection and reconciliation, not a lifecycle source of truth.
+Phase 16.5 reconciles missing artifacts without provider relaunch — see "Phase 16.5 — restart-safe
+worktree reconciliation and cleanup" above. The artifact remains evidence for later inspection and
+reconciliation, not a lifecycle source of truth.
 
 ## Windows considerations
 
@@ -642,7 +738,9 @@ Deferred to later Phase 16 subphases:
 
 - additional Codex-specific launch behavior beyond the strict isolated profile described above;
 - routes and UI;
-- startup reconciliation and cleanup workers;
 - automatic retry/relaunch behavior;
-- real opt-in Codex smoke tests;
+- real opt-in Codex smoke tests and exact sandbox-equivalence proof (Phase 16.6);
 - merge, push, pull request, or branch publication workflows.
+
+Startup reconciliation and cleanup are no longer deferred — see "Phase 16.5 — restart-safe worktree
+reconciliation and cleanup" above.
