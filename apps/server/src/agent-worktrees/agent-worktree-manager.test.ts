@@ -273,7 +273,7 @@ describe("AgentWorktreeManager", () => {
         ok(""),
         ok(baseCommit),
         ok(""),
-        ok(`worktree ${source}\nHEAD ${baseCommit}\n\nworktree ${expectedWorktreePath}\n`),
+        ok(porcelainZ([source, expectedWorktreePath])),
         exit(1, "", ""),
         ok(""),
         ok(baseCommit),
@@ -314,7 +314,7 @@ describe("AgentWorktreeManager", () => {
         expectedWorktreePath,
         baseCommit,
       ],
-      ["-c", "core.fsmonitor=false", "worktree", "list", "--porcelain"],
+      ["-c", "core.fsmonitor=false", "worktree", "list", "--porcelain", "-z"],
       ["-c", "core.fsmonitor=false", "config", "--name-only", "--get-regexp", "^filter\\..*\\."],
       [
         "-c",
@@ -345,7 +345,7 @@ describe("AgentWorktreeManager", () => {
         ok(""),
         ok(baseCommit),
         ok(""),
-        ok(`worktree ${expectedWorktreePath}\n`),
+        ok(porcelainZ([expectedWorktreePath])),
         exit(1, "", ""),
         ok(""),
         ok(baseCommit),
@@ -427,7 +427,7 @@ describe("AgentWorktreeManager", () => {
         ok(""),
         ok(baseCommit),
         ok(""),
-        ok(`worktree ${expectedWorktreePath}\n`),
+        ok(porcelainZ([expectedWorktreePath])),
         exit(2, "", "bad config"),
       ],
       (call) => {
@@ -643,7 +643,7 @@ describe("AgentWorktreeManager", () => {
       expectedRevision: 0,
       readyAt: BASE_NOW,
     });
-    const runner = new ScriptedGitRunner([ok(`worktree ${worktreePath}\n`), fail("locked file")]);
+    const runner = new ScriptedGitRunner([ok(porcelainZ([worktreePath])), fail("locked file")]);
     const manager = new AgentWorktreeManager({
       store,
       gitRunner: runner,
@@ -654,6 +654,74 @@ describe("AgentWorktreeManager", () => {
     );
     expect(store.get("cleanup-fail").status).toBe("cleanup_failed");
     expect(fs.existsSync(worktreePath)).toBe(true);
+  });
+});
+
+describe("listRegisteredWorktreePaths (post-merge Phase 16.5 hardening)", () => {
+  it("lists the primary checkout via a real Git invocation", async () => {
+    const fixture = createFixtureRepository("registration list primary");
+    const manager = new AgentWorktreeManager({
+      store: new InMemoryAgentWorktreeStore(),
+      gitRunner: testGitRunner(),
+      ownedRoot: makeTempDir("hall owned worktrees "),
+    });
+    const paths = await manager.listRegisteredWorktreePaths(fixture.repo);
+    expect(paths).toContainEqual(fixture.repo);
+  });
+
+  it("lists multiple real worktrees, including paths with spaces and non-ASCII characters", async () => {
+    const fixture = createFixtureRepository("registration list multiple");
+    const ownedRoot = makeTempDir("hall owned worktrees ");
+    const manager = new AgentWorktreeManager({
+      store: new InMemoryAgentWorktreeStore(),
+      gitRunner: testGitRunner(),
+      ownedRoot,
+      idGenerator: idSequence(["with-spaces", "unicode"]),
+    });
+
+    const withSpaces = path.join(ownedRoot, "wt_with-spaces extra");
+    git(["worktree", "add", "--detach", "--no-checkout", withSpaces, fixture.head], fixture.repo);
+    const nonAscii = path.join(ownedRoot, "wt_ünïcödé-日本語");
+    git(["worktree", "add", "--detach", "--no-checkout", nonAscii, fixture.head], fixture.repo);
+
+    const paths = await manager.listRegisteredWorktreePaths(fixture.repo);
+    expect(paths).toContainEqual(fixture.repo);
+    expect(paths).toContainEqual(fs.realpathSync.native(withSpaces));
+    expect(paths).toContainEqual(fs.realpathSync.native(nonAscii));
+  });
+
+  it("fails closed on truncated Git worktree-list output rather than returning a partial list", async () => {
+    const runner = new ScriptedGitRunner([
+      {
+        exitCode: 0,
+        signal: null,
+        stdout: "worktree C:\\repo\0",
+        stderr: "",
+        stdoutTruncated: true,
+        timedOut: false,
+        spawnError: undefined,
+      },
+    ]);
+    const manager = new AgentWorktreeManager({
+      store: new InMemoryAgentWorktreeStore(),
+      gitRunner: runner,
+      ownedRoot: makeTempDir("hall owned worktrees "),
+    });
+    await expect(manager.listRegisteredWorktreePaths("C:\\repo")).rejects.toMatchObject({
+      safeFailureCode: "GIT_WORKTREE_LIST_TRUNCATED",
+    });
+  });
+
+  it("fails closed on exit-code-zero output that is not valid porcelain -z structure, never returning zero registrations silently", async () => {
+    const runner = new ScriptedGitRunner([ok("this is not valid porcelain -z output at all")]);
+    const manager = new AgentWorktreeManager({
+      store: new InMemoryAgentWorktreeStore(),
+      gitRunner: runner,
+      ownedRoot: makeTempDir("hall owned worktrees "),
+    });
+    await expect(manager.listRegisteredWorktreePaths("C:\\repo")).rejects.toMatchObject({
+      safeFailureCode: "GIT_WORKTREE_LIST_MALFORMED",
+    });
   });
 });
 
@@ -782,6 +850,11 @@ function fail(stderr: string): GitCommandResult {
 
 function exit(exitCode: number, stdout: string, stderr: string): GitCommandResult {
   return { exitCode, signal: null, stdout, stderr, timedOut: false, spawnError: undefined };
+}
+
+/** Builds valid `git worktree list --porcelain -z` output for one worktree per path, matching the real NUL-delimited byte structure `worktree-list-parser.ts` requires — see that module's doc comment. */
+function porcelainZ(paths: readonly string[]): string {
+  return paths.map((worktreePath) => `worktree ${worktreePath}\0\0`).join("");
 }
 
 type GitRunnerCall = Parameters<GitCommandRunner["run"]>[0];

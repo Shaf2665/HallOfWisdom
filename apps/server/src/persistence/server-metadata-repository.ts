@@ -53,10 +53,18 @@ export interface ConfigurationFingerprint {
  * root` flag, or a genuinely different data directory) must never be
  * treated as "isolation is now disabled" rather than a configuration
  * error — that would leave real Git worktrees permanently unreconciled
- * without the operator ever deciding that.
+ * without the operator ever deciding that. The same reasoning applies to a
+ * database that never got as far as recording a root at all but already
+ * holds `agent_worktrees` rows (an interrupted first enablement, or a
+ * database written by code that predates this fingerprint field): an
+ * omitted root here is rejected too, never silently treated as "isolation
+ * was never enabled" — that would compose no agent-worktree manager and
+ * skip Phase 16 reconciliation for rows that still durably exist.
  *
- * All validation for one call happens before any write — see
- * "no partial fingerprint writes" below.
+ * All validation for one call happens before any write, and every write
+ * this call performs happens inside one outer transaction (see
+ * `withTransaction`'s nesting behavior) — a failure writing any one key
+ * rolls back every key from this same call, never a partial fingerprint.
  */
 export function checkOrRecordConfigurationFingerprint(
   db: HallDatabase,
@@ -75,13 +83,15 @@ export function checkOrRecordConfigurationFingerprint(
     if (fingerprint.agentWorktreeRoot !== undefined) {
       assertAgentWorktreeRootIdentity(db, fingerprint.agentWorktreeRoot);
     }
-    setValue(db, WORKSPACE_ROOT_KEY, fingerprint.workspaceRoot);
-    if (fingerprint.comparisonRoot !== undefined) {
-      setValue(db, COMPARISON_ROOT_KEY, fingerprint.comparisonRoot);
-    }
-    if (fingerprint.agentWorktreeRoot !== undefined) {
-      setValue(db, AGENT_WORKTREE_ROOT_KEY, fingerprint.agentWorktreeRoot);
-    }
+    withTransaction(db, () => {
+      setValue(db, WORKSPACE_ROOT_KEY, fingerprint.workspaceRoot);
+      if (fingerprint.comparisonRoot !== undefined) {
+        setValue(db, COMPARISON_ROOT_KEY, fingerprint.comparisonRoot);
+      }
+      if (fingerprint.agentWorktreeRoot !== undefined) {
+        setValue(db, AGENT_WORKTREE_ROOT_KEY, fingerprint.agentWorktreeRoot);
+      }
+    });
     return;
   }
 
@@ -120,17 +130,31 @@ export function checkOrRecordConfigurationFingerprint(
     // root blindly: prove every persisted worktree's reconstructed
     // `wt_<worktreeId>` path actually belongs to it first.
     assertAgentWorktreeRootIdentity(db, fingerprint.agentWorktreeRoot);
+  } else if (hasAnyAgentWorktreeRows(db)) {
+    // Not recorded, and none supplied THIS boot either — but the database
+    // already holds `agent_worktrees` rows from before a root was ever
+    // durably recorded. Accepting this startup would compose no
+    // agent-worktree manager and silently skip Phase 16 reconciliation for
+    // those rows forever. Never derives a root from them (see
+    // `assertAgentWorktreeRootIdentity`'s own doc comment on why this
+    // module never guesses); the operator must supply the exact proven
+    // root explicitly for this database to become usable again.
+    throw new ConfigurationFingerprintMismatchError("agentWorktreeRoot");
   }
 
-  // Writes happen only after every check above has passed — a
+  // Writes happen only after every check above has passed, and both keys
+  // in this call are written inside one outer transaction — a
   // comparisonRoot conflict must never leave a bootstrapped
-  // agentWorktreeRoot behind, and vice versa.
-  if (storedComparisonRoot === undefined && fingerprint.comparisonRoot !== undefined) {
-    setValue(db, COMPARISON_ROOT_KEY, fingerprint.comparisonRoot);
-  }
-  if (storedAgentWorktreeRoot === undefined && fingerprint.agentWorktreeRoot !== undefined) {
-    setValue(db, AGENT_WORKTREE_ROOT_KEY, fingerprint.agentWorktreeRoot);
-  }
+  // agentWorktreeRoot behind, and vice versa, and a failure partway
+  // through must never leave one key committed and the other not.
+  withTransaction(db, () => {
+    if (storedComparisonRoot === undefined && fingerprint.comparisonRoot !== undefined) {
+      setValue(db, COMPARISON_ROOT_KEY, fingerprint.comparisonRoot);
+    }
+    if (storedAgentWorktreeRoot === undefined && fingerprint.agentWorktreeRoot !== undefined) {
+      setValue(db, AGENT_WORKTREE_ROOT_KEY, fingerprint.agentWorktreeRoot);
+    }
+  });
 }
 
 interface AgentWorktreeIdentityRow {
@@ -162,4 +186,10 @@ function assertAgentWorktreeRootIdentity(db: HallDatabase, candidateRoot: string
       throw new ConfigurationFingerprintMismatchError("agentWorktreeRoot");
     }
   }
+}
+
+/** Existence-only check — never reads `worktree_path` or any other column; this function never derives or guesses a root from anything it finds. */
+function hasAnyAgentWorktreeRows(db: HallDatabase): boolean {
+  const row = db.prepare("SELECT 1 FROM agent_worktrees LIMIT 1").get();
+  return row !== undefined;
 }

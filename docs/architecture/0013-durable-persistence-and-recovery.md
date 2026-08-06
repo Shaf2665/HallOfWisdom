@@ -2,10 +2,12 @@
 
 Status: Phase 13, Phase 13.1 — Durable Browser Restart, Process-Test Reliability and
 Single-Instance Ownership — and Phase 13.2 — Durable Ownership Fencing and Full Comparison Restart
-Verification — are all complete. Phase 16.5 (pending review and merge, see "Agent-worktree
-reconciliation (Phase 16.5)" below) extends this document's restart-recovery pipeline with a fourth
-reconciliation pass, alongside task and comparison reconciliation, for Hall-owned isolated agent
-worktrees and their execution artifacts. Phase 13.1 closed three verification gaps the original Phase 13
+Verification — are all complete. Phase 16.5 (merged, including its post-merge hardening — see
+"Agent-worktree reconciliation (Phase 16.5)" below) extends this document's restart-recovery
+pipeline with a fourth reconciliation pass, alongside task and comparison reconciliation, for
+Hall-owned isolated agent worktrees and their execution artifacts. Phase 16.6 (explicitly authorized
+real Codex smoke verification and exact sandbox-equivalence proof) has not been started. Phase 13.1
+closed three verification gaps the original Phase 13
 report disclosed rather than papering over: it added exclusive single-instance ownership of a
 durable `--data-dir` (this document did not previously claim, and the architecture did not
 previously provide, any protection against two Hall Core processes sharing one database — see
@@ -422,8 +424,76 @@ fails startup closed without recording anything. All validation for one call hap
 write, so a `comparisonRoot` conflict can never leave a bootstrapped `agentWorktreeRoot` behind, or
 vice versa.
 
+**Legacy omitted-root rejection (post-merge Phase 16.5 hardening).** The case above — a supplied
+root against pre-existing rows — was covered from the first Phase 16.5 merge. A narrower gap
+remained: a database with `agent_worktrees` rows but **no** recorded root, started with the root
+**omitted again**, fell through every branch of the original function untouched and booted
+successfully, composing no agent-worktree manager and silently skipping reconciliation for those
+rows indefinitely — the exact "isolation is now disabled" outcome the stricter-than-`comparisonRoot`
+design was meant to prevent, just reached from the "never recorded" side instead of the
+"recorded-then-omitted" side. `checkOrRecordConfigurationFingerprint` now checks
+`hasAnyAgentWorktreeRows(db)` (a plain `SELECT 1 FROM agent_worktrees LIMIT 1` existence check —
+never a path read, never a guess) whenever no root is recorded and none is supplied, and fails
+closed with the same bounded `ConfigurationFingerprintMismatchError("agentWorktreeRoot")` the other
+branches already use. Because this throw happens before `runRestartRecovery` does anything else, the
+server never binds its port, never records a boot-ready state, and never touches a worktree or
+artifact record for a startup rejected this way; supplying the exact previously-proven root on a
+later startup still succeeds, exactly as it did before this fix, proven by a dedicated real-process
+test (`phase-16-5-worktree-recovery.test.ts`, "legacy database ... rejects an omitted agent-worktree
+root") that seeds a real row via the real built binary, confirms a second boot without the root is
+refused (no health response, no new boot row, the row itself untouched), then confirms a third boot
+with the correct root recovers cleanly.
+
+**Atomic fingerprint writes (post-merge Phase 16.5 hardening).** Before this hardening pass, each of
+`workspaceRoot`/`comparisonRoot`/`agentWorktreeRoot`'s conditional writes went through its own
+independent `withTransaction` call — validation for one logical startup call happened up front, but
+the writes themselves were three separate commits. A failure between the second and third write
+(a disk error, a lost connection, anything `setValue`'s underlying `INSERT ... ON CONFLICT` could
+throw) could leave one key durably recorded while another silently wasn't, for the same call that was
+supposed to be all-or-nothing. Both write sites in `checkOrRecordConfigurationFingerprint` (the
+brand-new-database bootstrap, and the existing-database additive-write path) now wrap every `setValue`
+call for that site inside one outer `withTransaction`; because `withTransaction` already supports
+nested calls via `SAVEPOINT` (see "Nested transactions" — used elsewhere for CEO plan delegation), the
+inner `setValue` calls participate in the same outer `BEGIN IMMEDIATE`/`COMMIT` rather than opening
+their own, so a failure on any one key rolls back every key from that same call. Durable ownership
+fencing is unaffected — it is still checked exactly once per logical call, on the outer transaction's
+`BEGIN IMMEDIATE`, rather than once per key as before. Fault-injection tests in
+`server-metadata-repository.test.ts` prove this directly: a `db.prepare` spy throws on the second (of
+two) or third (of three) `INSERT INTO server_metadata` call within one logical startup call, and the
+test asserts that **no** key from that call — not even the ones whose insert already ran — was left
+committed.
+
+**Strict Git worktree registration parsing (post-merge Phase 16.5 hardening).** Every registration
+inspection call site — ready-worktree validation, cleanup's registration check, and restart's
+orphan/reappearance scan — previously called `git worktree list --porcelain` (the plain, newline
+oriented form) through its own ad hoc line filter (`line.startsWith("worktree ")`), which silently
+dropped any line it didn't recognize rather than distinguishing "no more worktrees" from "output that
+doesn't look like what Git normally produces." `agent-worktrees/worktree-list-parser.ts` replaces
+this with one strict parser, shared by all three call sites through a single private
+`#listRegisteredWorktreePathsStrict` helper on `AgentWorktreeManager`, built on Git's machine-safe
+`git worktree list --porcelain -z` form: every attribute line is NUL-terminated instead of
+newline-terminated, and each worktree record is terminated by one additional NUL beyond its last
+attribute — a structure that survives paths containing spaces, newlines, or non-ASCII characters
+without any escaping ambiguity (confirmed directly against a real Git 2.54 invocation). The parser
+fails closed with a bounded `GIT_WORKTREE_LIST_MALFORMED` code — never a silently empty or partial
+list — on any output that does not exactly match that structure: a record whose first attribute
+isn't a non-empty, absolute `worktree ` path; more than one `worktree ` attribute in a single record
+(what a corrupted or single-NUL-instead-of-double record separator would look like once parsed); the
+same worktree path registered in more than one record; or output that ends mid-record instead of on a
+record boundary. This applies even when Git's own exit code is `0` — a bounded failure is reported
+exactly like a hard Git failure or truncated output, never treated as "zero registrations." Genuinely
+empty output (a database with isolation configured but nothing ever created yet) still parses to an
+empty list, since that is not itself malformed. Never exposes raw Git output or the parsed paths
+themselves in its own error messages — only the bounded failure code. Covered directly by
+`worktree-list-parser.test.ts` (pure parser tests: valid single/multiple records, spaces, non-ASCII,
+empty output, missing/duplicate `worktree` fields, relative paths, malformed separators, incomplete
+records) and by manager-level tests in `agent-worktree-manager.test.ts` (real multi-worktree Git
+output including spaces and non-ASCII paths, truncated output, exit-code-zero malformed output) and
+`reconcile-agent-worktrees.test.ts` (malformed output increments
+`registrationInspectionFailureCount` rather than `orphanWorktreeRegistrationCount` staying at zero).
+
 Phase 16.6 (explicitly authorized real Codex smoke verification and exact sandbox-equivalence
-proof) is unaffected by and unrelated to this phase, and remains deferred.
+proof) is unaffected by and unrelated to this phase, and has not been started.
 
 ## CLI — `--data-dir`
 
@@ -972,8 +1042,9 @@ wait out the real 20-second ownership-staleness default — Phase 13.2 added the
 alongside the original three). See "Testing," item 4, above for what each of those four tests in
 `src/process-tests/` proves.
 
-**(Phase 16.5)** `phase-16-5-worktree-recovery.test.ts` adds a fifth real-process scenario, this one
-for restart-safe worktree reconciliation specifically, driven entirely through the actual
+**(Phase 16.5)** `phase-16-5-worktree-recovery.test.ts` adds two real-process scenarios (six total
+across the directory, up from the original four), both for restart-safe worktree reconciliation,
+driven entirely through the actual
 `dist/server.js` binary and a real, disposable Git repository — no model-backed provider task is
 ever run. It uses `spawnRealServerWithStdin`/`gracefulStop` (the documented stdin `"SHUTDOWN\n"`
 graceful-shutdown trigger — see "Graceful shutdown from a spawned child process" above) between
@@ -989,6 +1060,15 @@ is idempotent (no duplicate artifact, no state regression); and direct SQLite/Gi
 inspection afterward confirms the primary checkout's `HEAD`, tracked files, and working-tree
 cleanliness were never touched, and that a seeded orphan directory under the owned root survived
 every restart untouched.
+
+**(post-merge Phase 16.5 hardening)** The second scenario in the same file proves the legacy
+omitted-root rejection (see "Legacy omitted-root rejection" above) through the real binary: a first
+boot establishes a database with no root ever supplied; a real `agent_worktrees` row is then seeded
+directly via SQL; a second boot attempt, still omitting the root, is proven refused —
+`attemptStart`/`waitForNonZeroExit` confirm it never answers `/api/v1/health` and exits with code
+`2`, and direct database inspection afterward confirms the boot count is still `1` and the seeded row
+is byte-for-byte untouched; a third boot supplying the exact proven root then succeeds and durably
+records it.
 
 ## Security review performed this phase
 

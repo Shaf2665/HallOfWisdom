@@ -2,9 +2,10 @@
 
 Status: Phase 16.4 (strict isolated Codex infrastructure) is merged. Phase 16.5 (restart-safe
 worktree reconciliation and cleanup, see "Phase 16.5 — restart-safe worktree reconciliation and
-cleanup" below) is implemented on the Phase 16.5 branch and is pending review and merge. Strict
-Codex availability remains fail-closed until exact sandbox equivalence is proven by the explicitly
-authorized Phase 16.6 verification. Real model-backed Codex smoke testing remains deferred.
+cleanup" below, including its post-merge hardening) is merged. Phase 16.6 (explicitly authorized real
+Codex smoke verification and exact sandbox-equivalence proof) has not been started. Strict Codex
+availability remains fail-closed until exact sandbox equivalence is proven by that verification. Real
+model-backed Codex smoke testing remains deferred.
 
 Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 built
 the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and SQLite
@@ -543,12 +544,40 @@ is proven to belong to the newly supplied root. See
 [`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md)'s
 "Agent-worktree-root durable fingerprint" for the full design.
 
-**Real-process verification.** `pnpm verify:process-recovery` now includes a dedicated Phase 16.5
-scenario driven through the actual built binary: a real completed (Mock Agent, non-isolated) task,
-a real Git worktree created in-process against the same database file with no execution artifact
-yet, a real restart that recovers the artifact and safely cleans up, a second real restart proving
-idempotency, and direct inspection confirming the primary checkout and an unrelated orphan
-directory were both left untouched throughout. No model-backed provider task is run.
+**Post-merge Phase 16.5 hardening.** Three gaps found after the initial merge were closed in a
+follow-up hotfix, all documented in full in 0013's "Agent-worktree reconciliation (Phase 16.5)"
+section:
+
+- **Legacy omitted-root rejection.** The fingerprint check above covered a _supplied_ root against
+  pre-existing `agent_worktrees` rows from the first merge onward, but a database with such rows and
+  **no** recorded root, started with the root omitted again, previously fell through untouched and
+  booted successfully — composing no agent-worktree manager and silently skipping reconciliation for
+  those rows indefinitely. `checkOrRecordConfigurationFingerprint` now fails closed on this
+  omitted-and-never-recorded case too (a plain row-existence check, never a path guess), rejecting
+  the startup before the server binds its port, records a boot-ready state, or touches any worktree
+  or artifact record.
+- **Atomic fingerprint writes.** Each of `workspaceRoot`/`comparisonRoot`/`agentWorktreeRoot`'s
+  conditional writes previously went through its own independent transaction; a failure partway
+  through one logical startup call could leave one key durably recorded while another silently
+  wasn't. All writes for one call now happen inside a single outer transaction (via `withTransaction`'s
+  existing `SAVEPOINT`-based nesting), so a failure on any key rolls back every key from that call.
+- **Strict Git worktree registration parsing.** Every registration-checking call site now reads
+  Git's NUL-delimited `git worktree list --porcelain -z` output through one strict, shared parser
+  (`worktree-list-parser.ts`) instead of the previous ad hoc newline-oriented line filter. Output
+  that does not exactly match Git's own byte structure — including an `exitCode: 0` response that
+  looks superficially successful — fails closed with a bounded `GIT_WORKTREE_LIST_MALFORMED` code,
+  never silently degrading to an empty or partial registration list.
+
+**Real-process verification.** `pnpm verify:process-recovery` includes two dedicated Phase 16.5
+scenarios driven through the actual built binary. The original: a real completed (Mock Agent,
+non-isolated) task, a real Git worktree created in-process against the same database file with no
+execution artifact yet, a real restart that recovers the artifact and safely cleans up, a second real
+restart proving idempotency, and direct inspection confirming the primary checkout and an unrelated
+orphan directory were both left untouched throughout — no model-backed provider task is run. The
+second, added by the post-merge hardening: a database seeded with a real `agent_worktrees` row but no
+recorded root refuses to start when the root is omitted (no health response, exit code `2`, no new
+boot record, the row itself untouched), then boots successfully once the exact proven root is
+supplied.
 
 ## Lifecycle
 

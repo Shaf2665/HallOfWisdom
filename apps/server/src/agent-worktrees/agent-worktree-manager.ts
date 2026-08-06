@@ -22,6 +22,10 @@ import {
   canonicalizeOwnedRoot,
   samePath,
 } from "./path-safety.js";
+import {
+  parseWorktreeListPorcelainZ,
+  WORKTREE_LIST_PORCELAIN_Z_ARGS,
+} from "./worktree-list-parser.js";
 
 export interface AgentWorktreeManagerOptions {
   readonly store: AgentWorktreeStorePort;
@@ -474,15 +478,8 @@ export class AgentWorktreeManager {
     worktreePath: string,
     signal: AbortSignal | undefined,
   ): Promise<boolean> {
-    const stdout = await this.#runGit(
-      ["worktree", "list", "--porcelain"],
-      sourceRepositoryRoot,
-      "GIT_WORKTREE_LIST_FAILED",
-      signal,
-    );
-    return parseWorktreeListPorcelain(stdout).some((candidate) =>
-      samePath(candidate, worktreePath),
-    );
+    const registered = await this.#listRegisteredWorktreePathsStrict(sourceRepositoryRoot, signal);
+    return registered.some((candidate) => samePath(candidate, worktreePath));
   }
 
   /**
@@ -492,16 +489,34 @@ export class AgentWorktreeManager {
    * the primary checkout itself and any worktree registered anywhere
    * (comparison worktrees included) — the caller is responsible for
    * filtering to paths under its own owned root before drawing any
-   * conclusion; this method never does. Never mutates anything. Truncated
-   * output fails closed (throws) rather than silently returning a partial
-   * list a caller could mistake for the complete registration set.
+   * conclusion; this method never does. Never mutates anything.
    */
   async listRegisteredWorktreePaths(
     sourceRepositoryRoot: string,
     signal?: AbortSignal,
   ): Promise<readonly string[]> {
+    return this.#listRegisteredWorktreePathsStrict(sourceRepositoryRoot, signal);
+  }
+
+  /**
+   * Post-merge Phase 16.5 hardening — the one place every registration
+   * inspection call site (ready-worktree checks, cleanup registration
+   * checks, restart orphan-registration inspection) goes through, so
+   * truncation handling and strict parsing are enforced identically
+   * everywhere rather than duplicated (and previously inconsistently
+   * applied — see `worktree-list-parser.ts`'s doc comment). Truncated
+   * output fails closed (throws) rather than silently returning a partial
+   * list a caller could mistake for the complete registration set;
+   * malformed output (anything not exactly matching real Git's `-z`
+   * porcelain byte structure) fails closed the same way, never silently
+   * degrading to an empty or partial list.
+   */
+  async #listRegisteredWorktreePathsStrict(
+    sourceRepositoryRoot: string,
+    signal: AbortSignal | undefined,
+  ): Promise<readonly string[]> {
     const result = await this.#runGitResult(
-      ["worktree", "list", "--porcelain"],
+      WORKTREE_LIST_PORCELAIN_Z_ARGS,
       sourceRepositoryRoot,
       signal,
     );
@@ -512,7 +527,7 @@ export class AgentWorktreeManager {
       );
     }
     const stdout = assertGitSuccess(result, "GIT_WORKTREE_LIST_FAILED");
-    return parseWorktreeListPorcelain(stdout);
+    return parseWorktreeListPorcelainZ(stdout);
   }
 
   async #assertDetachedHead(worktreePath: string, signal: AbortSignal | undefined): Promise<void> {
@@ -634,13 +649,6 @@ function canonicalizeEmptyHooksDirectory(ownedRoot: string): string {
     throw new AgentWorktreePathError("Hall-controlled hooks directory must be empty.");
   }
   return canonicalHooksDirectory;
-}
-
-function parseWorktreeListPorcelain(stdout: string): readonly string[] {
-  return stdout
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith("worktree "))
-    .map((line) => path.resolve(line.slice("worktree ".length).trim()));
 }
 
 function isNotFoundError(error: unknown): boolean {
