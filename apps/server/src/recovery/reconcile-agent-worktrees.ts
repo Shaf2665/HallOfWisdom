@@ -5,6 +5,7 @@ import type { NormalizedAgentEvent } from "@hall-of-wisdom/protocol";
 import type { AgentWorktreeManager } from "../agent-worktrees/agent-worktree-manager.js";
 import type { AgentWorktreeRecord } from "../agent-worktrees/agent-worktree-record.js";
 import type { AgentWorktreeStorePort } from "../agent-worktrees/agent-worktree-store-port.js";
+import { isPathContained } from "../agent-worktrees/path-safety.js";
 import type { NormalizedEventStorePort } from "../events/event-store-port.js";
 import type { AgentExecutionArtifactStorePort } from "../execution-artifacts/agent-execution-artifact-store-port.js";
 import type { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
@@ -38,8 +39,21 @@ export interface AgentWorktreeReconciliationSummary {
   readonly worktreesCleaned: number;
   readonly cleanupFailures: number;
   readonly reconciliationBlockedCount: number;
-  readonly inconsistentCleanedCount: number;
+  /** A `cleaned` record whose filesystem directory unexpectedly exists again. Never auto-deleted; never transitions the record backward. */
+  readonly inconsistentCleanedDirectoryCount: number;
+  /** A `cleaned` record whose Git worktree registration unexpectedly exists again. Never auto-pruned; never transitions the record backward. */
+  readonly inconsistentCleanedRegistrationCount: number;
+  /** A directory (or symlink/junction) under the owned root not backed by any persisted worktree record. Counted, never deleted or pruned. */
   readonly orphanWorktreeDirectoryCount: number;
+  /** A Git worktree registration under the owned root not backed by any persisted worktree record. Counted, never deleted or pruned — Git registrations are never mutated by this pass. */
+  readonly orphanWorktreeRegistrationCount: number;
+  /**
+   * The owned root's filesystem could not be listed, or a source
+   * repository's Git worktree registrations could not be inspected
+   * (including truncated Git output) — a bounded failure count, never a
+   * silent zero standing in for "nothing to report."
+   */
+  readonly registrationInspectionFailureCount: number;
 }
 
 const EMPTY_SUMMARY: AgentWorktreeReconciliationSummary = {
@@ -51,8 +65,11 @@ const EMPTY_SUMMARY: AgentWorktreeReconciliationSummary = {
   worktreesCleaned: 0,
   cleanupFailures: 0,
   reconciliationBlockedCount: 0,
-  inconsistentCleanedCount: 0,
+  inconsistentCleanedDirectoryCount: 0,
+  inconsistentCleanedRegistrationCount: 0,
   orphanWorktreeDirectoryCount: 0,
+  orphanWorktreeRegistrationCount: 0,
+  registrationInspectionFailureCount: 0,
 };
 
 /**
@@ -78,7 +95,12 @@ export async function reconcileAgentWorktrees(
 ): Promise<AgentWorktreeReconciliationSummary> {
   const records = input.agentWorktreeStore.list();
   if (records.length === 0) {
-    return { ...EMPTY_SUMMARY, orphanWorktreeDirectoryCount: scanOrphans(input, []) };
+    const filesystem = scanOrphans(input, []);
+    return {
+      ...EMPTY_SUMMARY,
+      orphanWorktreeDirectoryCount: filesystem.orphanCount,
+      registrationInspectionFailureCount: filesystem.inspectionFailed ? 1 : 0,
+    };
   }
 
   let interruptedCreationCount = 0;
@@ -88,7 +110,7 @@ export async function reconcileAgentWorktrees(
   let worktreesCleaned = 0;
   let cleanupFailures = 0;
   let reconciliationBlockedCount = 0;
-  let inconsistentCleanedCount = 0;
+  let inconsistentCleanedDirectoryCount = 0;
 
   for (const initial of records) {
     try {
@@ -126,7 +148,7 @@ export async function reconcileAgentWorktrees(
           break;
         }
         case "cleaned": {
-          if (cleanedRecordLooksInconsistent(initial)) inconsistentCleanedCount += 1;
+          if (cleanedRecordLooksInconsistent(initial)) inconsistentCleanedDirectoryCount += 1;
           break;
         }
         default:
@@ -145,6 +167,14 @@ export async function reconcileAgentWorktrees(
     }
   }
 
+  // Deterministic, batched, read-only passes over the ORIGINAL snapshot
+  // taken at the top of this function — never a live re-read — so
+  // "reappeared registration" is judged against exactly the status each
+  // record had when this reconciliation pass began, the same discipline
+  // the per-record loop above already applies to directory reappearance.
+  const filesystem = scanOrphans(input, records);
+  const registrations = await inspectGitRegistrations(input, records);
+
   return {
     worktreesScanned: records.length,
     interruptedCreationCount,
@@ -154,8 +184,12 @@ export async function reconcileAgentWorktrees(
     worktreesCleaned,
     cleanupFailures,
     reconciliationBlockedCount,
-    inconsistentCleanedCount,
-    orphanWorktreeDirectoryCount: scanOrphans(input, records),
+    inconsistentCleanedDirectoryCount,
+    inconsistentCleanedRegistrationCount: registrations.reappearedRegistrationWorktreeIds.size,
+    orphanWorktreeDirectoryCount: filesystem.orphanCount,
+    orphanWorktreeRegistrationCount: registrations.orphanRegistrationCount,
+    registrationInspectionFailureCount:
+      (filesystem.inspectionFailed ? 1 : 0) + registrations.inspectionFailureCount,
   };
 }
 
@@ -282,10 +316,12 @@ function cleanedRecordLooksInconsistent(record: AgentWorktreeRecord): boolean {
   }
 }
 
-function scanOrphans(
-  input: AgentWorktreeReconciliationInput,
-  records: readonly AgentWorktreeRecord[],
-): number {
+interface FilesystemScanResult {
+  readonly orphanCount: number;
+  readonly inspectionFailed: boolean;
+}
+
+function knownCanonicalWorktreePaths(records: readonly AgentWorktreeRecord[]): ReadonlySet<string> {
   const known = new Set<string>();
   for (const record of records) {
     try {
@@ -294,26 +330,146 @@ function scanOrphans(
       known.add(path.resolve(record.canonicalWorktreePath));
     }
   }
+  return known;
+}
+
+/**
+ * Read-only, count-only scan of the owned root's direct children for
+ * entries not backed by any persisted worktree record — never deletes,
+ * never prunes. A missing owned root (isolation configured but nothing
+ * ever created there yet) is a legitimate zero; a root that exists but
+ * could not be listed (permissions, an unreadable filesystem, etc.) is
+ * reported as a bounded inspection failure instead — never silently
+ * folded into the same zero. Symlink and junction entries are included in
+ * the walk (never skipped purely because they are not an ordinary
+ * directory) so an unexpected link under the owned root is still counted,
+ * not silently ignored.
+ */
+function scanOrphans(
+  input: AgentWorktreeReconciliationInput,
+  records: readonly AgentWorktreeRecord[],
+): FilesystemScanResult {
+  const known = knownCanonicalWorktreePaths(records);
+
+  if (!fs.existsSync(input.agentWorktreeRoot)) {
+    return { orphanCount: 0, inspectionFailed: false };
+  }
 
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(input.agentWorktreeRoot, { withFileTypes: true });
   } catch {
-    return 0;
+    return { orphanCount: 0, inspectionFailed: true };
   }
 
   let orphanCount = 0;
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
     if (HALL_CONTROLLED_NON_WORKTREE_DIRECTORY_NAMES.has(entry.name)) continue;
     const candidatePath = path.join(input.agentWorktreeRoot, entry.name);
     let canonical: string;
     try {
       canonical = fs.realpathSync.native(candidatePath);
     } catch {
+      // A broken symlink/junction is still reported as an orphan, never
+      // silently skipped because it could not be resolved.
+      orphanCount += 1;
       continue;
     }
     if (!known.has(canonical)) orphanCount += 1;
   }
-  return orphanCount;
+  return { orphanCount, inspectionFailed: false };
+}
+
+interface GitRegistrationInspectionResult {
+  readonly orphanRegistrationCount: number;
+  readonly reappearedRegistrationWorktreeIds: ReadonlySet<string>;
+  readonly inspectionFailureCount: number;
+}
+
+/**
+ * Read-only, bounded inspection of Git's own worktree registrations,
+ * through the existing `AgentWorktreeManager.listRegisteredWorktreePaths`
+ * (which itself uses the bounded Git runner and fails closed on truncated
+ * output) — never a second, ad hoc Git invocation. Processes each unique
+ * persisted source repository exactly once, in deterministic (sorted)
+ * order. Only registrations that resolve INSIDE the Hall-owned worktree
+ * root are ever classified — the primary checkout, any comparison
+ * worktree, and anything else Git happens to have registered elsewhere
+ * are read but never touched, counted, or otherwise acted on by this
+ * feature. Never deletes or prunes a registration under any
+ * circumstance; a source repository whose registrations could not be
+ * inspected (missing repository, malformed/truncated Git output, a Git
+ * failure of any kind) contributes to a bounded failure count rather than
+ * being silently treated as "no registrations."
+ */
+async function inspectGitRegistrations(
+  input: AgentWorktreeReconciliationInput,
+  records: readonly AgentWorktreeRecord[],
+): Promise<GitRegistrationInspectionResult> {
+  const bySourceRepo = new Map<string, AgentWorktreeRecord[]>();
+  for (const record of records) {
+    const forRepo = bySourceRepo.get(record.canonicalSourceRepositoryRoot) ?? [];
+    forRepo.push(record);
+    bySourceRepo.set(record.canonicalSourceRepositoryRoot, forRepo);
+  }
+  const sourceRepos = [...bySourceRepo.keys()].sort();
+
+  let orphanRegistrationCount = 0;
+  let inspectionFailureCount = 0;
+  const reappeared = new Set<string>();
+
+  for (const sourceRepo of sourceRepos) {
+    const recordsForRepo = bySourceRepo.get(sourceRepo) ?? [];
+    let registeredPaths: readonly string[];
+    try {
+      registeredPaths = await input.agentWorktreeManager.listRegisteredWorktreePaths(sourceRepo);
+    } catch (error) {
+      inspectionFailureCount += 1;
+      console.error(
+        `Recovery could not inspect Git worktree registrations for a source repository; reporting a bounded failure rather than assuming none exist: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      continue;
+    }
+
+    const byCanonicalPath = new Map<string, AgentWorktreeRecord>();
+    for (const record of recordsForRepo) {
+      for (const canonical of [
+        ...knownCanonicalWorktreePaths([record]),
+        path.resolve(record.canonicalWorktreePath),
+      ]) {
+        byCanonicalPath.set(canonical, record);
+      }
+    }
+
+    for (const registeredPath of registeredPaths) {
+      // The primary checkout, a comparison worktree, or anything else Git
+      // happens to know about that is not under Hall's own owned root is
+      // out of scope for this feature entirely — never inspected further,
+      // never classified, never touched.
+      if (!isPathContained(input.agentWorktreeRoot, registeredPath)) continue;
+
+      let canonicalRegistered: string;
+      try {
+        canonicalRegistered = fs.realpathSync.native(registeredPath);
+      } catch {
+        canonicalRegistered = registeredPath;
+      }
+
+      const owner = byCanonicalPath.get(canonicalRegistered) ?? byCanonicalPath.get(registeredPath);
+      if (owner === undefined) {
+        orphanRegistrationCount += 1;
+        continue;
+      }
+      if (owner.status === "cleaned") {
+        reappeared.add(owner.worktreeId);
+      }
+    }
+  }
+
+  return {
+    orphanRegistrationCount,
+    reappearedRegistrationWorktreeIds: reappeared,
+    inspectionFailureCount,
+  };
 }

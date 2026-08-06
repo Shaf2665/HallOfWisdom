@@ -141,15 +141,24 @@ export class IsolatedAgentExecutionCoordinator {
   /**
    * Phase 16.5 runtime cleanup — called by `TaskOrchestrator` only after
    * the execution artifact for this exact worktree's run has already been
-   * durably persisted (or confirmed as an idempotent match). Deliberately
-   * fail-soft: cleanup failure is bounded and returned, never thrown, so a
-   * caller can log it without ever letting it change a task's already-
-   * recorded terminal outcome. Absent worktree services (non-isolated
-   * execution, or a coordinator built without a cleaner) report a bounded
-   * `ok: true` no-op — there is nothing to clean up.
+   * durably persisted (or confirmed as an idempotent match), and only ever
+   * with a real, non-`undefined` worktree ID — `TaskOrchestrator` never
+   * calls this at all for a non-isolated execution (no worktree ID),
+   * which is the case this method has no opinion about and never needs
+   * to. Deliberately fail-soft: cleanup failure is bounded and returned,
+   * never thrown, so a caller can log it without ever letting it change a
+   * task's already-recorded terminal outcome. A REAL worktree ID with no
+   * cleaner available (a coordinator built without a worktree manager, or
+   * one whose manager does not implement `cleanupWorktree`) is itself a
+   * failure to report, never a silent success — claiming a worktree was
+   * cleaned when nothing actually attempted to clean it would leave a
+   * real Git worktree behind while every durable record believed it was
+   * gone.
    */
   async cleanupWorktree(worktreeId: string, signal?: AbortSignal): Promise<WorktreeCleanupResult> {
-    if (this.#worktreeManager?.cleanupWorktree === undefined) return { ok: true };
+    if (this.#worktreeManager?.cleanupWorktree === undefined) {
+      return { ok: false, code: "AGENT_WORKTREE_CLEANER_UNAVAILABLE" };
+    }
     try {
       const record = await this.#worktreeManager.cleanupWorktree(worktreeId, signal);
       return record.status === "cleaned"

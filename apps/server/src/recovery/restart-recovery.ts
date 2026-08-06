@@ -126,6 +126,7 @@ export async function runRestartRecovery(
   checkOrRecordConfigurationFingerprint(input.db, {
     workspaceRoot: input.workspaceRoot,
     comparisonRoot: input.comparisonRoot,
+    agentWorktreeRoot: input.agentWorktree?.agentWorktreeRoot,
   });
 
   const previousBoot = getPreviousBoot(input.db, input.bootId);

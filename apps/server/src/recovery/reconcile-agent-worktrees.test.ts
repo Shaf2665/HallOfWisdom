@@ -9,6 +9,7 @@ import { InMemoryAgentWorktreeStore } from "../agent-worktrees/in-memory-agent-w
 import {
   NodeGitCommandRunner,
   nodeGitProcessSpawner,
+  type GitCommandRunner,
 } from "../agent-worktrees/git-command-runner.js";
 import { EventStore } from "../events/event-store.js";
 import { InMemoryAgentExecutionArtifactStore } from "../execution-artifacts/in-memory-agent-execution-artifact-store.js";
@@ -558,7 +559,7 @@ describe("reconcileAgentWorktrees", () => {
 
     const secondPass = await reconcileAgentWorktrees(context(contextInput));
 
-    expect(secondPass.inconsistentCleanedCount).toBe(1);
+    expect(secondPass.inconsistentCleanedDirectoryCount).toBe(1);
     expect(store.get(worktreeId).status).toBe("cleaned");
     expect(fs.existsSync(path.join(worktreePath, "reappeared.txt"))).toBe(true);
   });
@@ -610,7 +611,7 @@ describe("reconcileAgentWorktrees", () => {
       }),
     );
     expect(first.worktreesCleaned).toBe(1);
-    const callsAfterFirst = runner.calls.length;
+    const mutatingCallsAfterFirst = countMutatingGitCalls(runner);
 
     const second = await reconcileAgentWorktrees(
       context({
@@ -621,8 +622,12 @@ describe("reconcileAgentWorktrees", () => {
     );
     expect(second.worktreesCleaned).toBe(0);
     expect(second.interruptedCreationCount).toBe(0);
-    expect(second.inconsistentCleanedCount).toBe(0);
-    expect(runner.calls.length).toBe(callsAfterFirst);
+    expect(second.inconsistentCleanedDirectoryCount).toBe(0);
+    expect(second.inconsistentCleanedRegistrationCount).toBe(0);
+    // The second pass still issues a read-only `git worktree list`
+    // registration inspection (expected every boot) but no further
+    // mutating `worktree add`/`worktree remove` call.
+    expect(countMutatingGitCalls(runner)).toBe(mutatingCallsAfterFirst);
     expect(store.get("wt-idem").status).toBe("cleaned");
   });
 
@@ -644,6 +649,229 @@ describe("reconcileAgentWorktrees", () => {
     for (const value of Object.values(summary)) {
       expect(typeof value).toBe("number");
     }
+  });
+
+  it("counts a real Git worktree registration with a directory that is not backed by any persisted record, and never deletes it", async () => {
+    // Registration inspection only ever runs against a source repository
+    // Hall already has at least one persisted record for — it has no way
+    // to discover an entirely unrelated repository. This fixture has one
+    // legitimate `ready` worktree so the source repo is in scope, plus a
+    // second, orphan registration under the same repo Hall never created.
+    const { manager, store, ownedRoot, taskId, runId, taskEventStore } = await readyWorktreeFixture(
+      "orphan-registration-with-dir",
+    );
+    void taskId;
+    void runId;
+    void taskEventStore;
+    const sourceRepo = store.list()[0]?.canonicalSourceRepositoryRoot ?? "";
+    const head = store.list()[0]?.baseCommit ?? "";
+    const orphanPath = path.join(ownedRoot, "wt_never-persisted");
+    git(["worktree", "add", "--detach", "--no-checkout", orphanPath, head], sourceRepo);
+
+    const summary = await reconcileAgentWorktrees(
+      context({
+        agentWorktreeStore: store,
+        agentWorktreeManager: manager,
+        agentWorktreeRoot: ownedRoot,
+      }),
+    );
+
+    expect(summary.orphanWorktreeRegistrationCount).toBe(1);
+    expect(fs.existsSync(orphanPath)).toBe(true);
+    expect(isWorktreeRegistered(sourceRepo, orphanPath)).toBe(true);
+  });
+
+  it("counts an orphan Git registration whose directory is already missing, without pruning it", async () => {
+    const { manager, store, ownedRoot } = await readyWorktreeFixture(
+      "orphan-registration-missing-dir",
+    );
+    const sourceRepo = store.list()[0]?.canonicalSourceRepositoryRoot ?? "";
+    const head = store.list()[0]?.baseCommit ?? "";
+    const orphanPath = path.join(ownedRoot, "wt_dangling");
+    git(["worktree", "add", "--detach", "--no-checkout", orphanPath, head], sourceRepo);
+    fs.rmSync(orphanPath, { recursive: true, force: true });
+    expect(isWorktreeRegistered(sourceRepo, orphanPath)).toBe(true);
+
+    const summary = await reconcileAgentWorktrees(
+      context({
+        agentWorktreeStore: store,
+        agentWorktreeManager: manager,
+        agentWorktreeRoot: ownedRoot,
+      }),
+    );
+
+    expect(summary.orphanWorktreeRegistrationCount).toBe(1);
+    // Never `git worktree prune` — the dangling registration is untouched.
+    expect(isWorktreeRegistered(sourceRepo, orphanPath)).toBe(true);
+  });
+
+  it("reports (but never deletes or prunes) a cleaned record whose Git registration unexpectedly reappeared", async () => {
+    const {
+      manager,
+      store,
+      ownedRoot,
+      worktreeId,
+      worktreePath,
+      taskId,
+      runId,
+      taskEventStore,
+      artifactStore,
+      terminalizer,
+    } = await readyWorktreeFixture("cleaned-registration-reappeared");
+    const sourceRepo = store.get(worktreeId).canonicalSourceRepositoryRoot;
+    const baseCommit = store.get(worktreeId).baseCommit;
+    const factory = new EventFactory({ runId, taskId, agentId: "agent-1" });
+    taskEventStore.append(taskId, factory.runStarted(), { runId, taskId, agentId: "agent-1" });
+    taskEventStore.append(taskId, factory.runCompleted("done"), {
+      runId,
+      taskId,
+      agentId: "agent-1",
+    });
+    const contextInput = {
+      agentWorktreeStore: store,
+      agentWorktreeManager: manager,
+      agentWorktreeRoot: ownedRoot,
+      taskEventStore,
+      agentExecutionArtifactStore: artifactStore,
+      agentExecutionArtifactTerminalizer: terminalizer,
+    };
+    const firstPass = await reconcileAgentWorktrees(context(contextInput));
+    expect(firstPass.worktreesCleaned).toBe(1);
+    expect(store.get(worktreeId).status).toBe("cleaned");
+    expect(fs.existsSync(worktreePath)).toBe(false);
+
+    // Simulate the registration reappearing (e.g. an external `git worktree
+    // add` reusing the exact same path) without recreating the directory
+    // through Hall's own manager.
+    fs.mkdirSync(worktreePath, { recursive: true });
+    git(["worktree", "add", "--detach", "--no-checkout", worktreePath, baseCommit], sourceRepo);
+
+    const secondPass = await reconcileAgentWorktrees(context(contextInput));
+
+    expect(secondPass.inconsistentCleanedRegistrationCount).toBe(1);
+    expect(store.get(worktreeId).status).toBe("cleaned");
+    expect(isWorktreeRegistered(sourceRepo, worktreePath)).toBe(true);
+  });
+
+  it("reports a bounded registration-inspection failure (never a silent zero) when the source repository is unavailable", async () => {
+    const fixture = createFixtureRepository("registration-source-missing");
+    const ownedRoot = makeTempDir("hall owned ");
+    const store = new InMemoryAgentWorktreeStore();
+    const manager = new AgentWorktreeManager({ store, gitRunner: testGitRunner(), ownedRoot });
+    const worktreePath = path.join(ownedRoot, "wt_wt-src-missing");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const creating = store.createCreating({
+      worktreeId: "wt-src-missing",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      adapterId: "hall.codex",
+      agentId: "agent-1",
+      canonicalSourceRepositoryRoot: fixture.repo,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: fixture.head,
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: "2026-08-06T00:00:00.000Z",
+    });
+    store.markReady({
+      worktreeId: "wt-src-missing",
+      expectedRevision: creating.revision,
+      readyAt: "2026-08-06T00:00:01.000Z",
+    });
+    fs.rmSync(fixture.repo, { recursive: true, force: true });
+
+    const summary = await reconcileAgentWorktrees(
+      context({
+        agentWorktreeStore: store,
+        agentWorktreeManager: manager,
+        agentWorktreeRoot: ownedRoot,
+      }),
+    );
+
+    expect(summary.registrationInspectionFailureCount).toBeGreaterThanOrEqual(1);
+    expect(summary.orphanWorktreeRegistrationCount).toBe(0);
+  });
+
+  it("reports a bounded registration-inspection failure (never a silent zero) on truncated Git worktree-list output", async () => {
+    const fixture = createFixtureRepository("registration-truncated");
+    const ownedRoot = makeTempDir("hall owned ");
+    const store = new InMemoryAgentWorktreeStore();
+    const realRunner = testGitRunner();
+    const truncatingRunner: GitCommandRunner = {
+      run(input): ReturnType<GitCommandRunner["run"]> {
+        if (input.args.includes("list")) {
+          return Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            stdout: "worktree ",
+            stderr: "",
+            stdoutTruncated: true,
+            stderrTruncated: false,
+            timedOut: false,
+            spawnError: undefined,
+          });
+        }
+        return realRunner.run(input);
+      },
+    };
+    const manager = new AgentWorktreeManager({ store, gitRunner: truncatingRunner, ownedRoot });
+    const worktreePath = path.join(ownedRoot, "wt_wt-truncated");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const creating = store.createCreating({
+      worktreeId: "wt-truncated",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      adapterId: "hall.codex",
+      agentId: "agent-1",
+      canonicalSourceRepositoryRoot: fixture.repo,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: fixture.head,
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: "2026-08-06T00:00:00.000Z",
+    });
+    store.markReady({
+      worktreeId: "wt-truncated",
+      expectedRevision: creating.revision,
+      readyAt: "2026-08-06T00:00:01.000Z",
+    });
+
+    const summary = await reconcileAgentWorktrees(
+      context({
+        agentWorktreeStore: store,
+        agentWorktreeManager: manager,
+        agentWorktreeRoot: ownedRoot,
+      }),
+    );
+
+    expect(summary.registrationInspectionFailureCount).toBeGreaterThanOrEqual(1);
+    expect(summary.orphanWorktreeRegistrationCount).toBe(0);
+  });
+
+  it("counts a symlink or junction entry under the owned root rather than silently skipping it", async () => {
+    const fixture = createFixtureRepository("symlink-entry");
+    const ownedRoot = makeTempDir("hall owned ");
+    const store = new InMemoryAgentWorktreeStore();
+    const manager = new AgentWorktreeManager({ store, gitRunner: testGitRunner(), ownedRoot });
+    void fixture;
+    const target = makeTempDir("hall symlink target ");
+    const linkPath = path.join(ownedRoot, "wt_symlinked");
+    try {
+      fs.symlinkSync(target, linkPath, "junction");
+    } catch {
+      return undefined;
+    }
+
+    const summary = await reconcileAgentWorktrees(
+      context({
+        agentWorktreeStore: store,
+        agentWorktreeManager: manager,
+        agentWorktreeRoot: ownedRoot,
+      }),
+    );
+
+    expect(summary.orphanWorktreeDirectoryCount).toBe(1);
+    expect(
+      fs.existsSync(linkPath) || fs.lstatSync(linkPath, { throwIfNoEntry: false }) !== undefined,
+    ).toBe(true);
   });
 });
 
@@ -775,6 +1003,16 @@ function git(args: readonly string[], cwd: string): string {
   }).trim();
 }
 
+function isWorktreeRegistered(sourceRepositoryRoot: string, worktreePath: string): boolean {
+  const stdout = git(["worktree", "list", "--porcelain"], sourceRepositoryRoot);
+  const resolved = path.resolve(worktreePath);
+  return stdout
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => path.resolve(line.slice("worktree ".length).trim()))
+    .some((candidate) => candidate.toLowerCase() === resolved.toLowerCase());
+}
+
 class RecordingGitRunner {
   readonly calls: { readonly args: readonly string[] }[] = [];
   readonly #inner: NodeGitCommandRunner;
@@ -787,4 +1025,9 @@ class RecordingGitRunner {
     this.calls.push({ args: input.args });
     return this.#inner.run(input);
   }
+}
+
+function countMutatingGitCalls(runner: RecordingGitRunner): number {
+  return runner.calls.filter((call) => call.args.includes("add") || call.args.includes("remove"))
+    .length;
 }

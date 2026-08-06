@@ -52,6 +52,51 @@ export function spawnRealServer(args: readonly string[]): ChildProcess {
   });
 }
 
+/**
+ * Same as `spawnRealServer`, but with a piped (non-TTY) stdin so
+ * `gracefulStop` below can send the documented `"SHUTDOWN\n"` line — see
+ * `docs/architecture/0013-durable-persistence-and-recovery.md`, "Graceful
+ * shutdown from a spawned child process," for why this exists: on
+ * Windows, `child.kill()` cannot deliver a real graceful signal to a
+ * spawned Node child, so the production binary also accepts this stdin
+ * trigger as a graceful-shutdown path equivalent to a real SIGINT.
+ */
+export function spawnRealServerWithStdin(args: readonly string[]): ChildProcess {
+  return spawn(process.execPath, [DIST_SERVER_PATH, ...args], {
+    stdio: ["pipe", "ignore", "ignore"],
+    windowsHide: true,
+  });
+}
+
+/**
+ * Triggers the real graceful-shutdown path (releases the durable
+ * ownership lock immediately, records a clean-shutdown marker) and waits
+ * for the process to exit, bounded by `timeoutMs`. Requires a child
+ * spawned with `spawnRealServerWithStdin`. Using this between boots in a
+ * multi-restart test avoids the real ~20s ownership-staleness wait a
+ * `SIGKILL`led instance would otherwise force on the next start attempt —
+ * see `instance-ownership.ts`'s "no staleness wait, since it was
+ * genuinely released" guarantee.
+ */
+export async function gracefulStop(child: ChildProcess, timeoutMs = 10000): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.stdin?.write("SHUTDOWN\n");
+  let timer: ReturnType<typeof setTimeout>;
+  await Promise.race([
+    new Promise<void>((resolve) => {
+      child.once("exit", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    }),
+    new Promise<void>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error("gracefulStop: process did not exit within timeout"));
+      }, timeoutMs);
+    }),
+  ]);
+}
+
 /** Same as `spawnRealServer`, but captures stdout/stderr into a buffer instead of discarding it — for tests that need to inspect a rejected instance's diagnostic output. */
 export function spawnRealServerCapturingOutput(args: readonly string[]): {
   readonly child: ChildProcess;

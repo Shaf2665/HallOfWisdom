@@ -480,11 +480,39 @@ export class AgentWorktreeManager {
       "GIT_WORKTREE_LIST_FAILED",
       signal,
     );
-    return stdout
-      .split(/\r?\n/)
-      .filter((line) => line.startsWith("worktree "))
-      .map((line) => line.slice("worktree ".length).trim())
-      .some((candidate) => samePath(path.resolve(candidate), worktreePath));
+    return parseWorktreeListPorcelain(stdout).some((candidate) =>
+      samePath(candidate, worktreePath),
+    );
+  }
+
+  /**
+   * Phase 16.5 — read-only registration inspection for restart
+   * reconciliation's orphan/reappearance detection. Returns every path
+   * Git currently has registered against `sourceRepositoryRoot`, including
+   * the primary checkout itself and any worktree registered anywhere
+   * (comparison worktrees included) — the caller is responsible for
+   * filtering to paths under its own owned root before drawing any
+   * conclusion; this method never does. Never mutates anything. Truncated
+   * output fails closed (throws) rather than silently returning a partial
+   * list a caller could mistake for the complete registration set.
+   */
+  async listRegisteredWorktreePaths(
+    sourceRepositoryRoot: string,
+    signal?: AbortSignal,
+  ): Promise<readonly string[]> {
+    const result = await this.#runGitResult(
+      ["worktree", "list", "--porcelain"],
+      sourceRepositoryRoot,
+      signal,
+    );
+    if (result.stdoutTruncated === true) {
+      throw new AgentWorktreeGitOperationError(
+        "GIT_WORKTREE_LIST_TRUNCATED",
+        "Git worktree list output was truncated.",
+      );
+    }
+    const stdout = assertGitSuccess(result, "GIT_WORKTREE_LIST_FAILED");
+    return parseWorktreeListPorcelain(stdout);
   }
 
   async #assertDetachedHead(worktreePath: string, signal: AbortSignal | undefined): Promise<void> {
@@ -606,6 +634,13 @@ function canonicalizeEmptyHooksDirectory(ownedRoot: string): string {
     throw new AgentWorktreePathError("Hall-controlled hooks directory must be empty.");
   }
   return canonicalHooksDirectory;
+}
+
+function parseWorktreeListPorcelain(stdout: string): readonly string[] {
+  return stdout
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("worktree "))
+    .map((line) => path.resolve(line.slice("worktree ".length).trim()));
 }
 
 function isNotFoundError(error: unknown): boolean {

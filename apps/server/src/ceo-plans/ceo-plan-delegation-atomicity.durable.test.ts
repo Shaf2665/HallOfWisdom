@@ -2,7 +2,12 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, vi } from "vitest";
-import { createServerComposition } from "../composition/server-composition.js";
+import { CLAUDE_CODE_ADAPTER_ID } from "@hall-of-wisdom/claude-code-adapter";
+import { CODEX_ADAPTER_ID } from "@hall-of-wisdom/codex-adapter";
+import {
+  createServerComposition,
+  type ServerComposition,
+} from "../composition/server-composition.js";
 import { resolveDataDir } from "../persistence/database-config.js";
 import { HallDatabase } from "../persistence/database.js";
 import { runMigrations } from "../persistence/migration-runner.js";
@@ -19,6 +24,14 @@ import {
  * `HallDatabase`. Proves `withTransaction`'s reentrant SAVEPOINT nesting
  * gives the exact same all-or-nothing delegation behavior the ephemeral
  * call site proves for `createEphemeralAtomicUnit`.
+ *
+ * See the ephemeral call site's matching doc comment for why
+ * `stubExternalProviderDetection` exists: `createServerComposition`
+ * always registers real Claude Code and Codex adapters, and
+ * `delegate()`'s `detectRoutingCandidates()` call spawns real CLI
+ * subprocesses for both unless stubbed — measured to cause a genuine
+ * "Test timed out in 10000ms" failure under full-monorepo parallel load
+ * for the "repeated delegation" scenario's two `delegate()` calls.
  */
 
 let tempRoot: string | undefined;
@@ -29,6 +42,15 @@ afterEach(() => {
   if (tempRoot !== undefined) fs.rmSync(tempRoot, { recursive: true, force: true });
   tempRoot = undefined;
 });
+
+function stubExternalProviderDetection(composition: ServerComposition): void {
+  for (const adapterId of [CLAUDE_CODE_ADAPTER_ID, CODEX_ADAPTER_ID]) {
+    vi.spyOn(composition.registry.resolve(adapterId), "detect").mockResolvedValue({
+      installed: false,
+      availability: "unavailable",
+    });
+  }
+}
 
 function buildDurableComposition() {
   tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hall-ceo-plan-atomicity-durable-"));
@@ -42,7 +64,7 @@ function buildDurableComposition() {
   const db = HallDatabase.open({ dataDir, busyTimeoutMs: 2000 });
   runMigrations(db);
   openDbs.push(db);
-  return createServerComposition({
+  const composition = createServerComposition({
     workspaceRoot,
     mockScenario: "success",
     mockStepDelayMs: 0,
@@ -50,6 +72,8 @@ function buildDurableComposition() {
     db,
     agentWorktreeRoot: path.join(dataDir, "agent-worktrees"),
   });
+  stubExternalProviderDetection(composition);
+  return composition;
 }
 
 function buildHarness(): DelegationAtomicityHarness {

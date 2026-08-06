@@ -35,6 +35,38 @@ afterEach(() => {
   for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 });
 
+/**
+ * A deterministic "N calls have happened" signal — no sleeps, no polling.
+ * Every waiter is resolved exactly once, the instant the Nth `notify()`
+ * call happens, from inside the exact synchronous callback that performed
+ * the Nth mutation — so a caller that `await`s `wait(n)` is guaranteed
+ * every side effect of that Nth call has already completed before its
+ * `await` resumes (a `resolve()` call only ever schedules a microtask;
+ * the synchronous code that called it, including everything after
+ * `resolve()` in the same function body, always finishes first).
+ */
+class CountSignal {
+  #count = 0;
+  readonly #waiters = new Map<number, (() => void)[]>();
+
+  notify(): void {
+    this.#count += 1;
+    const waiting = this.#waiters.get(this.#count);
+    if (waiting === undefined) return;
+    this.#waiters.delete(this.#count);
+    for (const resolve of waiting) resolve();
+  }
+
+  wait(target: number): Promise<void> {
+    if (this.#count >= target) return Promise.resolve();
+    return new Promise((resolve) => {
+      const waiting = this.#waiters.get(target) ?? [];
+      waiting.push(resolve);
+      this.#waiters.set(target, waiting);
+    });
+  }
+}
+
 describe("TaskOrchestrator runtime isolated worktree cleanup (Phase 16.5)", () => {
   it("cleans up the worktree after a completed run, only after the artifact is durably persisted", async () => {
     const harness = buildHarness({ adapterBehavior: "completed" });
@@ -45,9 +77,14 @@ describe("TaskOrchestrator runtime isolated worktree cleanup (Phase 16.5)", () =
       adapterId: ISOLATED_ADAPTER_ID,
     });
 
-    await waitUntil(() => harness.taskStore.get(task.taskId).task.status === "completed");
-    await waitUntil(() => harness.cleanupCalls.length === 1);
+    // Cleanup can only ever be requested after terminalize() has already
+    // succeeded, which itself only ever runs after the terminal event's
+    // status commit — so this single signal proves the task is
+    // "completed" AND artifact-persisted AND cleanup-attempted, with no
+    // separate status poll needed.
+    await harness.cleanupSignal.wait(1);
 
+    expect(harness.taskStore.get(task.taskId).task.status).toBe("completed");
     expect(harness.artifactStore.findByHallAgentRunId(runId ?? "")).toBeDefined();
     expect(harness.worktreeStore.get(harness.cleanupCalls[0] ?? "").status).toBe("cleaned");
     const artifactCreatedAt = harness.eventLog.indexOf("artifact-created");
@@ -65,8 +102,9 @@ describe("TaskOrchestrator runtime isolated worktree cleanup (Phase 16.5)", () =
       adapterId: ISOLATED_ADAPTER_ID,
     });
 
-    await waitUntil(() => harness.taskStore.get(task.taskId).task.status === "failed");
-    await waitUntil(() => harness.cleanupCalls.length === 1);
+    await harness.cleanupSignal.wait(1);
+
+    expect(harness.taskStore.get(task.taskId).task.status).toBe("failed");
     expect(harness.artifactStore.findByHallAgentRunId(runId ?? "")?.outcome).toBe("failed");
     expect(harness.worktreeStore.get(harness.cleanupCalls[0] ?? "").status).toBe("cleaned");
   });
@@ -80,8 +118,9 @@ describe("TaskOrchestrator runtime isolated worktree cleanup (Phase 16.5)", () =
       adapterId: ISOLATED_ADAPTER_ID,
     });
 
-    await waitUntil(() => harness.taskStore.get(task.taskId).task.status === "cancelled");
-    await waitUntil(() => harness.cleanupCalls.length === 1);
+    await harness.cleanupSignal.wait(1);
+
+    expect(harness.taskStore.get(task.taskId).task.status).toBe("cancelled");
     expect(harness.artifactStore.findByHallAgentRunId(runId ?? "")?.outcome).toBe("cancelled");
     expect(harness.worktreeStore.get(harness.cleanupCalls[0] ?? "").status).toBe("cleaned");
   });
@@ -100,8 +139,12 @@ describe("TaskOrchestrator runtime isolated worktree cleanup (Phase 16.5)", () =
       adapterId: ISOLATED_ADAPTER_ID,
     });
 
-    await waitUntil(() => harness.taskStore.get(task.taskId).task.status === "completed");
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    // `onExecutionError` fires synchronously inside `#terminalizeExecution`'s
+    // catch block, immediately before its own `return` — the one and only
+    // statement that could still request cleanup never runs in that
+    // branch, so this signal alone proves cleanup was never (and can now
+    // never be) requested for this run, deterministically.
+    await harness.executionErrorSignal.wait(1);
 
     expect(harness.cleanupCalls).toHaveLength(0);
     expect(executionErrors.length).toBeGreaterThan(0);
@@ -125,8 +168,7 @@ describe("TaskOrchestrator runtime isolated worktree cleanup (Phase 16.5)", () =
       adapterId: ISOLATED_ADAPTER_ID,
     });
 
-    await waitUntil(() => harness.taskStore.get(task.taskId).task.status === "completed");
-    await waitUntil(() => harness.cleanupCalls.length === 1);
+    await harness.cleanupSignal.wait(1);
 
     expect(harness.taskStore.get(task.taskId).task.status).toBe("completed");
     expect(harness.artifactStore.findByHallAgentRunId(runId ?? "")).toBeDefined();
@@ -144,9 +186,9 @@ describe("TaskOrchestrator runtime isolated worktree cleanup (Phase 16.5)", () =
       title: "Retry task",
       adapterId: ISOLATED_ADAPTER_ID,
     });
-    await waitUntil(() => harness.taskStore.get(task.taskId).task.status === "failed");
-    await waitUntil(() => harness.cleanupCalls.length === 1);
+    await harness.cleanupSignal.wait(1);
     const oldWorktreeId = harness.cleanupCalls[0] ?? "";
+    expect(harness.taskStore.get(task.taskId).task.status).toBe("failed");
     expect(harness.worktreeStore.get(oldWorktreeId).status).toBe("cleanup_failed");
 
     // Now let the retry succeed cleanly.
@@ -155,10 +197,10 @@ describe("TaskOrchestrator runtime isolated worktree cleanup (Phase 16.5)", () =
     harness.orchestrator.prepareRetry(task.taskId);
     const { runId: retryRunId } = await harness.orchestrator.startTask(task.taskId);
 
-    await waitUntil(() => harness.taskStore.get(task.taskId).task.status === "completed");
-    await waitUntil(() => harness.cleanupCalls.length === 2);
+    await harness.cleanupSignal.wait(2);
 
     const newWorktreeId = harness.cleanupCalls[1] ?? "";
+    expect(harness.taskStore.get(task.taskId).task.status).toBe("completed");
     expect(newWorktreeId).not.toBe(oldWorktreeId);
     expect(harness.worktreeStore.get(newWorktreeId).status).toBe("cleaned");
     expect(harness.artifactStore.findByHallAgentRunId(retryRunId)?.outcome).toBe("completed");
@@ -173,6 +215,8 @@ interface Harness {
   readonly worktreeStore: InMemoryAgentWorktreeStore;
   readonly artifactStore: AgentExecutionArtifactStorePort;
   readonly cleanupCalls: string[];
+  readonly cleanupSignal: CountSignal;
+  readonly executionErrorSignal: CountSignal;
   readonly eventLog: string[];
   adapterBehavior: "completed" | "failed" | "cancelled";
   failCleanup: boolean;
@@ -220,6 +264,8 @@ function buildHarness(options: {
     : new InMemoryAgentExecutionArtifactStore();
 
   const cleanupCalls: string[] = [];
+  const cleanupSignal = new CountSignal();
+  const executionErrorSignal = new CountSignal();
   const eventLog: string[] = [];
   const worktreeRoot = makeTempDir("hall owned worktrees ");
   const source = makeTempDir("hall source ");
@@ -230,6 +276,8 @@ function buildHarness(options: {
     worktreeStore,
     artifactStore,
     cleanupCalls,
+    cleanupSignal,
+    executionErrorSignal,
     eventLog,
     adapterBehavior: options.adapterBehavior,
     failCleanup: options.failCleanup ?? false,
@@ -268,9 +316,8 @@ function buildHarness(options: {
       cleanupCalls.push(worktreeId);
       eventLog.push("cleanup-requested");
       const record = worktreeStore.get(worktreeId);
-      if (harness.failCleanup) {
-        return Promise.resolve(
-          worktreeStore.markCleanupFailed({
+      const result = harness.failCleanup
+        ? worktreeStore.markCleanupFailed({
             worktreeId,
             expectedRevision: worktreeStore.requestCleanup({
               worktreeId,
@@ -280,17 +327,22 @@ function buildHarness(options: {
             safeFailureCode: "GIT_WORKTREE_REMOVE_FAILED",
             safeFailureSummary: "simulated cleanup failure",
             now: NOW,
-          }),
-        );
-      }
-      const pending = worktreeStore.requestCleanup({
-        worktreeId,
-        expectedRevision: record.revision,
-        now: NOW,
-      });
-      return Promise.resolve(
-        worktreeStore.markCleaned({ worktreeId, expectedRevision: pending.revision, now: NOW }),
-      );
+          })
+        : worktreeStore.markCleaned({
+            worktreeId,
+            expectedRevision: worktreeStore.requestCleanup({
+              worktreeId,
+              expectedRevision: record.revision,
+              now: NOW,
+            }).revision,
+            now: NOW,
+          });
+      // Fires only after the store mutation above has fully settled
+      // (this whole function body is synchronous up to this point), so a
+      // caller awaiting `cleanupSignal.wait(n)` can safely read
+      // `worktreeStore` immediately afterward.
+      cleanupSignal.notify();
+      return Promise.resolve(result);
     },
   };
 
@@ -336,9 +388,10 @@ function buildHarness(options: {
     workspaceRoot: source,
     executionCoordinator: coordinator,
     artifactTerminalizer: terminalizer,
-    ...(options.onExecutionError !== undefined
-      ? { onExecutionError: (_taskId: string, error: unknown) => options.onExecutionError?.(error) }
-      : {}),
+    onExecutionError: (_taskId: string, error: unknown) => {
+      options.onExecutionError?.(error);
+      executionErrorSignal.notify();
+    },
   });
 
   return harness;
@@ -419,12 +472,4 @@ function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tempDirs.push(dir);
   return fs.realpathSync.native(dir);
-}
-
-async function waitUntil(check: () => boolean, timeoutMs = 2000): Promise<void> {
-  const start = Date.now();
-  while (!check()) {
-    if (Date.now() - start > timeoutMs) throw new Error("condition not met");
-    await new Promise((resolve) => setTimeout(resolve, 5));
-  }
 }

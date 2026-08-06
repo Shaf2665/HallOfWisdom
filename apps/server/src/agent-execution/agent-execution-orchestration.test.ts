@@ -140,6 +140,34 @@ describe("Phase 16.3 provider-neutral execution orchestration", () => {
     expect(prepared).toEqual({ taskInput: input, isolation: "none", worktreeId: undefined });
   });
 
+  it("reports a bounded failure, never a false success, when cleanupWorktree is called with a real worktree id but no cleaner is available", async () => {
+    const noManagerCoordinator = new IsolatedAgentExecutionCoordinator({
+      isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+    });
+    await expect(noManagerCoordinator.cleanupWorktree("wt-1")).resolves.toEqual({
+      ok: false,
+      code: "AGENT_WORKTREE_CLEANER_UNAVAILABLE",
+    });
+
+    const managerWithoutCleanupCoordinator = new IsolatedAgentExecutionCoordinator({
+      isolationPolicy: new ExplicitAdapterIsolationPolicy(["hall.isolated-agent"]),
+      worktreeStore: new InMemoryAgentWorktreeStore(),
+      worktreeValidator: unusedWorktreeValidator(),
+      worktreeManager: {
+        createWorktree() {
+          throw new Error("not exercised by this test");
+        },
+        // Deliberately omits `cleanupWorktree` — mirrors a fake test
+        // double, or any future worktree manager implementation, that
+        // only ever supports creation.
+      },
+    });
+    await expect(managerWithoutCleanupCoordinator.cleanupWorktree("wt-1")).resolves.toEqual({
+      ok: false,
+      code: "AGENT_WORKTREE_CLEANER_UNAVAILABLE",
+    });
+  });
+
   it("passes the mapped Hall-owned worktree directory to the adapter and persists a worktree artifact", async () => {
     const workspaceRoot = makeTempDir("hall workspace ");
     const sourceSubdir = path.join(workspaceRoot, "apps", "server");

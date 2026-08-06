@@ -186,11 +186,13 @@ shows it only succeeds at actually removing them once rehydration has run first.
 `runRestartRecovery()` (`restart-recovery.ts`) runs once, at composition time, before `app.listen()`:
 
 1. **Configuration fingerprint check** (`server-metadata-repository.ts`). A reused `--data-dir`'s
-   recorded `workspaceRoot`/`comparisonRoot` (canonical paths) must match this startup's — a
-   mismatch fails closed with `ConfigurationFingerprintMismatchError` rather than silently operating
-   on state that was written against a different filesystem layout. Recorded on first use; a startup
-   that omits `--comparison-root` is still allowed even if one was previously recorded (comparisons
-   are optional at every startup, durable or not).
+   recorded `workspaceRoot`/`comparisonRoot`/`agentWorktreeRoot` (canonical paths) must match this
+   startup's — a mismatch fails closed with `ConfigurationFingerprintMismatchError` rather than
+   silently operating on state that was written against a different filesystem layout. Recorded on
+   first use; a startup that omits `--comparison-root` is still allowed even if one was previously
+   recorded (comparisons are optional at every startup, durable or not) — `--agent-worktree-root` is
+   stricter and may not be omitted once recorded; see "Agent-worktree-root durable fingerprint"
+   under "Agent-worktree reconciliation (Phase 16.5)" below for why.
 2. **Previous boot lookup** (`boot-repository.ts`). The `boots` table holds one row per process
    lifetime, in strict `rowid` order (never `started_at`, which can tie under fast restarts).
    `getPreviousBoot` determines `previousShutdown: "clean" | "unclean" | "first_start"` from
@@ -328,14 +330,35 @@ already established:
   reconstructed from real Git evidence collected through the same worktree (`artifactsRecovered`).
   Only once that succeeds does cleanup run.
 - **`cleaned`** — normally a no-op. If the recorded path reappears on disk (`fs.lstatSync`
-  succeeding where it should now fail), this is reported as a bounded inconsistency and nothing
-  more — never auto-deleted, and the record is never transitioned backward out of `cleaned`.
+  succeeding where it should now fail) — **or** Git's own worktree registration for it reappears
+  (see "Git registration reconciliation" below) — this is reported as a bounded inconsistency
+  (`inconsistentCleanedDirectoryCount`/`inconsistentCleanedRegistrationCount`, counted
+  independently) and nothing more: never auto-deleted, never pruned, and the record is never
+  transitioned backward out of `cleaned`.
 
-**Orphan scanning** mirrors `scanOrphanWorktrees` above: a bounded count of the owned root's direct
-child directories not backed by any persisted worktree record, excluding the one directory the
-manager itself creates and is never a worktree (`_hall_empty_hooks` — see
-`agent-worktree-manager.ts`'s `canonicalizeEmptyHooksDirectory`). Counted, never named, never
-touched.
+**Filesystem orphan scanning** mirrors `scanOrphanWorktrees` above: a bounded count of the owned
+root's direct child directories (and, as of this hardening pass, symlink/junction entries — never
+silently skipped purely because they are not an ordinary directory) not backed by any persisted
+worktree record, excluding the one directory the manager itself creates and is never a worktree
+(`_hall_empty_hooks` — see `agent-worktree-manager.ts`'s `canonicalizeEmptyHooksDirectory`).
+Counted, never named, never touched. A missing owned root (isolation configured but nothing ever
+created there yet) is a legitimate zero; a root that exists but could not be listed (permissions,
+an unreadable filesystem) is instead reported through `registrationInspectionFailureCount` — never
+silently folded into the same zero.
+
+**Git registration reconciliation** (added in this hardening pass) inspects Git's own worktree
+registrations, not just the filesystem, through a new read-only
+`AgentWorktreeManager.listRegisteredWorktreePaths(sourceRepositoryRoot)` (the bounded Git runner,
+never a second ad hoc invocation; truncated output fails closed rather than returning a partial
+list). It processes each unique persisted source repository exactly once, in deterministic
+(sorted) order, and only ever classifies a registration that resolves INSIDE the Hall-owned owned
+root — the primary checkout, any comparison worktree, and anything else Git happens to have
+registered elsewhere are read but never touched, counted, or acted on by this feature at all. A
+registration under the owned root with no matching persisted record is counted as an orphan
+registration (`orphanWorktreeRegistrationCount`) — never deleted, never pruned (`git worktree
+prune` is never called). A source repository whose registrations could not be inspected (missing
+repository, a Git failure of any kind, truncated output) contributes to
+`registrationInspectionFailureCount` rather than being silently treated as "no registrations."
 
 **Cleanup security is entirely delegated, never reimplemented here.** Every deletion this pass ever
 performs goes through the pre-existing `AgentWorktreeManager.cleanupWorktree` (Phase 16.1), which
@@ -373,13 +396,31 @@ that `undefined` as "cannot be safely reconstructed," never the migration itself
 execution is not composed this boot) adds bounded counts only —
 `worktreesScanned`/`interruptedCreationCount`/`artifactsRecovered`/`artifactsConfirmed`/
 `cleanupAttempts`/`worktreesCleaned`/`cleanupFailures`/`reconciliationBlockedCount`/
-`inconsistentCleanedCount`/`orphanWorktreeDirectoryCount` — persisted the same way every other
-`RecoverySummary` field already is, in `boots.recovery_summary_json`. This is deliberately internal:
-unlike `worktreeHealthCounts`/`orphanWorktreeCount` (the comparison-side equivalents, which `GET
+`inconsistentCleanedDirectoryCount`/`inconsistentCleanedRegistrationCount`/
+`orphanWorktreeDirectoryCount`/`orphanWorktreeRegistrationCount`/
+`registrationInspectionFailureCount` — persisted the same way every other `RecoverySummary` field
+already is, in `boots.recovery_summary_json`. This is deliberately internal: unlike
+`worktreeHealthCounts`/`orphanWorktreeCount` (the comparison-side equivalents, which `GET
 /api/v1/system/storage` already curates into its response), Phase 16.5 does not add these new
 fields to that route's response shape or to Hall Web's `SystemStorageResponse` schema — no new
 route, endpoint field, or UI was added for this phase; the counts exist for the audit trail and for
 tests, not for browser display.
+
+**Agent-worktree-root durable fingerprint** (added in this hardening pass) extends
+`checkOrRecordConfigurationFingerprint` (`server-metadata-repository.ts`, see "Restart recovery"
+above) with a third scoped root, `agentWorktreeRoot`, alongside `workspaceRoot`/`comparisonRoot`.
+It is deliberately stricter than `comparisonRoot`: once recorded, a later startup may not omit it
+(unlike `comparisonRoot`, which may be freely dropped) — Phase 16.5 reconciliation depends on
+knowing exactly where every persisted worktree lives, and silently treating "the flag was omitted"
+as "isolation is now disabled" would leave real Git worktrees permanently unreconciled without an
+operator ever deciding that. On a database that already has persisted `agent_worktrees` rows but no
+recorded fingerprint (a legacy database, or one enabling isolation for the first time after
+already creating worktrees some other way), the newly supplied root is never trusted blindly: every
+persisted row's reconstructed `<root>/wt_<worktreeId>` path must exactly match its stored
+`worktree_path` (case-correct per platform) before the root is recorded at all; a single mismatch
+fails startup closed without recording anything. All validation for one call happens before any
+write, so a `comparisonRoot` conflict can never leave a bootstrapped `agentWorktreeRoot` behind, or
+vice versa.
 
 Phase 16.6 (explicitly authorized real Codex smoke verification and exact sandbox-equivalence
 proof) is unaffected by and unrelated to this phase, and remains deferred.
@@ -926,10 +967,28 @@ pnpm verify:process-recovery
 
 Equivalent to `pnpm --filter @hall-of-wisdom/hall-core run build && pnpm --filter
 @hall-of-wisdom/hall-core run test:process` — always rebuilds first, so it can never silently pass
-against a stale `dist/`. Takes roughly 65 seconds (three of the four tests each genuinely wait out
-the real 20-second ownership-staleness default — Phase 13.2 added the frozen-owner test alongside the
-original three). See "Testing," item 4, above for what each of the four tests in
+against a stale `dist/`. Takes roughly 65 seconds (three of the four original tests each genuinely
+wait out the real 20-second ownership-staleness default — Phase 13.2 added the frozen-owner test
+alongside the original three). See "Testing," item 4, above for what each of those four tests in
 `src/process-tests/` proves.
+
+**(Phase 16.5)** `phase-16-5-worktree-recovery.test.ts` adds a fifth real-process scenario, this one
+for restart-safe worktree reconciliation specifically, driven entirely through the actual
+`dist/server.js` binary and a real, disposable Git repository — no model-backed provider task is
+ever run. It uses `spawnRealServerWithStdin`/`gracefulStop` (the documented stdin `"SHUTDOWN\n"`
+graceful-shutdown trigger — see "Graceful shutdown from a spawned child process" above) between
+boots specifically so its three real restarts complete in a few seconds rather than each waiting
+out the ownership-staleness window a `SIGKILL` would force: a real Mock Agent task is created and
+completed through the real HTTP API; a real Git worktree tied to that exact completed run is then
+created in-process (through the same `AgentWorktreeManager`/`SqliteAgentWorktreeStore` production
+uses) against the same database file, with no execution artifact yet, plus a second worktree
+staged at the crash boundary "`cleanup_pending` after Git removal committed but before the durable
+`cleaned` status was written"; a real restart then recovers the missing artifact from durable
+evidence, persists it, and safely removes both worktrees; a second real restart proves the result
+is idempotent (no duplicate artifact, no state regression); and direct SQLite/Git/filesystem
+inspection afterward confirms the primary checkout's `HEAD`, tracked files, and working-tree
+cleanliness were never touched, and that a seeded orphan directory under the owned root survived
+every restart untouched.
 
 ## Security review performed this phase
 

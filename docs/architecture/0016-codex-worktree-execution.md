@@ -485,7 +485,12 @@ worktree ID it acts on comes from the terminating run's own captured snapshot, n
 the task's current (possibly already-retried) record. A worktree is never cleaned when artifact
 creation failed, the artifact conflicts or mismatches, or task/run/worktree identity is uncertain —
 `AgentExecutionArtifactTerminalizer`'s existing idempotent-by-`hallAgentRunId` semantics already
-guarantee this; Phase 16.5 adds no new bypass of them.
+guarantee this; Phase 16.5 adds no new bypass of them. **`cleanupWorktree` never reports a false
+success:** if it is called with a real worktree ID but no cleaner is actually available (no worktree
+manager configured, or one that does not implement cleanup), it returns a bounded
+`AGENT_WORKTREE_CLEANER_UNAVAILABLE` failure rather than claiming the worktree was cleaned when
+nothing attempted to clean it — this method is only ever called with a real worktree ID in the first
+place, since `TaskOrchestrator` never calls it at all for a non-isolated execution.
 
 **Startup reconciliation** (`reconcile-agent-worktrees.ts`, new) processes every persisted worktree
 deterministically by status on every durable boot, not only after an unclean shutdown: `creating` is
@@ -495,9 +500,15 @@ ever falling back to recursive deletion; `creation_failed`/`cleanup_pending` res
 `cleanup_failed` gets exactly one retry per boot; `ready` reconstructs a missing artifact only from
 exact durable evidence (never a newer retry's mutable task assignment) and cleans up only after that
 succeeds, or retains and reports a bounded blocked classification if exact reconstruction is
-impossible; `cleaned` is left alone unless its path unexpectedly reappears, which is reported but
-never auto-deleted and never transitions the record backward. Unknown directories under the owned
-root are scanned read-only and counted as orphans, never deleted.
+impossible; `cleaned` is left alone unless its path OR its Git registration unexpectedly reappears,
+either of which is reported (independently counted) but never auto-deleted, never pruned, and never
+transitions the record backward. Unknown directories under the owned root — including symlink and
+junction entries, never silently skipped just because they are not an ordinary directory — are
+scanned read-only and counted as orphans, never deleted; unknown Git worktree registrations under
+the owned root (inspected through a new read-only `AgentWorktreeManager.listRegisteredWorktreePaths`,
+never a second ad hoc Git invocation) are likewise counted as orphans and never deleted or pruned. A
+source repository whose registrations could not be inspected, or an owned root that could not be
+listed, contributes to a bounded inspection-failure count rather than a silent zero.
 
 **Missing-artifact recovery** required a small, minimal schema extension:
 `agent_worktrees.adapter_id`/`agent_id`, added nullable in migration 9, captured once at
@@ -516,10 +527,28 @@ persisted absolute path. Nothing in Phase 16.5 adds a second, weaker deletion pa
 
 **Recovery summary.** `RecoverySummary.agentWorktree` adds bounded counts (worktrees scanned,
 interrupted creations, artifacts recovered/confirmed, cleanup attempts/successes/failures,
-reconciliation-blocked, inconsistent-cleaned, orphan directories) to the same internal, path-free
+reconciliation-blocked, inconsistent-cleaned directories/registrations, orphan
+directories/registrations, registration-inspection failures) to the same internal, path-free
 mechanism `boots.recovery_summary_json` already used for task and comparison reconciliation. This
 phase deliberately does not expose these new counts through `GET /api/v1/system/storage` or add any
 new route, endpoint field, or UI — see 0013's "Recovery summary" note in that same section.
+
+**Agent-worktree-root durable fingerprint.** The durable configuration fingerprint that already
+scoped a `--data-dir` to `workspaceRoot`/`comparisonRoot` now also scopes it to
+`agentWorktreeRoot` — recorded on first use, required to match exactly on every later startup
+(unlike `comparisonRoot`, omitting it once recorded is itself a fingerprint failure, not a
+tolerated "isolation is now off"), and — for a database with existing `agent_worktrees` rows but no
+recorded root — never accepted until every one of those rows' reconstructed `wt_<worktreeId>` paths
+is proven to belong to the newly supplied root. See
+[`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md)'s
+"Agent-worktree-root durable fingerprint" for the full design.
+
+**Real-process verification.** `pnpm verify:process-recovery` now includes a dedicated Phase 16.5
+scenario driven through the actual built binary: a real completed (Mock Agent, non-isolated) task,
+a real Git worktree created in-process against the same database file with no execution artifact
+yet, a real restart that recovers the artifact and safely cleans up, a second real restart proving
+idempotency, and direct inspection confirming the primary checkout and an unrelated orphan
+directory were both left untouched throughout. No model-backed provider task is run.
 
 ## Lifecycle
 
