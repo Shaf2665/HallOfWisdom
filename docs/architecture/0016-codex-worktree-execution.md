@@ -5,12 +5,13 @@ worktree reconciliation and cleanup, see "Phase 16.5 — restart-safe worktree r
 cleanup" below, including its post-merge hardening) is merged. Phase 16.6 (Codex trusted-local
 production readiness and Git LFS worktree compatibility — see "Detached HEAD decision" below for
 the checkout-filter classification fix, and "Cleanup behavior" below for the empty
-residual-directory removal fix) is implemented on a branch, pending review and merge.
-Strict Codex availability remains fail-closed; exact sandbox equivalence was never proven, and
-that verification is now deferred as optional future hardening rather than near-term scope. A real
-Codex trusted-local task did run in Phase 16.6, through a Hall-owned worktree, against a disposable
-fixture repository outside Hall of Wisdom — strict-mode smoke testing remains deferred alongside
-strict equivalence proof.
+residual-directory removal fix) is complete and merged, closing the Phase 16 milestone. Phase 16.6
+replaced the strict-sandbox-equivalence verification originally proposed for it, which remains
+deferred as optional future hardening rather than near-term scope: strict Codex availability stays
+fail-closed, and exact sandbox equivalence has still never been proven. A real Codex trusted-local
+task did run in Phase 16.6, through a Hall-owned worktree, against a disposable fixture repository
+outside Hall of Wisdom — strict-mode smoke testing remains deferred alongside strict equivalence
+proof. Phase 17 has not started.
 
 Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 built
 the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and SQLite
@@ -364,8 +365,12 @@ Phase 16.4 keeps the old default strict Codex capability cap in place while addi
 isolation infrastructure. Hall Core can configure durable Phase 16 worktree isolation and the
 installed Codex CLI can pass a bounded, zero-model native sandbox probe, but that does not prove
 the helper and real execution selectors enforce identical effective policy. Strict Codex therefore
-remains `unsupported` until Phase 16.6 proves equivalence through explicitly authorized
-verification. The primary source checkout is still never passed to strict Codex.
+remains `unsupported`. The explicitly authorized real-Codex sandbox-equivalence verification
+originally planned to resolve this was deferred as optional future hardening rather than completed
+— Phase 16.6 was re-scoped instead to Codex trusted-local production readiness and Git LFS worktree
+compatibility (see this document's Status header above), and strict Codex remains fail-closed with
+no phase currently planned to prove that equivalence. The primary source checkout is still never
+passed to strict Codex.
 
 Strict isolated Codex configuration is constructor-time and server-controlled. It is not accepted
 from tasks, REST payloads, browser data, provider output, or arbitrary environment variables. The
@@ -403,7 +408,9 @@ workspace-write`; the native probe uses the installed CLI's sandbox helper
 web-search, and feature-disable policy, and neither uses `--dangerously-bypass-approvals-and-sandbox`,
 `--yolo`, `danger-full-access`, `--add-dir`, remote operations, or task-controlled security
 options. Because Codex 0.144.4 does not expose a zero-model command that materializes the exact
-effective `exec` sandbox state for comparison, the adapter fails closed until Phase 16.6.
+effective `exec` sandbox state for comparison, the adapter fails closed. That equivalence proof was
+originally slated for Phase 16.6; it remains deferred as optional future hardening, not tied to any
+currently planned phase.
 
 The probe runs no model. It creates a disposable probe workspace under the canonical Hall-owned
 worktree root, and a pre-existing outside sentinel in the same canonical root but outside that

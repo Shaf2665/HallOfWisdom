@@ -411,7 +411,12 @@ reuse trusted-local mode and does not make trusted-local safer. Strict isolated 
 and multi-agent features, and retains the exact Hall worktree validation infrastructure through
 `AgentWorktreeManager`. A passing zero-model native sandbox probe is necessary but not sufficient:
 because `codex sandbox -P :workspace` is not exact proof of real `codex exec --sandbox
-workspace-write` policy equivalence, strict detection remains `unsupported` until Phase 16.6.
+workspace-write` policy equivalence, strict detection remains `unsupported`. The explicitly
+authorized real-Codex equivalence verification originally planned to resolve this was deferred as
+optional future hardening rather than completed — Phase 16.6 was re-scoped instead to Codex
+trusted-local production readiness and Git LFS worktree compatibility (see the "Phase 16.6 — Git
+LFS worktree compatibility for trusted-local" section below), and strict Codex remains fail-closed
+with no phase currently planned to prove that equivalence.
 
 Trusted-local remains exactly what this document says it is: explicitly opt-in, not sandboxed, and
 backed by `--dangerously-bypass-approvals-and-sandbox`. If trusted-local is enabled, it remains a

@@ -5,8 +5,14 @@ Single-Instance Ownership — and Phase 13.2 — Durable Ownership Fencing and F
 Verification — are all complete. Phase 16.5 (merged, including its post-merge hardening — see
 "Agent-worktree reconciliation (Phase 16.5)" below) extends this document's restart-recovery
 pipeline with a fourth reconciliation pass, alongside task and comparison reconciliation, for
-Hall-owned isolated agent worktrees and their execution artifacts. Phase 16.6 (explicitly authorized
-real Codex smoke verification and exact sandbox-equivalence proof) has not been started. Phase 13.1
+Hall-owned isolated agent worktrees and their execution artifacts. Phase 16.6 was originally proposed
+as an explicitly authorized real Codex smoke verification and exact strict-sandbox equivalence proof
+— that strict-sandbox-attestation objective was intentionally deferred as optional future hardening,
+never completed, and Phase 16.6 was re-scoped instead to Codex trusted-local production readiness,
+Git LFS worktree compatibility, and the empty residual-directory cleanup hardening described in
+"Empty residual-directory removal (Phase 16.6)" below. That re-scoped Phase 16.6 is complete and
+merged, closing the Phase 16 milestone; strict Codex sandbox equivalence remains unproven and
+deferred, not required for normal application functionality. Phase 13.1
 closed three verification gaps the original Phase 13
 report disclosed rather than papering over: it added exclusive single-instance ownership of a
 durable `--data-dir` (this document did not previously claim, and the architecture did not
@@ -625,8 +631,9 @@ tests above, which compare fingerprint strings directly (`assertAgentWorktreeRoo
 `hasAnyAgentWorktreeRows` never call `path.isAbsolute`) and predate this hotfix's own work — a
 separate, pre-existing platform limitation of the base Phase 16.5 merge, out of scope here.
 
-Phase 16.6 (explicitly authorized real Codex smoke verification and exact sandbox-equivalence
-proof) is unaffected by and unrelated to this phase, and has not been started.
+The strict-sandbox-equivalence verification originally proposed for Phase 16.6 is unaffected by and
+unrelated to this hotfix, and remains deferred as optional future hardening — see this document's
+own Status header above for what Phase 16.6 was re-scoped to and completed instead.
 
 ## CLI — `--data-dir`
 
