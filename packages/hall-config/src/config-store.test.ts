@@ -46,7 +46,9 @@ describe("saveConfig / loadConfig round-trip", () => {
   });
 
   it("rejects saving an invalid config before ever touching the file", () => {
-    expect(() => saveConfig({ ...VALID_CONFIG, workspaceRoot: "" } as never, configPath)).toThrow();
+    expect(() => {
+      saveConfig({ ...VALID_CONFIG, workspaceRoot: "" }, configPath);
+    }).toThrow();
     expect(fs.existsSync(configPath)).toBe(false);
   });
 });
