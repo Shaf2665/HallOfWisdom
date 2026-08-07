@@ -250,6 +250,19 @@ importers:
         specifier: ^24.0.0
         version: 24.13.3
 
+  packages/hall-config:
+    dependencies:
+      '@hall-of-wisdom/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+
   packages/protocol:
     dependencies:
       zod:
