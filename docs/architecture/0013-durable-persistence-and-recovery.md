@@ -312,7 +312,18 @@ already established:
 - **`creation_failed`**, **`cleanup_pending`**, **`cleanup_failed`** — each gets exactly one
   `cleanupWorktree` attempt per boot, simply because this pass visits every persisted record once.
   A `cleanup_failed` worktree that fails again stays `cleanup_failed`, recoverable on the next
-  restart — never an unbounded retry loop within one boot.
+  restart — never an unbounded retry loop within one boot. **Phase 16.6 hardening:** a
+  `cleanup_failed` record left behind specifically because Git had already deregistered the
+  worktree but its now-empty top-level directory survived the removal (a real, observed Windows
+  outcome — `git worktree remove --force` does not always delete the directory it created, even
+  after genuinely succeeding) now converges to `cleaned` on this very next attempt: `cleanupWorktree`
+  no longer retries `git worktree remove --force` against a path Git no longer considers a working
+  tree at all (which used to fail a second time with "not a working tree" and leave the record
+  stuck `cleanup_failed` indefinitely); once Git confirms no registration remains, Hall may remove
+  that exact, freshly-revalidated, provably empty directory itself — see "Empty residual-directory
+  removal (Phase 16.6)" below for the full safety discipline. A directory that is genuinely
+  non-empty, a symlink/junction, or otherwise not exactly what the durable record expects is still
+  left untouched and still fails closed to `cleanup_failed`.
 - **`ready`** — resolves the exact terminal event for this worktree's `hallAgentRunId` from the
   task's own event stream (`NormalizedEventStorePort.list(hallTaskId)`, which holds the full,
   continuous per-task stream across every retry — filtering by `event.runId` finds the exact run
@@ -370,6 +381,58 @@ and removes it only via `git worktree remove --force` through the bounded Git ru
 -rf`, never a directory-name pattern match, never trusting a persisted absolute path without
 reconstructing and re-validating it first. This reconciliation pass decides WHETHER and WHEN to call
 that function; it never decides HOW a worktree is removed.
+
+### Empty residual-directory removal (Phase 16.6)
+
+`cleanupWorktree`'s decision now branches on Git registration state, not merely on whether the path
+exists, and Git remains the primary and preferred removal mechanism in every case where it still has
+a registration to act on:
+
+- **Registration present** (directory present or already absent — `git worktree remove --force`
+  succeeds even when the directory is gone, since Git can still deregister a path it marks
+  `prunable`): Git removes it; Hall then re-confirms the registration is genuinely gone before
+  considering anything else.
+- **Registration absent, directory present:** Git is never invoked again for a path it no longer
+  considers a working tree at all — retrying `git worktree remove --force` here is exactly what used
+  to fail with "not a working tree" and strand the record `cleanup_failed` permanently. Instead, Hall
+  may remove the directory itself, but only as an exact, narrowly-scoped, non-recursive operation.
+- **Registration absent, directory absent:** marked `cleaned` immediately, unchanged from Phase 16.1.
+
+**Every check below is proven fresh, immediately before the one `fs.rmdirSync` call — never reused
+from an earlier check earlier in the same `cleanupWorktree` invocation** (a directory replaced by a
+symlink, moved, or repopulated in the narrow window between the registration recheck and this point
+must still be caught): the worktree ID is a safe token; the expected directory name is exactly
+`wt_<worktreeId>`; the reconstructed path equals the durably persisted canonical path; the path is
+inside the configured Hall-owned root (which is itself proven, at startup, to never be the source
+repository or contain it); `lstat` reports an ordinary directory, never a symlink or junction; its
+canonicalized real path (`fs.realpathSync.native`) equals the expected path exactly; and — the one
+check genuinely new to this removal path — the directory contains exactly zero entries
+(`fs.readdirSync(...).length === 0`), checked immediately before the removal call. Any failure at any
+of these steps throws one of three bounded, stable codes and leaves the directory completely
+untouched: `AGENT_WORKTREE_RESIDUAL_DIRECTORY_UNSAFE` (could not be listed at all),
+`AGENT_WORKTREE_RESIDUAL_DIRECTORY_NOT_EMPTY` (contains a file, subdirectory, or anything else), or
+`AGENT_WORKTREE_RESIDUAL_DIRECTORY_REMOVE_FAILED` (`fs.rmdirSync` itself failed) — the record becomes
+`cleanup_failed` exactly as any other cleanup failure does, through the same existing path, never a
+special case. No absolute path or raw Git output is ever included in any of these codes' bounded
+summaries.
+
+The one filesystem mutation this adds is a single `fs.rmdirSync` call — Node's own non-recursive
+directory-removal primitive, which itself refuses to remove a non-empty directory. It is never
+`fs.rm`, never called with a `recursive` option, never a wildcard or pattern-based delete, and never
+reachable unless every check above has already passed against the real, current filesystem and
+durable-record state. A comparison worktree is never in scope for this or any other agent-worktree
+cleanup path: comparison worktrees are owned by an entirely separate manager against an entirely
+separate, mutually non-contained root (see `0016-codex-worktree-execution.md`'s "Owned-root
+containment"), so there is no code path by which this logic could ever be handed a comparison
+worktree's identity at all.
+
+A real-process test (`pnpm verify:process-recovery`) proves this specific scenario end to end through
+the actual built binary: a real worktree created and genuinely deregistered by real Git, its
+now-empty top-level directory surviving that removal, the durable record forced to `cleanup_failed`
+to match the exact observed real-world state, a restart that converges it to `cleaned` by removing
+only that exact directory, a second restart that changes nothing further, and confirmation that an
+unrelated non-empty directory under the same owned root and the primary checkout were both left
+completely untouched throughout.
 
 **Runtime cleanup (the same-session mirror of this restart pass)** lives in
 `TaskOrchestrator#terminalizeExecution` (`apps/server/src/tasks/task-orchestrator.ts`) and

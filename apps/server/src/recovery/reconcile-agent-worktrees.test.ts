@@ -186,8 +186,8 @@ describe("reconcileAgentWorktrees", () => {
     expect(fs.existsSync(worktreePath)).toBe(false);
   });
 
-  it("retries a 'cleanup_failed' worktree at most once per boot", async () => {
-    const fixture = createFixtureRepository("cleanup-failed");
+  it("converges a 'cleanup_failed' worktree to 'cleaned' on retry when Git registration is already absent and the residual directory is exactly empty", async () => {
+    const fixture = createFixtureRepository("cleanup-failed-residual");
     const ownedRoot = makeTempDir("hall owned ");
     const unregisteredPath = path.join(ownedRoot, "wt_wt-stuck");
     fs.mkdirSync(unregisteredPath, { recursive: true });
@@ -214,6 +214,11 @@ describe("reconcileAgentWorktrees", () => {
       expectedRevision: ready.revision,
       now: "2026-08-05T00:00:02.000Z",
     });
+    // Simulates the exact real sequence this fix addresses: Git already deregistered the
+    // worktree (e.g. a prior `git worktree remove --force` succeeded at the registration level
+    // but left an empty top-level directory on disk), so a naive unconditional retry of `git
+    // worktree remove --force` would fail with "not a working tree" — this record was left
+    // `cleanup_failed` by exactly that failure mode before this fix.
     store.markCleanupFailed({
       worktreeId: "wt-stuck",
       expectedRevision: pending.revision,
@@ -231,9 +236,80 @@ describe("reconcileAgentWorktrees", () => {
     );
 
     expect(summary.cleanupAttempts).toBe(1);
+    expect(summary.worktreesCleaned).toBe(1);
+    expect(summary.cleanupFailures).toBe(0);
+    expect(store.get("wt-stuck").status).toBe("cleaned");
+    expect(fs.existsSync(unregisteredPath)).toBe(false);
+    // Registration was already absent — Git is never re-invoked for a path it doesn't consider a
+    // working tree; only the safe, non-recursive empty-directory removal path runs.
+    expect(runner.calls.filter((call) => call.args.includes("remove")).length).toBe(0);
+
+    // A second, independent reconciliation pass over the now-`cleaned` record changes nothing
+    // further — idempotent convergence, not a one-shot coincidence.
+    const second = await reconcileAgentWorktrees(
+      context({
+        agentWorktreeStore: store,
+        agentWorktreeManager: manager,
+        agentWorktreeRoot: ownedRoot,
+      }),
+    );
+    expect(second.cleanupAttempts).toBe(0);
+    expect(store.get("wt-stuck").status).toBe("cleaned");
+  });
+
+  it("retries a 'cleanup_failed' worktree at most once per boot when the residual directory genuinely cannot be resolved", async () => {
+    const fixture = createFixtureRepository("cleanup-failed-unresolvable");
+    const ownedRoot = makeTempDir("hall owned ");
+    const nonEmptyPath = path.join(ownedRoot, "wt_wt-unresolvable");
+    fs.mkdirSync(nonEmptyPath, { recursive: true });
+    fs.writeFileSync(path.join(nonEmptyPath, "leftover.txt"), "leftover");
+    const store = new InMemoryAgentWorktreeStore();
+    const runner = new RecordingGitRunner(testGitRunner());
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+    const creating = store.createCreating({
+      worktreeId: "wt-unresolvable",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: fixture.repo,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: fixture.head,
+      canonicalWorktreePath: fs.realpathSync.native(nonEmptyPath),
+      createdAt: "2026-08-05T00:00:00.000Z",
+    });
+    const ready = store.markReady({
+      worktreeId: "wt-unresolvable",
+      expectedRevision: creating.revision,
+      readyAt: "2026-08-05T00:00:01.000Z",
+    });
+    const pending = store.requestCleanup({
+      worktreeId: "wt-unresolvable",
+      expectedRevision: ready.revision,
+      now: "2026-08-05T00:00:02.000Z",
+    });
+    store.markCleanupFailed({
+      worktreeId: "wt-unresolvable",
+      expectedRevision: pending.revision,
+      safeFailureCode: "AGENT_WORKTREE_RESIDUAL_DIRECTORY_NOT_EMPTY",
+      safeFailureSummary: "simulated",
+      now: "2026-08-05T00:00:03.000Z",
+    });
+
+    const summary = await reconcileAgentWorktrees(
+      context({
+        agentWorktreeStore: store,
+        agentWorktreeManager: manager,
+        agentWorktreeRoot: ownedRoot,
+      }),
+    );
+
+    expect(summary.cleanupAttempts).toBe(1);
     expect(summary.cleanupFailures).toBe(1);
-    expect(store.get("wt-stuck").status).toBe("cleanup_failed");
-    expect(runner.calls.filter((call) => call.args.includes("remove")).length).toBe(1);
+    expect(store.get("wt-unresolvable").status).toBe("cleanup_failed");
+    expect(store.get("wt-unresolvable").safeFailureCode).toBe(
+      "AGENT_WORKTREE_RESIDUAL_DIRECTORY_NOT_EMPTY",
+    );
+    // Never a recursive filesystem fallback — the untracked leftover file must survive.
+    expect(fs.existsSync(path.join(nonEmptyPath, "leftover.txt"))).toBe(true);
   });
 
   it("confirms an already-matching artifact for a ready terminal worktree and cleans it up", async () => {

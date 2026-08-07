@@ -1,10 +1,13 @@
 # 0009 — Codex Adapter
 
-Status: Draft (Phase 10; hardened in Phase 10.1, Phase 10.2, Phase 10.3, and Phase 16.4). Phase
-16.4 keeps strict Codex fail-closed: durable Hall-owned worktree isolation and the zero-model native
-sandbox probe are present, but they do not prove exact equivalence with real
-`codex exec --sandbox workspace-write` execution. Strict `detect()` remains `unsupported` until the
-explicit Phase 16.6 verification proves the effective policy.
+Status: Draft (Phase 10; hardened in Phase 10.1, Phase 10.2, Phase 10.3, Phase 16.4, and Phase
+16.6). Phase 16.4 keeps strict Codex fail-closed: durable Hall-owned worktree isolation and the
+zero-model native sandbox probe are present, but they do not prove exact equivalence with real
+`codex exec --sandbox workspace-write` execution. Strict `detect()` remains `unsupported`, and
+proving that equivalence is now deferred as optional future hardening rather than near-term scope
+— see "Phase 16.6 — Codex trusted-local production readiness" below for what Phase 16.6 actually
+delivered instead: a Git LFS worktree-compatibility correction for trusted-local mode, not strict
+verification.
 **Phase 10.2** (see
 [`0010-paperclip-compatible-codex-mode.md`](0010-paperclip-compatible-codex-mode.md)) adds a
 separate, explicitly opt-in "trusted-local" mode that makes Codex assignable by having it bypass
@@ -759,4 +762,38 @@ Strict mode still never uses dangerous bypass flags, `--yolo`, `danger-full-acce
 `--skip-git-repo-check`, `--search`, session resume, arbitrary extra arguments, arbitrary
 environment variables, task-controlled security options, hooks, plugins, remote plugins, or
 multi-agent Codex features. The prompt remains stdin-only. No real Codex task is run in Phase
-16.4; explicitly authorized model-backed smoke verification is deferred to Phase 16.6.
+16.4.
+
+## Phase 16.6 — Codex trusted-local production readiness and Git LFS worktree compatibility
+
+Phase 16.6 replaces the strict-verification work Phase 16.4 deferred to it. Strict, exact
+`codex exec --sandbox workspace-write` policy equivalence was never proven; that verification is
+now deferred as optional future hardening, not near-term scope, and strict `detect()` remains
+`unsupported` exactly as Phase 16.4 left it — this phase adds no path to strict availability.
+
+What Phase 16.6 actually found and fixed is a Codex **trusted-local** production-readiness gap
+(see `0010-paperclip-compatible-codex-mode.md` for trusted-local's own design): a controlled
+verification run against a disposable fixture repository failed before Codex was ever invoked,
+with the Hall-side worktree-preparation failure `GIT_CHECKOUT_FILTER_UNSUPPORTED`. Root cause was
+in `AgentWorktreeManager` (`apps/server/src/agent-worktrees/agent-worktree-manager.ts`), not in
+this adapter — see `0016-codex-worktree-execution.md` for the full fix. In short: worktree
+preparation used to reject any configured Git checkout filter by key-name suffix alone
+(`filter.<name>.clean`/`.smudge`/`.process`), which also rejected the entirely standard Git LFS
+profile Git for Windows registers at system scope by default. Hall now inspects filter values, not
+just names, and recognizes exactly Git LFS's own documented standard output as a small allowlist
+of exact command strings — narrowing, not removing, the rejection. Every other filter, including a
+modified or ambiguous LFS command, is still rejected. Automatic LFS object download/materialization
+is disabled for agent worktrees regardless (`GIT_LFS_SKIP_SMUDGE=1`, scoped to the one checkout
+invocation) — an LFS pointer file stays a pointer inside a Hall-owned worktree.
+
+This is unrelated to strict-mode argv, trusted-local's own bypass-flag argv, or this adapter's
+authentication/detection logic — nothing in `permission-profile.ts`, `detection.ts`, or
+`codex-adapter.ts` changed in this phase. Trusted-local's explicit `--enable-codex-trusted-local`
+startup-only opt-in is unchanged; nothing browser-, task-, or REST-request-controlled can enable
+it, exactly as `0010` documents. A real, controlled Codex trusted-local task — through the real
+adapter, a real Hall-owned worktree, and the operator's real ChatGPT-authenticated Codex CLI —
+completed successfully against a disposable fixture repository outside the Hall of Wisdom
+repository as part of this phase's verification, producing a normal `run.started`/`file.changed`/
+`run.completed` lifecycle and an immutable execution artifact identifying the expected changed
+file, with the primary fixture checkout left unchanged (the edit landed in the isolated worktree,
+never the source repository).
