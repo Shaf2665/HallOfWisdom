@@ -78,15 +78,15 @@ pnpm --filter @hall-of-wisdom/hall-core run dev -- `
 
 ## Current Development Phase
 
-Current Development Phase: **Phase 16.6 — Codex Trusted-Local Production Readiness and Git LFS Worktree Compatibility** (implemented on a branch, pending review and merge)
+Current Development Status: **Current Phase 16 milestone is complete. Phase 17 has not started.**
 
-Last Completed and Merged Phase: **Phase 16.5 — Restart-Safe Worktree Reconciliation and Cleanup**
+Last Completed and Merged Phase: **Phase 16.6 — Codex Trusted-Local Production Readiness and Git LFS Worktree Compatibility**
 
-Phase 16.5 is merged. Phase 16.6 replaces the previously planned strict Codex sandbox-attestation work with a narrower, practical correction: **Claude Code** is verified working end to end and remains the recommended default provider for non-technical users. **Codex trusted-local** — the supported, practical way to run Codex today — is now verified working through Hall-owned worktrees, including on machines where Git for Windows registers a standard Git LFS checkout filter (`filter.lfs.*`) at system scope, which previously caused every Codex worktree to fail closed with `GIT_CHECKOUT_FILTER_UNSUPPORTED` before Codex was ever invoked. Hall now recognizes exactly the standard Git LFS profile (narrow, value-checked, never by filter name alone) and never automatically downloads or materializes LFS objects while preparing an agent worktree (`GIT_LFS_SKIP_SMUDGE=1`, scoped to the one checkout invocation). **Strict, OS-sandboxed Codex isolation remains deferred as optional future hardening and stays fail-closed** — this phase makes no strict-mode support claim, and trusted-local's explicit startup opt-in is unchanged: only `--enable-codex-trusted-local` at Hall Core process start can enable it, never a browser request, task input, or project file. The Hall-owned worktree Codex trusted-local uses is a primary-checkout safety mechanism (so a task can never mutate the repository the operator is actually working in) — it is not an operating-system sandbox, and trusted-local still runs with the Hall Core process user's own filesystem permissions once Codex starts.
+Phase 16.6 is merged, closing the Phase 16 milestone. It replaced the originally planned strict Codex sandbox-attestation work with a narrower, practical correction: **Claude Code** is verified working end to end and remains the recommended default provider for non-technical users. **Codex trusted-local** — the supported, practical way to run Codex today — is verified working through Hall-owned worktrees, including on machines where Git for Windows registers a standard Git LFS checkout filter (`filter.lfs.*`) at system scope, which previously caused every Codex worktree to fail closed with `GIT_CHECKOUT_FILTER_UNSUPPORTED` before Codex was ever invoked. Hall recognizes exactly the standard Git LFS profile (narrow, value-checked, never by filter name alone) and never automatically downloads or materializes LFS objects while preparing an agent worktree (`GIT_LFS_SKIP_SMUDGE=1`, scoped to the one checkout invocation). A worktree-cleanup edge case found during that same verification — an empty residual directory `git worktree remove --force` sometimes leaves behind even after genuinely succeeding — is also fixed, with restart reconciliation now converging it automatically. **Strict, OS-sandboxed Codex isolation remains deferred as optional future hardening and stays fail-closed** — Phase 16.6 makes no strict-mode support claim, and trusted-local's explicit startup opt-in is unchanged: only `--enable-codex-trusted-local` at Hall Core process start can enable it, never a browser request, task input, or project file. The Hall-owned worktree Codex trusted-local uses is a primary-checkout safety mechanism (so a task can never mutate the repository the operator is actually working in) — it is not an operating-system sandbox, and trusted-local still runs with the Hall Core process user's own filesystem permissions once Codex starts. Phase 17 has not started.
 
 ## Current Project Status
 
-Implemented through Phase 16.5:
+Implemented through Phase 16.6:
 
 - TypeScript pnpm monorepo
 - provider-neutral protocol and adapter SDK
@@ -111,7 +111,20 @@ Implemented through Phase 16.5:
 - run-specific retry and cancellation fencing
 - Phase 16.4 strict isolated Codex compatibility infrastructure (still fail-closed; strict Codex isolation is now deferred as optional future hardening, not a near-term goal)
 - Phase 16.5 restart-safe worktree reconciliation and cleanup, including post-merge hardening of the configuration fingerprint and Git registration parsing (below)
-- Phase 16.6 Codex trusted-local production readiness: narrow, value-checked recognition of the standard Git LFS checkout-filter profile, skip-smudge scoped to the one checkout invocation, and a verified real Codex trusted-local task through a Hall-owned worktree
+- Phase 16.6 Codex trusted-local production readiness: narrow, value-checked recognition of the standard Git LFS checkout-filter profile, skip-smudge scoped to the one checkout invocation, empty residual-worktree-directory cleanup hardening, and a verified real Codex trusted-local task through a Hall-owned worktree
+
+**Phase 16 final provider state:**
+
+- Claude Code is verified working end to end and remains the recommended default provider.
+- Codex trusted-local is verified working end to end and remains explicitly opt-in.
+- Codex trusted-local uses Hall-owned worktrees for primary-checkout safety — not an operating-system sandbox.
+- Standard Git LFS checkout filters are narrowly supported (by key and value, never by name alone).
+- Automatic Git LFS smudge/object materialization is disabled during Hall worktree checkout.
+- Durable execution artifacts and restart-safe worktree cleanup are implemented.
+- Empty residual worktree-directory cleanup is hardened, including restart convergence.
+- Strict, OS-sandboxed Codex execution remains unsupported and fail-closed.
+- Strict Codex isolation is deferred as optional future hardening, not required for normal application functionality.
+- Phase 17 has not started.
 
 Phase 16.5 makes isolated worktree lifecycle management restart-safe. After an isolated run reaches an authoritative terminal outcome (completed, failed, or cancelled), Hall Core persists (or idempotently confirms) the immutable execution artifact first and only then requests worktree cleanup — cleanup failure is fail-soft: it never changes the task's outcome, never touches the artifact, never blocks a governed retry, and leaves the worktree recoverable on the next restart. On every durable startup, after task/event reconciliation, Hall Core also reconciles every persisted agent worktree: an interrupted `creating` worktree is marked with a stable code and safely cleaned; `creation_failed`/`cleanup_pending` worktrees resume cleanup; `cleanup_failed` worktrees get one retry per boot; a `ready` worktree whose run already reached a terminal event gets its execution artifact reconstructed (only from exact durable evidence — immutable adapter/agent identity captured at worktree creation, never a newer retry's mutable assignment) and is then cleaned; a worktree lacking that immutable identity (a legacy row) is retained and reported blocked, never guessed at; a `cleaned` worktree whose path or Git registration unexpectedly reappears is reported, never deleted, pruned, or transitioned backward; and unrecognized directories or Git registrations under the owned root are counted as orphans and left untouched. Cleanup only ever removes an exact, safety-validated `wt_<id>` worktree through `git worktree remove --force` — never a recursive filesystem delete, never `git clean`/`git worktree prune`, never an unknown directory or registration.
 
@@ -218,14 +231,12 @@ Hall does not claim generic secret detection. It prevents unsafe storage categor
 
 ## Phase Roadmap
 
-Completed major phases include the monorepo foundation, adapter SDK, Mock Agent, Hall Runner, Hall Core, Hall Web, Claude Code and Codex adapters, routing, comparison worktrees, durable SQLite recovery, CEO planning, autonomous CEO plan execution, Hall-owned agent worktrees, bounded execution artifacts, isolated orchestration, strict isolated Codex compatibility infrastructure, restart-safe worktree reconciliation and cleanup (Phase 16.5, including its post-merge hardening), and Codex trusted-local production readiness with Git LFS worktree compatibility (Phase 16.6).
+Completed major phases include the monorepo foundation, adapter SDK, Mock Agent, Hall Runner, Hall Core, Hall Web, Claude Code and Codex adapters, routing, comparison worktrees, durable SQLite recovery, CEO planning, autonomous CEO plan execution, Hall-owned agent worktrees, bounded execution artifacts, isolated orchestration, strict isolated Codex compatibility infrastructure, restart-safe worktree reconciliation and cleanup (Phase 16.5, including its post-merge hardening), and Codex trusted-local production readiness with Git LFS worktree compatibility and worktree-cleanup hardening (Phase 16.6). The Phase 16 milestone is complete.
 
 Last Completed and Merged Phase:
 
-- Phase 16.5 — Restart-Safe Worktree Reconciliation and Cleanup
-
-Current (implemented on a branch, pending review and merge):
-
 - Phase 16.6 — Codex Trusted-Local Production Readiness and Git LFS Worktree Compatibility
 
-Deferred future work includes strict, OS-sandboxed Codex isolation (optional future hardening, fail-closed and unclaimed until a future phase proves exact policy equivalence), additional coding-agent adapters, production authentication, richer policy controls, public artifact routes/UI, merge workflows, and deployment integrations.
+Current: Phase 17 has not started.
+
+Deferred future work includes strict, OS-sandboxed Codex isolation (optional future hardening, fail-closed and unclaimed unless a future phase proves exact policy equivalence — not required for normal application functionality), additional coding-agent adapters, production authentication, richer policy controls, public artifact routes/UI, merge workflows, and deployment integrations.
