@@ -4,7 +4,8 @@ Status: Phase 16.4 (strict isolated Codex infrastructure) is merged. Phase 16.5 
 worktree reconciliation and cleanup, see "Phase 16.5 — restart-safe worktree reconciliation and
 cleanup" below, including its post-merge hardening) is merged. Phase 16.6 (Codex trusted-local
 production readiness and Git LFS worktree compatibility — see "Detached HEAD decision" below for
-the checkout-filter classification fix) is implemented on a branch, pending review and merge.
+the checkout-filter classification fix, and "Cleanup behavior" below for the empty
+residual-directory removal fix) is implemented on a branch, pending review and merge.
 Strict Codex availability remains fail-closed; exact sandbox equivalence was never proven, and
 that verification is now deferred as optional future hardening rather than near-term scope. A real
 Codex trusted-local task did run in Phase 16.6, through a Hall-owned worktree, against a disposable
@@ -786,16 +787,41 @@ requires it to remain inside the canonical Hall-owned root. The same target vali
 immediately before invoking Git removal. A safety-precondition failure occurs before a valid `ready`
 record transitions to `cleanup_pending`.
 
-Only after those checks pass does cleanup run:
+If both the path and Git registration are already absent, cleanup marks the record `cleaned`
+idempotently, unchanged from Phase 16.1. Otherwise, Git remains the primary and preferred removal
+mechanism whenever it still registers the path at all — including when the directory itself has
+already been deleted (`git worktree remove --force` still succeeds there, removing only Git's own
+administrative record for a path it already marks prunable):
 
 ```text
 git -c core.fsmonitor=false worktree remove --force <manager-constructed-worktree-path>
 ```
 
-On success the record becomes `cleaned`. If both the path and Git registration are already absent,
-cleanup marks the record `cleaned` idempotently. On Git failure the record becomes
-`cleanup_failed`. There is no broad recursive filesystem deletion fallback and no `git clean`.
-Hall does not delete symlink/junction targets. Automatic stale cleanup belongs to Phase 16.5.
+On success, Hall re-confirms the registration is genuinely gone before considering anything else. On
+Git failure the record becomes `cleanup_failed`.
+
+**Phase 16.6 — empty residual-directory removal.** `git worktree remove --force` does not always
+delete the top-level directory it created, even after genuinely succeeding — observed on Windows: a
+completed removal that still leaves an empty directory at the exact worktree path. Retrying
+`git worktree remove --force` against that path fails a second time, since Git no longer considers it
+a working tree at all ("not a working tree"), which used to leave the record `cleanup_failed`
+permanently. Once Git confirms no registration remains for a path (whether reached that way, or
+because registration was already absent to begin with), Hall may remove the directory itself — but
+only as an exact, non-recursive `fs.rmdirSync` call, and only once every one of the following is
+re-proven fresh, immediately before that one call: the worktree ID is a safe token; the reconstructed
+`wt_<id>` path matches the durable record; the path is inside the Hall-owned root; `lstat` reports an
+ordinary directory, never a symlink or junction; its canonicalized real path matches the expected path
+exactly; and the directory contains exactly zero entries. A non-empty directory, a symlink/junction, a
+canonicalization mismatch, or a directory that cannot be listed at all is left completely untouched
+and fails cleanup closed with one of three bounded codes
+(`AGENT_WORKTREE_RESIDUAL_DIRECTORY_NOT_EMPTY`/`_UNSAFE`/`_REMOVE_FAILED`) — the record becomes
+`cleanup_failed` through the same existing path, never a special case. There is no broad recursive
+filesystem deletion fallback anywhere in this flow and no `git clean`/`git worktree prune`. Hall does
+not delete symlink/junction targets, at either the Git-removal step or this one. Automatic stale
+cleanup (retrying `cleanup_failed`/`cleanup_pending`/`creation_failed` records on restart, including
+convergence of exactly this empty-residual-directory scenario) belongs to Phase 16.5's restart
+reconciliation — see `0013-durable-persistence-and-recovery.md`'s "Empty residual-directory removal
+(Phase 16.6)" for the full design and its real-process proof.
 
 ## Crash boundaries
 

@@ -226,28 +226,55 @@ export class AgentWorktreeManager {
             now: this.#now(),
           });
 
-    const checked = this.#validateCleanupTarget(pending, ownedRoot);
-    const registered = await this.#isWorktreeRegistered(
-      pending.canonicalSourceRepositoryRoot,
-      checked.expectedPath,
-      signal,
-    );
-    if (!checked.pathExists && !registered) {
-      return this.#store.markCleaned({
-        worktreeId,
-        expectedRevision: pending.revision,
-        now: this.#now(),
-      });
-    }
-
     try {
-      const beforeRemoval = this.#validateCleanupTarget(pending, ownedRoot);
-      await this.#runGit(
-        ["worktree", "remove", "--force", beforeRemoval.expectedPath],
+      const checked = this.#validateCleanupTarget(pending, ownedRoot);
+      const registered = await this.#isWorktreeRegistered(
         pending.canonicalSourceRepositoryRoot,
-        "GIT_WORKTREE_REMOVE_FAILED",
+        checked.expectedPath,
         signal,
       );
+
+      if (!checked.pathExists && !registered) {
+        return this.#store.markCleaned({
+          worktreeId,
+          expectedRevision: pending.revision,
+          now: this.#now(),
+        });
+      }
+
+      // Git remains the primary removal mechanism whenever a registration exists — whether or
+      // not the directory itself is still present (`git worktree remove --force` on an
+      // already-prune-eligible, directory-absent registration is a real, successful Git
+      // operation; it removes only Git's own administrative record). Only once Git no longer
+      // considers this path a working tree does Hall ever consider removing anything itself.
+      if (registered) {
+        await this.#runGit(
+          ["worktree", "remove", "--force", checked.expectedPath],
+          pending.canonicalSourceRepositoryRoot,
+          "GIT_WORKTREE_REMOVE_FAILED",
+          signal,
+        );
+        const stillRegistered = await this.#isWorktreeRegistered(
+          pending.canonicalSourceRepositoryRoot,
+          checked.expectedPath,
+          signal,
+        );
+        if (stillRegistered) {
+          throw new AgentWorktreeGitOperationError(
+            "GIT_WORKTREE_REMOVE_FAILED",
+            "Git worktree removal reported success but the registration is still present.",
+          );
+        }
+      }
+
+      // Git's own removal does not always delete the top-level directory it created (observed on
+      // some Windows configurations even after a genuinely successful `git worktree remove`) —
+      // once Git no longer registers this path at all, an exact, freshly-revalidated, provably
+      // empty residual directory may be removed non-recursively; anything else about it (still
+      // present with content, a symlink/junction, a canonicalization mismatch) is left untouched
+      // and fails this call closed, exactly like every other cleanup failure below.
+      this.#removeExactEmptyResidualDirectory(pending, ownedRoot);
+
       return this.#store.markCleaned({
         worktreeId,
         expectedRevision: pending.revision,
@@ -263,6 +290,48 @@ export class AgentWorktreeManager {
         now: this.#now(),
       });
       throw failure;
+    }
+  }
+
+  /**
+   * Removes an exact, Hall-owned worktree directory left behind after Git no longer registers it
+   * as a working tree — never a repository-controlled or task-controlled path, and never a
+   * recursive delete. `#validateCleanupTarget` is re-run immediately before this check (not
+   * reused from an earlier call in this same invocation) so a directory replaced by a symlink or
+   * moved outside the owned root between the registration check and this point is caught fresh,
+   * not assumed unchanged. A missing directory is a no-op (already gone — nothing to remove); a
+   * present-but-non-empty directory, or one that cannot be listed at all, fails closed with a
+   * bounded code and is never touched. The one filesystem mutation here — `fs.rmdirSync` — only
+   * ever removes a directory already proven to contain zero entries; it is not `fs.rm`, has no
+   * `recursive` option, and cannot be pointed at a non-empty directory by construction (Node
+   * itself rejects that).
+   */
+  #removeExactEmptyResidualDirectory(record: AgentWorktreeRecord, ownedRoot: string): void {
+    const revalidated = this.#validateCleanupTarget(record, ownedRoot);
+    if (!revalidated.pathExists) return;
+
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(revalidated.expectedPath);
+    } catch {
+      throw new AgentWorktreeGitOperationError(
+        "AGENT_WORKTREE_RESIDUAL_DIRECTORY_UNSAFE",
+        "Residual agent worktree directory could not be safely inspected.",
+      );
+    }
+    if (entries.length > 0) {
+      throw new AgentWorktreeGitOperationError(
+        "AGENT_WORKTREE_RESIDUAL_DIRECTORY_NOT_EMPTY",
+        "Residual agent worktree directory is not empty.",
+      );
+    }
+    try {
+      fs.rmdirSync(revalidated.expectedPath);
+    } catch {
+      throw new AgentWorktreeGitOperationError(
+        "AGENT_WORKTREE_RESIDUAL_DIRECTORY_REMOVE_FAILED",
+        "Residual agent worktree directory could not be removed.",
+      );
     }
   }
 

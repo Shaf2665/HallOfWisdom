@@ -498,6 +498,158 @@ describe("Phase 16.5 completely fresh database with worktree rows rejects an omi
   }, 30000);
 });
 
+/**
+ * Phase 16.6 — the real-process proof for the empty-residual-directory cleanup fix. Seeds the
+ * exact real sequence the fix addresses: a real Git worktree whose registration was genuinely
+ * removed but whose top-level directory survived (recreated empty here to stand in for that
+ * observed real-world outcome — Git's own removal, not Hall's, so the mechanism under test is
+ * restart reconciliation converging a `cleanup_failed` record, not the initial removal step),
+ * left durably `cleanup_failed`. No model-backed provider task is ever run.
+ */
+describe("Phase 16.6 restart recovery of an empty residual agent worktree directory", () => {
+  beforeAll(() => {
+    requireBuiltDist();
+  });
+
+  let tempRoot: string;
+  const spawned: ChildProcess[] = [];
+
+  afterEach(async () => {
+    for (const child of spawned.splice(0)) {
+      await killAndWait(child);
+    }
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  it("removes the exact empty residual directory and converges the record to cleaned across real restarts, leaving an unrelated non-empty directory and the primary checkout untouched", async () => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hall-phase16-6-residual-"));
+    const workspaceRoot = path.join(tempRoot, "workspace");
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    initGitRepo(workspaceRoot);
+    const originalReadme = fs.readFileSync(path.join(workspaceRoot, "README.md"), "utf8");
+    const originalHead = git(["rev-parse", "HEAD"], workspaceRoot);
+
+    const dataDir = path.join(tempRoot, "data");
+    const agentWorktreeRoot = path.join(tempRoot, "agent-worktrees");
+    fs.mkdirSync(agentWorktreeRoot, { recursive: true });
+
+    // An unrelated, non-empty directory under the owned root that is not backed by any
+    // persisted record at all — must survive every restart below completely untouched.
+    const unrelatedPath = path.join(agentWorktreeRoot, "wt_definitely-unrelated");
+    fs.mkdirSync(unrelatedPath, { recursive: true });
+    fs.writeFileSync(path.join(unrelatedPath, "sentinel.txt"), "unrelated");
+
+    const port = 47183;
+    const args = [
+      "--workspace-root",
+      workspaceRoot,
+      "--data-dir",
+      dataDir,
+      "--agent-worktree-root",
+      agentWorktreeRoot,
+      "--port",
+      String(port),
+      "--mock-scenario",
+      "success",
+    ];
+
+    // Boot 1 — establishes the durable database and its configuration fingerprint.
+    const first = spawnRealServerWithStdin(args);
+    spawned.push(first);
+    await waitForHealth(port);
+    await gracefulStop(first);
+
+    // Seed phase — a real worktree, created and then genuinely deregistered by real Git (through
+    // the exact same manager/store production uses), with its now-empty top-level directory
+    // recreated afterward and the durable record forced to `cleanup_failed` — the exact
+    // observed real-world state (Git successfully deregistered the worktree, but the directory
+    // itself outlived that removal) rather than a synthetic shortcut around it.
+    let residualWorktreeId: string;
+    let residualWorktreePath: string;
+    {
+      const db = HallDatabase.open({ dataDir, busyTimeoutMs: 5000 });
+      try {
+        const store = new SqliteAgentWorktreeStore({ db });
+        const gitRunner = isolatedGitRunner();
+        const manager = new AgentWorktreeManager({
+          store,
+          gitRunner,
+          ownedRoot: agentWorktreeRoot,
+        });
+
+        const created = await manager.createWorktree({
+          hallTaskId: "residual-task-1",
+          hallAgentRunId: "residual-run-1",
+          adapterId: "hall.codex",
+          agentId: "codex",
+          sourceWorkingDirectory: workspaceRoot,
+        });
+        residualWorktreeId = created.record.worktreeId;
+        residualWorktreePath = created.record.canonicalWorktreePath;
+        expect(created.record.status).toBe("ready");
+
+        const cleaned = await manager.cleanupWorktree(residualWorktreeId);
+        expect(cleaned.status).toBe("cleaned");
+        expect(fs.existsSync(residualWorktreePath)).toBe(false);
+
+        // Recreate the exact, empty top-level directory Git's own removal is observed to
+        // sometimes leave behind, and force the durable record back to the exact
+        // `cleanup_failed` state a naive unconditional `git worktree remove --force` retry
+        // against an already-deregistered path used to produce ("not a working tree").
+        fs.mkdirSync(residualWorktreePath);
+        db.prepare(
+          "UPDATE agent_worktrees SET status = 'cleanup_failed', cleaned_at = NULL, safe_failure_code = 'GIT_WORKTREE_REMOVE_FAILED' WHERE worktree_id = ?",
+        ).run(residualWorktreeId);
+      } finally {
+        db.close();
+      }
+    }
+    expect(fs.existsSync(residualWorktreePath)).toBe(true);
+    expect(fs.readdirSync(residualWorktreePath)).toEqual([]);
+
+    // Boot 2 — the real reconciliation pass must, from durable evidence and the real filesystem
+    // alone, safely remove the exact empty residual directory and mark the record `cleaned`.
+    const second = spawnRealServerWithStdin(args);
+    spawned.push(second);
+    await waitForHealth(port);
+    await gracefulStop(second);
+
+    expect(inspectWorktreeStatus(dataDir, residualWorktreeId)).toBe("cleaned");
+    expect(fs.existsSync(residualWorktreePath)).toBe(false);
+
+    // Boot 3 — idempotency: a second real restart over already-fully-reconciled state changes
+    // nothing further.
+    const third = spawnRealServerWithStdin(args);
+    spawned.push(third);
+    await waitForHealth(port);
+    await gracefulStop(third);
+
+    expect(inspectWorktreeStatus(dataDir, residualWorktreeId)).toBe("cleaned");
+    expect(fs.existsSync(residualWorktreePath)).toBe(false);
+
+    // The primary checkout was never touched.
+    expect(git(["rev-parse", "HEAD"], workspaceRoot)).toBe(originalHead);
+    expect(fs.readFileSync(path.join(workspaceRoot, "README.md"), "utf8")).toBe(originalReadme);
+    expect(git(["status", "--porcelain"], workspaceRoot)).toBe("");
+
+    // The unrelated non-empty directory was never deleted, pruned, or otherwise touched.
+    expect(fs.existsSync(unrelatedPath)).toBe(true);
+    expect(fs.readFileSync(path.join(unrelatedPath, "sentinel.txt"), "utf8")).toBe("unrelated");
+  }, 120000);
+});
+
+function inspectWorktreeStatus(dataDir: string, worktreeId: string): string | undefined {
+  const db = HallDatabase.open({ dataDir, busyTimeoutMs: 5000 });
+  try {
+    const row = db
+      .prepare("SELECT status FROM agent_worktrees WHERE worktree_id = ?")
+      .get(worktreeId) as { status: string } | undefined;
+    return row?.status;
+  } finally {
+    db.close();
+  }
+}
+
 function inspectLegacyRootState(
   dataDir: string,
   worktreeId: string,

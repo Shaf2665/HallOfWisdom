@@ -795,6 +795,369 @@ describe("AgentWorktreeManager", () => {
     expect(store.get("cleanup-fail").status).toBe("cleanup_failed");
     expect(fs.existsSync(worktreePath)).toBe(true);
   });
+
+  it("removes an exact empty residual directory and marks cleaned when Git registration is already absent", async () => {
+    const source = makeTempDir("residual empty registration-absent source ");
+    const ownedRoot = makeTempDir("residual empty registration-absent owned ");
+    const worktreePath = path.join(ownedRoot, "wt_residual-empty");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-empty",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: BASE_NOW,
+    });
+    store.markReady({ worktreeId: "residual-empty", expectedRevision: 0, readyAt: BASE_NOW });
+    // Registration is already absent (empty porcelain listing) — no "worktree remove" call is
+    // ever made; the safe, non-recursive empty-directory path runs directly.
+    const runner = new ScriptedGitRunner([ok(porcelainZ([source]))]);
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    const cleaned = await manager.cleanupWorktree("residual-empty");
+
+    expect(cleaned.status).toBe("cleaned");
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    expect(runner.calls.some((call) => call.args.includes("remove"))).toBe(false);
+  });
+
+  it("removes an exact empty residual directory left behind after a successful Git removal", async () => {
+    const source = makeTempDir("residual empty post-removal source ");
+    const ownedRoot = makeTempDir("residual empty post-removal owned ");
+    const worktreePath = path.join(ownedRoot, "wt_residual-post-removal");
+    // Pre-created empty and left in place: ScriptedGitRunner never touches the filesystem, so
+    // this stands in for a real `git worktree remove --force` that deregistered the worktree and
+    // deleted its tracked content but left the now-empty top-level directory behind.
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-post-removal",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: BASE_NOW,
+    });
+    store.markReady({
+      worktreeId: "residual-post-removal",
+      expectedRevision: 0,
+      readyAt: BASE_NOW,
+    });
+    const runner = new ScriptedGitRunner([
+      ok(porcelainZ([worktreePath])), // registered: true
+      ok(""), // worktree remove --force succeeds
+      ok(porcelainZ([source])), // stillRegistered re-check: false
+    ]);
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    const cleaned = await manager.cleanupWorktree("residual-post-removal");
+
+    expect(cleaned.status).toBe("cleaned");
+    expect(fs.existsSync(worktreePath)).toBe(false);
+    expect(runner.calls.filter((call) => call.args.includes("remove")).length).toBe(1);
+  });
+
+  it("retains a residual directory that still contains a file, marking cleanup_failed with a bounded code", async () => {
+    const source = makeTempDir("residual file source ");
+    const ownedRoot = makeTempDir("residual file owned ");
+    const worktreePath = path.join(ownedRoot, "wt_residual-file");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, "leftover.txt"), "leftover");
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-file",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: BASE_NOW,
+    });
+    store.markReady({ worktreeId: "residual-file", expectedRevision: 0, readyAt: BASE_NOW });
+    const runner = new ScriptedGitRunner([ok(porcelainZ([source]))]);
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    await expect(manager.cleanupWorktree("residual-file")).rejects.toMatchObject({
+      safeFailureCode: "AGENT_WORKTREE_RESIDUAL_DIRECTORY_NOT_EMPTY",
+    });
+    expect(store.get("residual-file").status).toBe("cleanup_failed");
+    expect(fs.existsSync(path.join(worktreePath, "leftover.txt"))).toBe(true);
+  });
+
+  it("retains a residual directory that still contains a subdirectory", async () => {
+    const source = makeTempDir("residual subdir source ");
+    const ownedRoot = makeTempDir("residual subdir owned ");
+    const worktreePath = path.join(ownedRoot, "wt_residual-subdir");
+    fs.mkdirSync(path.join(worktreePath, "nested"), { recursive: true });
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-subdir",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: BASE_NOW,
+    });
+    store.markReady({ worktreeId: "residual-subdir", expectedRevision: 0, readyAt: BASE_NOW });
+    const runner = new ScriptedGitRunner([ok(porcelainZ([source]))]);
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    await expect(manager.cleanupWorktree("residual-subdir")).rejects.toMatchObject({
+      safeFailureCode: "AGENT_WORKTREE_RESIDUAL_DIRECTORY_NOT_EMPTY",
+    });
+    expect(store.get("residual-subdir").status).toBe("cleanup_failed");
+    expect(fs.existsSync(path.join(worktreePath, "nested"))).toBe(true);
+  });
+
+  it("rejects cleanup outright (record left untouched) when the path is already a symlink before cleanup is ever requested", async () => {
+    const source = makeTempDir("residual symlink source ");
+    const ownedRoot = makeTempDir("residual symlink owned ");
+    const worktreePath = path.join(ownedRoot, "wt_residual-symlink");
+    const outside = makeTempDir("residual symlink target ");
+    const sentinel = path.join(outside, "sentinel.txt");
+    fs.writeFileSync(sentinel, "do not touch\n");
+    try {
+      fs.symlinkSync(outside, worktreePath, "dir");
+    } catch {
+      return undefined;
+    }
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-symlink",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: worktreePath,
+      createdAt: BASE_NOW,
+    });
+    store.markReady({ worktreeId: "residual-symlink", expectedRevision: 0, readyAt: BASE_NOW });
+    const runner = new ScriptedGitRunner([]);
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    // A symlink present before cleanup is ever requested is caught by the very first safety
+    // check, before any store mutation — the record is left exactly as found, matching this
+    // file's existing symlink/junction cleanup-rejection tests.
+    await expect(manager.cleanupWorktree("residual-symlink")).rejects.toThrow(
+      AgentWorktreePathError,
+    );
+    expect(store.get("residual-symlink").status).toBe("ready");
+    expect(runner.calls).toHaveLength(0);
+    expect(fs.readFileSync(sentinel, "utf8")).toBe("do not touch\n");
+  });
+
+  it("retains (never removes) a residual directory replaced by a symlink between the registration recheck and removal", async () => {
+    const outside = makeTempDir("residual late-symlink target ");
+    // Upfront capability probe, matching this file's established pattern for OS-privilege-gated
+    // symlink tests: skip entirely (never partially run) if this process cannot create a "dir"
+    // symlink at all, rather than branching on a runtime outcome after the fact.
+    const probeLink = path.join(makeTempDir("residual late-symlink probe "), "probe-link");
+    try {
+      fs.symlinkSync(outside, probeLink, "dir");
+      fs.unlinkSync(probeLink);
+    } catch {
+      return undefined;
+    }
+
+    const source = makeTempDir("residual late-symlink source ");
+    const ownedRoot = makeTempDir("residual late-symlink owned ");
+    const worktreePath = path.join(ownedRoot, "wt_residual-late-symlink");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const sentinel = path.join(outside, "sentinel.txt");
+    fs.writeFileSync(sentinel, "do not touch\n");
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-late-symlink",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: BASE_NOW,
+    });
+    store.markReady({
+      worktreeId: "residual-late-symlink",
+      expectedRevision: 0,
+      readyAt: BASE_NOW,
+    });
+    let registrationChecks = 0;
+    const runner = new ScriptedGitRunner(
+      [
+        ok(porcelainZ([worktreePath])), // registered: true
+        ok(""), // worktree remove --force succeeds
+        ok(porcelainZ([source])), // stillRegistered re-check: false
+      ],
+      (call) => {
+        if (!call.args.includes("--porcelain")) return;
+        registrationChecks += 1;
+        if (registrationChecks === 2) {
+          // Simulates a directory replaced by a symlink in the narrow window between Git
+          // confirming deregistration and Hall's own residual-directory removal — the fresh
+          // re-validation inside the residual-removal step (not a cached check from earlier in
+          // this same call) must catch this independently. The upfront probe above already
+          // proved this exact symlink creation succeeds in this environment.
+          fs.rmdirSync(worktreePath);
+          fs.symlinkSync(outside, worktreePath, "dir");
+        }
+      },
+    );
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    await expect(manager.cleanupWorktree("residual-late-symlink")).rejects.toThrow(
+      AgentWorktreePathError,
+    );
+    expect(store.get("residual-late-symlink").status).toBe("cleanup_failed");
+    expect(fs.readFileSync(sentinel, "utf8")).toBe("do not touch\n");
+  });
+
+  it("retains (never removes) a residual path whose canonical target no longer matches the expected path", async () => {
+    const source = makeTempDir("residual mismatch source ");
+    const ownedRoot = makeTempDir("residual mismatch owned ");
+    const worktreePath = path.join(ownedRoot, "wt_residual-mismatch");
+    const actualDirectory = path.join(ownedRoot, "wt_residual-mismatch-actual");
+    fs.mkdirSync(actualDirectory, { recursive: true });
+    try {
+      fs.symlinkSync(actualDirectory, worktreePath, "junction");
+    } catch {
+      return undefined;
+    }
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-mismatch",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: worktreePath,
+      createdAt: BASE_NOW,
+    });
+    store.markReady({ worktreeId: "residual-mismatch", expectedRevision: 0, readyAt: BASE_NOW });
+    const runner = new ScriptedGitRunner([]);
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    // Caught by the very first safety check, before any store mutation — same discipline as the
+    // pre-existing junction-redirect cleanup test.
+    await expect(manager.cleanupWorktree("residual-mismatch")).rejects.toThrow(
+      AgentWorktreePathError,
+    );
+    expect(store.get("residual-mismatch").status).toBe("ready");
+    expect(runner.calls).toHaveLength(0);
+    expect(fs.existsSync(actualDirectory)).toBe(true);
+  });
+
+  it("never removes the primary source checkout even when it happens to be an empty directory", async () => {
+    const source = makeTempDir("residual primary-checkout source ");
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-primary",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      // A tampered record whose "worktree path" IS the source repository itself — the owned-root
+      // containment check (canonicalizeOwnedRoot proves the owned root is never the source
+      // repository) must reject this before any filesystem mutation is even considered.
+      canonicalWorktreePath: source,
+      createdAt: BASE_NOW,
+    });
+    store.markReady({ worktreeId: "residual-primary", expectedRevision: 0, readyAt: BASE_NOW });
+    const runner = new ScriptedGitRunner([]);
+    const manager = new AgentWorktreeManager({
+      store,
+      gitRunner: runner,
+      ownedRoot: makeTempDir("residual primary-checkout owned "),
+    });
+
+    await expect(manager.cleanupWorktree("residual-primary")).rejects.toThrow();
+    expect(store.get("residual-primary").status).toBe("ready");
+    expect(fs.existsSync(source)).toBe(true);
+    expect(runner.calls).toHaveLength(0);
+  });
+
+  it("is idempotent across repeated cleanup calls once a record is already cleaned", async () => {
+    const source = makeTempDir("residual idempotent source ");
+    const ownedRoot = makeTempDir("residual idempotent owned ");
+    const worktreePath = path.join(ownedRoot, "wt_residual-idempotent");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-idempotent",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: BASE_NOW,
+    });
+    store.markReady({
+      worktreeId: "residual-idempotent",
+      expectedRevision: 0,
+      readyAt: BASE_NOW,
+    });
+    const runner = new ScriptedGitRunner([ok(porcelainZ([source]))]);
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    const first = await manager.cleanupWorktree("residual-idempotent");
+    expect(first.status).toBe("cleaned");
+    const second = await manager.cleanupWorktree("residual-idempotent");
+    expect(second).toEqual(first);
+    // No further Git or filesystem work was attempted for an already-`cleaned` record.
+    expect(runner.calls).toHaveLength(1);
+  });
+
+  it("never leaks an absolute path in a residual-directory bounded error", async () => {
+    const source = makeTempDir("residual error-safety source ");
+    const ownedRoot = makeTempDir("residual error-safety owned ");
+    const worktreePath = path.join(ownedRoot, "wt_residual-error-safety");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    fs.writeFileSync(path.join(worktreePath, "leftover.txt"), "leftover");
+    const store = new InMemoryAgentWorktreeStore();
+    store.createCreating({
+      worktreeId: "residual-error-safety",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      canonicalSourceRepositoryRoot: source,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: "a".repeat(40),
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: BASE_NOW,
+    });
+    store.markReady({
+      worktreeId: "residual-error-safety",
+      expectedRevision: 0,
+      readyAt: BASE_NOW,
+    });
+    const runner = new ScriptedGitRunner([ok(porcelainZ([source]))]);
+    const manager = new AgentWorktreeManager({ store, gitRunner: runner, ownedRoot });
+
+    let caught: unknown;
+    try {
+      await manager.cleanupWorktree("residual-error-safety");
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(AgentWorktreeGitOperationError);
+    const failure = caught as AgentWorktreeGitOperationError;
+    expect(failure.safeFailureSummary).not.toContain(worktreePath);
+    expect(failure.safeFailureSummary).not.toContain(ownedRoot);
+    const stored = store.get("residual-error-safety");
+    expect(stored.safeFailureSummary).not.toContain(worktreePath);
+    expect(stored.safeFailureSummary).not.toContain(ownedRoot);
+  });
 });
 
 describe("listRegisteredWorktreePaths (post-merge Phase 16.5 hardening)", () => {
