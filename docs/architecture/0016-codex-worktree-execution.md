@@ -2,9 +2,10 @@
 
 Status: Phase 16.4 (strict isolated Codex infrastructure) is merged. Phase 16.5 (restart-safe
 worktree reconciliation and cleanup, see "Phase 16.5 — restart-safe worktree reconciliation and
-cleanup" below) is implemented on the Phase 16.5 branch and is pending review and merge. Strict
-Codex availability remains fail-closed until exact sandbox equivalence is proven by the explicitly
-authorized Phase 16.6 verification. Real model-backed Codex smoke testing remains deferred.
+cleanup" below, including its post-merge hardening) is merged. Phase 16.6 (explicitly authorized real
+Codex smoke verification and exact sandbox-equivalence proof) has not been started. Strict Codex
+availability remains fail-closed until exact sandbox equivalence is proven by that verification. Real
+model-backed Codex smoke testing remains deferred.
 
 Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 built
 the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and SQLite
@@ -543,12 +544,54 @@ is proven to belong to the newly supplied root. See
 [`0013-durable-persistence-and-recovery.md`](0013-durable-persistence-and-recovery.md)'s
 "Agent-worktree-root durable fingerprint" for the full design.
 
-**Real-process verification.** `pnpm verify:process-recovery` now includes a dedicated Phase 16.5
-scenario driven through the actual built binary: a real completed (Mock Agent, non-isolated) task,
-a real Git worktree created in-process against the same database file with no execution artifact
-yet, a real restart that recovers the artifact and safely cleans up, a second real restart proving
-idempotency, and direct inspection confirming the primary checkout and an unrelated orphan
-directory were both left untouched throughout. No model-backed provider task is run.
+**Post-merge Phase 16.5 hardening.** Gaps found after the initial merge were closed across two
+follow-up hotfixes, all documented in full in 0013's "Agent-worktree reconciliation (Phase 16.5)"
+section:
+
+- **Legacy omitted-root rejection, including the fully missing fingerprint case.** The fingerprint
+  check above covered a _supplied_ root against pre-existing `agent_worktrees` rows from the first
+  merge onward, but a database with such rows and **no** recorded root, started with the root omitted
+  again, previously fell through untouched and booted successfully — composing no agent-worktree
+  manager and silently skipping reconciliation for those rows indefinitely.
+  `checkOrRecordConfigurationFingerprint` now fails closed on this omitted-and-never-recorded case
+  (a plain row-existence check, never a path guess) unconditionally, before either the brand-new- or
+  existing-database branch — closing a further, narrower gap where a database that had never recorded
+  even `workspaceRoot` yet still took the brand-new-database bootstrap path unchecked. Rejects the
+  startup before the server binds its port, records a boot-ready state, or touches any worktree,
+  artifact, or fingerprint record (including `workspaceRoot` itself).
+- **Atomic fingerprint writes.** Each of `workspaceRoot`/`comparisonRoot`/`agentWorktreeRoot`'s
+  conditional writes previously went through its own independent transaction; a failure partway
+  through one logical startup call could leave one key durably recorded while another silently
+  wasn't. All writes for one call now happen inside a single outer transaction (via `withTransaction`'s
+  existing `SAVEPOINT`-based nesting), so a failure on any key rolls back every key from that call.
+- **Strict, complete Git worktree registration parsing.** Every registration-checking call site now
+  reads Git's NUL-delimited `git worktree list --porcelain -z` output through one strict, shared
+  parser (`worktree-list-parser.ts`) instead of the previous ad hoc newline-oriented line filter.
+  Output that does not exactly match Git's own documented porcelain vocabulary — an unrecognized
+  attribute label, a duplicate or structurally conflicting combination (`bare` with `HEAD`, `branch`
+  with `detached`, either state missing), an invalid-length `HEAD` value, or a duplicate registered
+  path (compared with platform-correct case sensitivity) — fails closed with a bounded
+  `GIT_WORKTREE_LIST_MALFORMED` code, including an `exitCode: 0` response that looks superficially
+  successful. Genuinely empty stdout with a `0` exit code is treated the same way, not as a trivial
+  empty list: a successful invocation against any repository always reports at least one record, so
+  empty output can never be silently read as "nothing is registered" — this closes the specific case
+  where a missing worktree path plus empty registration output could previously have caused cleanup to
+  report success without ever having proven the worktree was safe to consider gone.
+
+**Real-process verification.** `pnpm verify:process-recovery` includes three dedicated Phase 16.5
+scenarios driven through the actual built binary. The original: a real completed (Mock Agent,
+non-isolated) task, a real Git worktree created in-process against the same database file with no
+execution artifact yet, a real restart that recovers the artifact and safely cleans up, a second real
+restart proving idempotency, and direct inspection confirming the primary checkout and an unrelated
+orphan directory were both left untouched throughout — no model-backed provider task is run. The
+second, added by the first post-merge hardening pass: a database seeded with a real
+`agent_worktrees` row but no recorded root refuses to start when the root is omitted (no health
+response, exit code `2`, no new boot record, the row itself untouched), then boots successfully once
+the exact proven root is supplied. The third, added by this final review correction: a database with
+no fingerprint of any kind ever recorded (no server has ever booted against it) but a real seeded
+worktree row still refuses a single boot attempt with the root omitted the same way — proving the
+brand-new-database bootstrap branch specifically, not only the existing-database branch the second
+scenario exercises.
 
 ## Lifecycle
 

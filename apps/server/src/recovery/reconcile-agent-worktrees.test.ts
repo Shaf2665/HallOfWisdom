@@ -846,6 +846,120 @@ describe("reconcileAgentWorktrees", () => {
     expect(summary.orphanWorktreeRegistrationCount).toBe(0);
   });
 
+  it("reports a bounded registration-inspection failure (never a silent zero) on malformed exit-code-zero Git worktree-list output", async () => {
+    const fixture = createFixtureRepository("registration-malformed");
+    const ownedRoot = makeTempDir("hall owned ");
+    const store = new InMemoryAgentWorktreeStore();
+    const realRunner = testGitRunner();
+    const malformedRunner: GitCommandRunner = {
+      run(input): ReturnType<GitCommandRunner["run"]> {
+        if (input.args.includes("list")) {
+          return Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            stdout: "this is not valid porcelain -z output",
+            stderr: "",
+            timedOut: false,
+            spawnError: undefined,
+          });
+        }
+        return realRunner.run(input);
+      },
+    };
+    const manager = new AgentWorktreeManager({ store, gitRunner: malformedRunner, ownedRoot });
+    const worktreePath = path.join(ownedRoot, "wt_wt-malformed");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const creating = store.createCreating({
+      worktreeId: "wt-malformed",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      adapterId: "hall.codex",
+      agentId: "agent-1",
+      canonicalSourceRepositoryRoot: fixture.repo,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: fixture.head,
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: "2026-08-06T00:00:00.000Z",
+    });
+    store.markReady({
+      worktreeId: "wt-malformed",
+      expectedRevision: creating.revision,
+      readyAt: "2026-08-06T00:00:01.000Z",
+    });
+
+    const summary = await reconcileAgentWorktrees(
+      context({
+        agentWorktreeStore: store,
+        agentWorktreeManager: manager,
+        agentWorktreeRoot: ownedRoot,
+      }),
+    );
+
+    // The whole point of this test: malformed-but-exit-zero output must
+    // never be silently parsed down to an empty registration list — it
+    // must surface as a bounded inspection failure instead, exactly like
+    // a hard Git failure or truncation does.
+    expect(summary.registrationInspectionFailureCount).toBeGreaterThanOrEqual(1);
+    expect(summary.orphanWorktreeRegistrationCount).toBe(0);
+  });
+
+  it("reports a bounded registration-inspection failure (never a silent zero) on genuinely empty exit-code-zero Git worktree-list output", async () => {
+    const fixture = createFixtureRepository("registration-empty");
+    const ownedRoot = makeTempDir("hall owned ");
+    const store = new InMemoryAgentWorktreeStore();
+    const realRunner = testGitRunner();
+    const emptyOutputRunner: GitCommandRunner = {
+      run(input): ReturnType<GitCommandRunner["run"]> {
+        if (input.args.includes("list")) {
+          return Promise.resolve({
+            exitCode: 0,
+            signal: null,
+            stdout: "",
+            stderr: "",
+            timedOut: false,
+            spawnError: undefined,
+          });
+        }
+        return realRunner.run(input);
+      },
+    };
+    const manager = new AgentWorktreeManager({ store, gitRunner: emptyOutputRunner, ownedRoot });
+    const worktreePath = path.join(ownedRoot, "wt_wt-empty");
+    fs.mkdirSync(worktreePath, { recursive: true });
+    const creating = store.createCreating({
+      worktreeId: "wt-empty",
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      adapterId: "hall.codex",
+      agentId: "agent-1",
+      canonicalSourceRepositoryRoot: fixture.repo,
+      sourceWorkingDirectoryRelativePath: ".",
+      baseCommit: fixture.head,
+      canonicalWorktreePath: fs.realpathSync.native(worktreePath),
+      createdAt: "2026-08-06T00:00:00.000Z",
+    });
+    store.markReady({
+      worktreeId: "wt-empty",
+      expectedRevision: creating.revision,
+      readyAt: "2026-08-06T00:00:01.000Z",
+    });
+
+    const summary = await reconcileAgentWorktrees(
+      context({
+        agentWorktreeStore: store,
+        agentWorktreeManager: manager,
+        agentWorktreeRoot: ownedRoot,
+      }),
+    );
+
+    // A successful `git worktree list --porcelain -z` invocation always
+    // reports at least one record — genuinely empty output is never
+    // proof that nothing is registered, so this must surface as a
+    // bounded inspection failure, never a silent zero.
+    expect(summary.registrationInspectionFailureCount).toBeGreaterThanOrEqual(1);
+    expect(summary.orphanWorktreeRegistrationCount).toBe(0);
+  });
+
   it("counts a symlink or junction entry under the owned root rather than silently skipping it", async () => {
     const fixture = createFixtureRepository("symlink-entry");
     const ownedRoot = makeTempDir("hall owned ");
