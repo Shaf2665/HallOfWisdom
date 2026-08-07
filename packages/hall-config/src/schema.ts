@@ -45,7 +45,7 @@ export class UnsupportedHallConfigSchemaVersionError extends Error {
 
 function hasNewerSchemaVersion(raw: unknown): number | undefined {
   if (typeof raw !== "object" || raw === null || !("schemaVersion" in raw)) return undefined;
-  const value = (raw as { schemaVersion: unknown }).schemaVersion;
+  const value = raw.schemaVersion;
   return typeof value === "number" && value > HALL_CONFIG_SCHEMA_VERSION ? value : undefined;
 }
 
