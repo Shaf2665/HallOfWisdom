@@ -11,10 +11,17 @@ import type { AgentWorktreeStorePort } from "./agent-worktree-store-port.js";
 import type { AgentWorktreeRecord } from "./agent-worktree-record.js";
 import {
   assertGitSuccess,
+  type GitCommandEnvOverrides,
   type GitCommandRunner,
   type GitCommandRunnerInput,
   type GitCommandResult,
 } from "./git-command-runner.js";
+import {
+  checkoutFilterRejectionMessage,
+  classifyCheckoutFilterEntries,
+  parseCheckoutFilterConfig,
+  type CheckoutFilterClassification,
+} from "./checkout-filter-policy.js";
 import {
   assertContainedPath,
   assertSafePathToken,
@@ -154,13 +161,21 @@ export class AgentWorktreeManager {
         description: "created worktree",
       });
       await this.#assertWorktreeRegistered(sourceRepositoryRoot, actualWorktreePath, input.signal);
-      await this.#assertNoExternalCheckoutFilters(actualWorktreePath, input.signal);
+      const filterClassification = await this.#classifyCheckoutFilters(
+        actualWorktreePath,
+        input.signal,
+      );
       const hooksDirectory = canonicalizeEmptyHooksDirectory(ownedRoot);
       await this.#runGit(
         ["-c", `core.hooksPath=${hooksDirectory}`, "checkout", "--detach", "--force", baseCommit],
         actualWorktreePath,
         "GIT_WORKTREE_CHECKOUT_FAILED",
         input.signal,
+        // Recognized Git LFS filters must never auto-download/materialize LFS objects during a
+        // Hall-driven checkout — scoped to exactly this one invocation, never persisted, never
+        // widened to arbitrary environment passthrough. A "no filters" classification passes no
+        // override at all, since there is nothing to skip.
+        filterClassification.kind === "recognized_lfs" ? { GIT_LFS_SKIP_SMUDGE: "1" } : undefined,
       );
       const actualHead = await this.#resolveHeadCommit(actualWorktreePath, input.signal);
       if (actualHead.toLowerCase() !== baseCommit.toLowerCase()) {
@@ -433,31 +448,51 @@ export class AgentWorktreeManager {
     }
   }
 
-  async #assertNoExternalCheckoutFilters(
+  /**
+   * Reads the effective `filter.<name>.<clean|smudge|process|required>` configuration visible
+   * from the just-created worktree and classifies it via `checkout-filter-policy.ts`: no filters,
+   * exactly the recognized standard Git LFS profile, or rejected. Runs before the real checkout —
+   * a rejected classification throws before any filter command could ever execute. Uses
+   * `--null` (NUL-delimited `key\nvalue` records) rather than `--name-only` so the classifier can
+   * inspect values, not just key names — a filter is only ever trusted because its exact command
+   * matches Git LFS's own documented output, never because it happens to be named "lfs".
+   */
+  async #classifyCheckoutFilters(
     worktreePath: string,
     signal: AbortSignal | undefined,
-  ): Promise<void> {
+  ): Promise<CheckoutFilterClassification> {
     const result = await this.#runGitResult(
-      ["config", "--name-only", "--get-regexp", "^filter\\..*\\."],
+      ["config", "--null", "--get-regexp", "^filter\\..*\\."],
       worktreePath,
       signal,
     );
     if (result.exitCode === 1 && result.stdout.trim() === "" && result.stderr.trim() === "") {
-      return;
+      return { kind: "none" };
     }
     if (result.exitCode !== 0 || result.timedOut || result.spawnError !== undefined) {
       assertGitSuccess(result, "GIT_FILTER_CONFIG_INSPECTION_FAILED");
     }
-    const unsupportedFilterKeys = result.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => /\.(clean|smudge|process)$/i.test(line));
-    if (unsupportedFilterKeys.length > 0) {
+    if (result.stdoutTruncated === true) {
       throw new AgentWorktreeGitOperationError(
-        "GIT_CHECKOUT_FILTER_UNSUPPORTED",
-        "Git checkout filters are not supported for agent worktrees.",
+        "GIT_CHECKOUT_FILTER_MALFORMED",
+        checkoutFilterRejectionMessage("GIT_CHECKOUT_FILTER_MALFORMED"),
       );
     }
+    const entries = parseCheckoutFilterConfig(result.stdout);
+    if (entries === undefined) {
+      throw new AgentWorktreeGitOperationError(
+        "GIT_CHECKOUT_FILTER_MALFORMED",
+        checkoutFilterRejectionMessage("GIT_CHECKOUT_FILTER_MALFORMED"),
+      );
+    }
+    const classification = classifyCheckoutFilterEntries(entries);
+    if (classification.kind === "rejected") {
+      throw new AgentWorktreeGitOperationError(
+        classification.code,
+        checkoutFilterRejectionMessage(classification.code),
+      );
+    }
+    return classification;
   }
 
   async #assertWorktreeRegistered(
@@ -578,8 +613,9 @@ export class AgentWorktreeManager {
     cwd: string,
     safeFailureCode: string,
     signal: AbortSignal | undefined,
+    envOverrides?: GitCommandEnvOverrides,
   ): Promise<string> {
-    const result = await this.#runGitResult(args, cwd, signal);
+    const result = await this.#runGitResult(args, cwd, signal, envOverrides);
     return assertGitSuccess(result, safeFailureCode);
   }
 
@@ -587,12 +623,14 @@ export class AgentWorktreeManager {
     args: GitCommandRunnerInput["args"],
     cwd: string,
     signal: AbortSignal | undefined,
+    envOverrides?: GitCommandEnvOverrides,
   ): Promise<GitCommandResult> {
     return this.#gitRunner.run({
       args: withManagerGitConfig(args),
       cwd,
       timeoutMs: this.#gitTimeoutMs,
       signal,
+      ...(envOverrides !== undefined ? { envOverrides } : {}),
     });
   }
 

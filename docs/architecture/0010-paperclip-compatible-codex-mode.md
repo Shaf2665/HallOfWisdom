@@ -420,7 +420,27 @@ missing durability, lacks an explicit worktree root, fails the sandbox probe, la
 equivalence proof, or rejects a worktree at start time.
 
 Phase 16.4 does not run a real model-backed Codex task. Restart-safe worktree cleanup and
-reconciliation remain Phase 16.5; real Codex smoke verification remains Phase 16.6.
+reconciliation remain Phase 16.5.
+
+## Phase 16.6 — Git LFS worktree compatibility for trusted-local
+
+When durable storage and an explicit `--agent-worktree-root` are both configured, trusted-local
+Codex execution uses the same Hall-owned worktree infrastructure strict mode is designed for (see
+"Phase 16.4 coexistence with strict isolated Codex" above and `0016-codex-worktree-execution.md`)
+— the worktree here is a primary-checkout safety mechanism, never an OS sandbox, and it does not
+make trusted-local's own OS-level bypass any less real. Before Phase 16.6, `AgentWorktreeManager`
+rejected any configured Git checkout filter by key-name suffix alone, which also rejected the
+standard Git LFS profile Git for Windows registers at system scope by default — meaning trusted-
+local Codex tasks failed closed with `GIT_CHECKOUT_FILTER_UNSUPPORTED` before Codex was ever
+invoked on any such machine, never reaching this document's own bypass argv at all. Phase 16.6
+narrows that rejection to recognize exactly the standard Git LFS profile (by key and value, never
+by name alone) and disables automatic LFS object download/materialization for the worktree
+checkout (`GIT_LFS_SKIP_SMUDGE=1`, scoped to that one invocation) — see
+`0016-codex-worktree-execution.md` and `0009-codex-adapter.md`'s own Phase 16.6 section for the
+full mechanism. Nothing about trusted-local's own argv, environment policy, or opt-in requirement
+changed. Real Codex smoke verification — the one this document's Phase 16.4 section deferred — was
+completed in Phase 16.6, but scoped to trusted-local, not strict mode: exact strict-mode sandbox-
+equivalence proof remains deferred as optional future hardening.
 
 ## Paperclip attribution
 

@@ -2,10 +2,14 @@
 
 Status: Phase 16.4 (strict isolated Codex infrastructure) is merged. Phase 16.5 (restart-safe
 worktree reconciliation and cleanup, see "Phase 16.5 — restart-safe worktree reconciliation and
-cleanup" below, including its post-merge hardening) is merged. Phase 16.6 (explicitly authorized real
-Codex smoke verification and exact sandbox-equivalence proof) has not been started. Strict Codex
-availability remains fail-closed until exact sandbox equivalence is proven by that verification. Real
-model-backed Codex smoke testing remains deferred.
+cleanup" below, including its post-merge hardening) is merged. Phase 16.6 (Codex trusted-local
+production readiness and Git LFS worktree compatibility — see "Detached HEAD decision" below for
+the checkout-filter classification fix) is implemented on a branch, pending review and merge.
+Strict Codex availability remains fail-closed; exact sandbox equivalence was never proven, and
+that verification is now deferred as optional future hardening rather than near-term scope. A real
+Codex trusted-local task did run in Phase 16.6, through a Hall-owned worktree, against a disposable
+fixture repository outside Hall of Wisdom — strict-mode smoke testing remains deferred alongside
+strict equivalence proof.
 
 Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 built
 the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and SQLite
@@ -625,9 +629,13 @@ Phase 16.1 creates worktrees using the functional equivalent of:
 
 ```text
 git -c core.fsmonitor=false worktree add --detach --no-checkout <generated-worktree-path> <resolved-base-commit>
-git -c core.fsmonitor=false config --name-only --get-regexp '^filter\..*\.'
+git -c core.fsmonitor=false config --null --get-regexp '^filter\..*\.'
 git -c core.fsmonitor=false -c core.hooksPath=<hall-owned-empty-hooks-dir> checkout --detach --force <resolved-base-commit>
 ```
+
+The third command additionally carries `GIT_LFS_SKIP_SMUDGE=1` as a process-environment override —
+never a `-c` config flag — scoped to only this one invocation, and only when the filter inspection
+below classified the effective configuration as the recognized standard Git LFS profile.
 
 No branch is created, moved, or published. The manager verifies after creation that:
 
@@ -643,11 +651,52 @@ new worktree path is canonicalized does Hall inspect effective Git configuration
 worktree. Inspecting from the final path matters because conditional Git configuration may depend
 on the worktree location.
 
-If the effective configuration contains `filter.*.clean`, `filter.*.smudge`, or
-`filter.*.process`, Hall fails closed with `GIT_CHECKOUT_FILTER_UNSUPPORTED`, records
-`creation_failed`, and does not run checkout. The configured filter command text is not copied into
-the public-safe failure summary. A Git config exit code of 1 with empty output is treated as no
-matching filters; other config-query failures are bounded Git failures.
+**Phase 16.6 correction.** Before Phase 16.6, any configured `filter.*.clean`/`filter.*.smudge`/
+`filter.*.process` key rejected worktree creation by key-name suffix alone, regardless of which
+filter it was — this also rejected the standard Git LFS profile Git for Windows registers at
+system scope by default, making every Codex worktree fail closed with
+`GIT_CHECKOUT_FILTER_UNSUPPORTED` on any machine with Git LFS installed, before Codex was ever
+invoked. Phase 16.6 replaces the blanket key-name rejection with a narrow classification
+(`apps/server/src/agent-worktrees/checkout-filter-policy.ts`) that inspects both key **and value**:
+
+- **No filters configured** — proceeds, exactly as before.
+- **Exactly the recognized standard Git LFS profile** — proceeds. Recognition requires the filter
+  subsection name to be exactly `lfs` (case-sensitive — a differently-cased or differently-named
+  subsection is an unknown filter, not LFS), and `clean`/`smudge`/`required` present with values
+  matching a small, exact allowlist of Git LFS's own documented output (including the `--skip`
+  smudge/process forms some installs configure); `process` — the modern single-process protocol —
+  is accepted with a recognized value or accepted as entirely absent, since older-but-standard Git
+  LFS installs configure only `clean`/`smudge`/`required`. `required` must hold one of Git's own
+  true-spellings (`true`/`1`/`yes`/`on`); `required=false`, an absent `required` key, or any
+  unrecognized subkey under `filter.lfs.*` all fall through to rejection.
+- **Everything else is still rejected**, closed by default: any filter name other than exactly
+  `lfs`; more than one distinct filter name; a key appearing more than once (Hall does not attempt
+  to re-derive Git's own multi-scope precedence order from unordered `--get-regexp` output, so a
+  duplicate — even with matching values — fails closed as ambiguous rather than guessed);
+  a modified, ambiguous, or absolute-custom-executable `clean`/`smudge`/`process` command; command
+  chaining or shell metacharacters appended to an otherwise-recognized value (rejected by the same
+  exact-match discipline, not a separate check); and malformed or truncated configuration output
+  (a missing trailing NUL, an unparseable key shape, or `GitCommandResult.stdoutTruncated`).
+
+The configured filter command text is never copied into the public-safe failure summary or any
+stored record — only a bounded, fixed classification code
+(`GIT_CHECKOUT_FILTER_UNSUPPORTED`/`GIT_CHECKOUT_FILTER_MALFORMED`/
+`GIT_LFS_CONFIGURATION_UNSUPPORTED`/`GIT_LFS_NOT_AVAILABLE`) and a fixed, safe message. A Git
+config exit code of 1 with empty output is treated as no matching filters; other config-query
+failures remain bounded Git failures (`GIT_FILTER_CONFIG_INSPECTION_FAILED`), a separate
+classification from a malformed/truncated _successful_ query.
+
+When the recognized Git LFS profile is present, Hall never lets Git LFS automatically download or
+materialize LFS objects while preparing an agent worktree: the subsequent checkout invocation
+carries `GIT_LFS_SKIP_SMUDGE=1`, an environment variable Git LFS's own smudge filter reads,
+scoped to that one process only (never persisted, never logged, never inherited from or widened to
+the parent Hall Core environment) via a small, closed-shape `GitCommandRunner` extension
+(`GitCommandEnvOverrides`, currently just this one fixed key) — not a general environment-
+passthrough mechanism. An LFS-tracked file therefore checks out as a pointer, never a downloaded
+object, inside a Hall-owned worktree; an ordinary, non-LFS-tracked file checks out normally either
+way. Hall never installs, configures, or invokes `git-lfs` itself, and future LFS object
+materialization (should it ever be wanted) remains a separate, explicitly-operator-approved future
+change, not something this phase enables implicitly.
 
 Checkout runs only with a Hall-controlled empty hooks directory under the validated Hall-owned root:
 `core.hooksPath=<hall-owned-empty-hooks-dir>`. The hooks directory is created from fixed internal

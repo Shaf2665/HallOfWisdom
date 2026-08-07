@@ -134,6 +134,146 @@ describe("AgentWorktreeManager", () => {
     expect(configCall?.cwd).toBe(failed.canonicalWorktreePath);
   });
 
+  it("accepts a real repository-scoped standard Git LFS profile, checks out normally, and never materializes the LFS object", async () => {
+    if (!hasGitLfs()) return undefined;
+    const fixture = createFixtureRepository("lfs repo");
+    git(["lfs", "install", "--local"], fixture.repo);
+    fs.writeFileSync(
+      path.join(fixture.repo, ".gitattributes"),
+      "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+    );
+    const lfsContent = "real-binary-content-that-must-not-be-materialized-by-hall\n";
+    fs.writeFileSync(path.join(fixture.repo, "asset.bin"), lfsContent);
+    git(["add", ".gitattributes", "asset.bin"], fixture.repo);
+    git(["commit", "-m", "add lfs asset"], fixture.repo);
+    const ownedRoot = makeTempDir("hall owned worktrees ");
+    const runner = new RecordingGitRunner(testGitRunner());
+    const manager = new AgentWorktreeManager({
+      store: new InMemoryAgentWorktreeStore(),
+      gitRunner: runner,
+      ownedRoot,
+      idGenerator: () => "lfs-run",
+    });
+
+    const created = await manager.createWorktree({
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      sourceWorkingDirectory: fixture.repo,
+    });
+
+    expect(created.record.status).toBe("ready");
+    const ordinaryFile = fs.readFileSync(
+      path.join(created.record.canonicalWorktreePath, "README.md"),
+      "utf8",
+    );
+    expect(ordinaryFile).toBe("hello\n");
+    const checkedOutAsset = fs.readFileSync(
+      path.join(created.record.canonicalWorktreePath, "asset.bin"),
+      "utf8",
+    );
+    expect(checkedOutAsset).not.toBe(lfsContent);
+    expect(checkedOutAsset.startsWith("version https://git-lfs.github.com/spec/v1")).toBe(true);
+
+    const checkoutCall = runner.calls.find((call) => call.args.includes("checkout"));
+    expect(checkoutCall?.envOverrides).toEqual({ GIT_LFS_SKIP_SMUDGE: "1" });
+    const otherCalls = runner.calls.filter((call) => call !== checkoutCall);
+    expect(otherCalls.every((call) => call.envOverrides === undefined)).toBe(true);
+  }, 60000);
+
+  it("scopes the recognized-LFS skip-smudge override to only the checkout invocation", async () => {
+    const source = makeTempDir("fake lfs source ");
+    const ownedRoot = makeTempDir("fake lfs owned ");
+    const baseCommit = "e".repeat(40);
+    const expectedWorktreePath = path.join(ownedRoot, "wt_lfs-scripted-run");
+    const runner = new ScriptedGitRunner(
+      [
+        ok(source),
+        ok(""),
+        ok(baseCommit),
+        ok(""),
+        ok(porcelainZ([expectedWorktreePath])),
+        ok(
+          [
+            "filter.lfs.clean\ngit-lfs clean -- %f",
+            "filter.lfs.smudge\ngit-lfs smudge -- %f",
+            "filter.lfs.process\ngit-lfs filter-process",
+            "filter.lfs.required\ntrue",
+          ].join("\0") + "\0",
+        ),
+        ok(""),
+        ok(baseCommit),
+        exit(1, "", ""),
+      ],
+      (call) => {
+        if (call.args.includes("worktree") && call.args.includes("add")) {
+          fs.mkdirSync(expectedWorktreePath, { recursive: true });
+        }
+      },
+    );
+    const manager = new AgentWorktreeManager({
+      store: new InMemoryAgentWorktreeStore(),
+      gitRunner: runner,
+      ownedRoot,
+      idGenerator: () => "lfs-scripted-run",
+      now: () => BASE_NOW,
+    });
+
+    const created = await manager.createWorktree({
+      hallTaskId: "task-1",
+      hallAgentRunId: "run-1",
+      sourceWorkingDirectory: source,
+    });
+
+    expect(created.record.status).toBe("ready");
+    const configCall = runner.calls.find((call) => call.args.includes("--get-regexp"));
+    expect(configCall?.args).toContain("--null");
+    expect(configCall?.envOverrides).toBeUndefined();
+    const checkoutCall = runner.calls.find((call) => call.args.includes("checkout"));
+    expect(checkoutCall?.envOverrides).toEqual({ GIT_LFS_SKIP_SMUDGE: "1" });
+    const rest = runner.calls.filter((call) => call !== checkoutCall);
+    expect(rest.every((call) => call.envOverrides === undefined)).toBe(true);
+  });
+
+  it("remains safely recoverable after a creation failure caused by an unsupported checkout filter", async () => {
+    const fixture = createFixtureRepository("recoverable filter repo");
+    fs.writeFileSync(path.join(fixture.repo, "filtered.txt"), "filtered\n");
+    fs.writeFileSync(path.join(fixture.repo, ".gitattributes"), "filtered.txt filter=halltest\n");
+    git(["add", "filtered.txt", ".gitattributes"], fixture.repo);
+    git(["commit", "-m", "add filtered file"], fixture.repo);
+    git(["config", "filter.halltest.smudge", "true"], fixture.repo);
+    const store = new InMemoryAgentWorktreeStore();
+    const ownedRoot = makeTempDir("hall owned worktrees ");
+    const manager = new AgentWorktreeManager({
+      store,
+      gitRunner: testGitRunner(),
+      ownedRoot,
+      idGenerator: () => "recoverable-filter-run",
+    });
+
+    await expect(
+      manager.createWorktree({
+        hallTaskId: "task-1",
+        hallAgentRunId: "run-1",
+        sourceWorkingDirectory: fixture.repo,
+      }),
+    ).rejects.toMatchObject({ safeFailureCode: "GIT_CHECKOUT_FILTER_UNSUPPORTED" });
+
+    const failed = store.get("recoverable-filter-run");
+    expect(failed.status).toBe("creation_failed");
+
+    // Reconstructed from the durable record and Hall-owned root, exactly as restart
+    // reconciliation does — cleanup never re-runs the filter check (that only ever gates
+    // creation), so a worktree that failed before checkout because of an unsupported filter must
+    // still be cleanable through the ordinary cleanup path.
+    const cleaned = await manager.cleanupWorktree(failed.worktreeId);
+    expect(cleaned.status).toBe("cleaned");
+    expect(fs.existsSync(failed.canonicalWorktreePath)).toBe(false);
+    expect(
+      await manager.listRegisteredWorktreePaths(fixture.repo).then((paths) => paths.length),
+    ).toBe(1); // only the primary checkout remains registered
+    expect(sourceState(fixture.repo).status).toBe("");
+  });
+
   it.each([
     [
       "modified tracked file",
@@ -315,7 +455,7 @@ describe("AgentWorktreeManager", () => {
         baseCommit,
       ],
       ["-c", "core.fsmonitor=false", "worktree", "list", "--porcelain", "-z"],
-      ["-c", "core.fsmonitor=false", "config", "--name-only", "--get-regexp", "^filter\\..*\\."],
+      ["-c", "core.fsmonitor=false", "config", "--null", "--get-regexp", "^filter\\..*\\."],
       [
         "-c",
         "core.fsmonitor=false",
@@ -799,6 +939,21 @@ function makeTempDir(prefix: string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   tempDirs.push(dir);
   return fs.realpathSync.native(dir);
+}
+
+let cachedHasGitLfs: boolean | undefined;
+/** Real `git-lfs` may not be installed on every machine that runs this suite — the real end-to-end
+ * LFS test skips itself (rather than failing) when it isn't, the same tolerant pattern this file
+ * already uses for `installExecutablePostCheckoutHook`'s permission-dependent skip. */
+function hasGitLfs(): boolean {
+  if (cachedHasGitLfs !== undefined) return cachedHasGitLfs;
+  try {
+    execFileSync("git", ["lfs", "version"], { stdio: "ignore" });
+    cachedHasGitLfs = true;
+  } catch {
+    cachedHasGitLfs = false;
+  }
+  return cachedHasGitLfs;
 }
 
 function testGitRunner(): NodeGitCommandRunner {

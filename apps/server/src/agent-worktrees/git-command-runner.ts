@@ -17,12 +17,26 @@ export interface GitCommandResult {
   readonly spawnError: string | undefined;
 }
 
+/**
+ * A fixed, closed set of environment overrides a single Git invocation may request — never an
+ * arbitrary `Record<string, string>`. This is deliberately not a general env-passthrough
+ * mechanism: it exists only so `GIT_LFS_SKIP_SMUDGE` can be scoped to the one checkout invocation
+ * that needs it (see `agent-worktree-manager.ts`'s `createWorktree`), and the type itself makes it
+ * structurally impossible for a future caller to thread an arbitrary or task-controlled value
+ * through this path.
+ */
+export interface GitCommandEnvOverrides {
+  readonly GIT_LFS_SKIP_SMUDGE?: "1" | undefined;
+}
+
 export interface GitCommandRunnerInput {
   readonly args: readonly string[];
   readonly cwd: string;
   readonly timeoutMs: number;
   readonly signal?: AbortSignal | undefined;
   readonly maxOutputChars?: number | undefined;
+  /** Scoped to this one invocation only — never persisted, never logged, never widened. */
+  readonly envOverrides?: GitCommandEnvOverrides | undefined;
 }
 
 export interface GitCommandRunner {
@@ -91,12 +105,17 @@ export class NodeGitCommandRunner implements GitCommandRunner {
         "Git command timeout must be positive.",
       );
     }
+    const baseEnv = buildAgentWorktreeGitEnvironment(this.#parentEnv);
+    const env =
+      input.envOverrides === undefined
+        ? baseEnv
+        : { ...baseEnv, ...stripUndefined(input.envOverrides) };
     return runBoundedGitProcess({
       spawner: this.#spawner,
       executablePath: this.#gitExecutablePath,
       args: input.args,
       cwd: input.cwd,
-      env: buildAgentWorktreeGitEnvironment(this.#parentEnv),
+      env,
       timeoutMs: input.timeoutMs,
       signal: input.signal,
       maxOutputChars: input.maxOutputChars,
@@ -152,6 +171,14 @@ export function buildAgentWorktreeGitEnvironment(
     PAGER: "cat",
     NO_COLOR: "1",
   };
+}
+
+function stripUndefined(overrides: GitCommandEnvOverrides): Readonly<Record<string, string>> {
+  const result: Record<string, string> = {};
+  if (overrides.GIT_LFS_SKIP_SMUDGE !== undefined) {
+    result.GIT_LFS_SKIP_SMUDGE = overrides.GIT_LFS_SKIP_SMUDGE;
+  }
+  return result;
 }
 
 interface RunBoundedGitProcessOptions {

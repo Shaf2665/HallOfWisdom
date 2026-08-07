@@ -121,6 +121,36 @@ describe("NodeGitCommandRunner", () => {
     ).toThrow(AgentWorktreeGitOperationError);
   });
 
+  it("applies envOverrides for one invocation without arbitrary passthrough", async () => {
+    const calls: { readonly env: Readonly<Record<string, string>> }[] = [];
+    const spawner: GitProcessSpawner = {
+      spawn(_executablePath, _args, options) {
+        calls.push({ env: options.env });
+        return completedProcess("ok\n", "", 0);
+      },
+    };
+    const runner = new NodeGitCommandRunner({
+      parentEnv: { PATH: "safe-path" },
+      spawner,
+    });
+
+    await runner.run({
+      args: ["checkout", "--detach", "HEAD"],
+      cwd: "C:\\Repo",
+      timeoutMs: 1000,
+      envOverrides: { GIT_LFS_SKIP_SMUDGE: "1" },
+    });
+    await runner.run({
+      args: ["status"],
+      cwd: "C:\\Repo",
+      timeoutMs: 1000,
+    });
+
+    expect(calls[0]?.env.GIT_LFS_SKIP_SMUDGE).toBe("1");
+    expect(calls[0]?.env.GIT_TERMINAL_PROMPT).toBe("0");
+    expect(calls[1]?.env.GIT_LFS_SKIP_SMUDGE).toBeUndefined();
+  });
+
   it("buildAgentWorktreeGitEnvironment removes repository-redirection variables", () => {
     const env = buildAgentWorktreeGitEnvironment({
       PATH: "safe",
