@@ -271,6 +271,15 @@ function Invoke-HallInstallVerification {
     $verify = Invoke-HallVerifyOnly -RepoRoot $RepoRoot -WorkspaceRoot $Answers.workspaceRoot -DataDir $Answers.dataDir `
         -AgentWorktreeRoot $Answers.agentWorktreeRoot -ComparisonRoot $Answers.comparisonRoot -Port $Answers.hallCorePort `
         -HallWebPort $Answers.hallWebPort -EnableCodexTrustedLocal:([bool]$Answers.codexTrustedLocal)
+    if ($verify.Incomplete) {
+        # A live Hall Core instance holding the data directory is a normal,
+        # safe condition, not an installation failure - --verify-only
+        # deliberately never fences out a running instance. But the durable
+        # storage/fingerprint half of verification genuinely did not run, so
+        # this must not be reported as "[OK] Installation verified" either.
+        Write-Host "  [INFO] Hall Core is currently running against this data directory - durable storage/fingerprint checks were skipped (this is expected); paths and configuration were otherwise validated." -ForegroundColor Yellow
+        return
+    }
     if (-not $verify.Success) {
         Write-Host "  [FAIL] Installation verification failed:" -ForegroundColor Red
         Write-Host $verify.Output -ForegroundColor Red
@@ -371,21 +380,46 @@ function Invoke-HallInstaller {
         return
     }
 
+    # $existing is the RAW, unvalidated ConvertFrom-Json read taken before
+    # any build existed. It is fine for "is there a config at all?" and for
+    # the menu, but it must never seed a reconfiguration candidate: it
+    # cannot tell a supported schemaVersion 1 file apart from a NEWER,
+    # unsupported one (or any other file the authoritative zod schema would
+    # reject). Get-HallAnswers would harvest whatever v1-shaped fields
+    # happen to exist and emit a structurally valid schemaVersion:1
+    # candidate - which then passes validation and silently DOWNGRADES the
+    # newer file on save. With -NonInteractive auto-routing any existing
+    # config straight to reconfigure, that corruption would happen
+    # unattended, with no prompt at all. So run the same authoritative
+    # hall-config check the "keep" branch above already uses, and fail
+    # closed here - before a candidate is built, before anything is saved.
+    $existingForAnswers = $existing
+    if ($mode -eq "reconfigure") {
+        # Invoke-HallConfigStatus needs packages/hall-config/dist/cli.js.
+        # This is `pnpm install` plus the hall-config build only - cheap,
+        # and idempotent if the full build below runs afterward.
+        Install-HallDependencies -RepoRoot $RepoRoot
+        $status = Invoke-HallConfigStatus -RepoRoot $RepoRoot -ConfigPath $configPath
+        if (-not $status.config) {
+            Write-Host "The existing Hall configuration at '$configPath' could not be validated: $($status.error)" -ForegroundColor Red
+            Write-Host "Refusing to reconfigure automatically - fix or remove that file manually, then run .\install.ps1 again." -ForegroundColor Red
+            exit 1
+        }
+        # The zod-normalized config, not the raw read.
+        $existingForAnswers = $status.config
+    }
+
     $answers = Get-HallAnswers -BoundWorkspaceRoot $WorkspaceRoot -BoundDataDir $DataDir -BoundAgentWorktreeRoot $AgentWorktreeRoot `
         -BoundComparisonRoot $ComparisonRoot -BoundEnableCodexTrustedLocal ([bool]$EnableCodexTrustedLocal) `
         -EnableCodexTrustedLocalExplicitlyBound:$HallEnableCodexTrustedLocalWasBound `
-        -NonInteractive:$NonInteractive -ExistingConfig $existing
+        -NonInteractive:$NonInteractive -ExistingConfig $existingForAnswers
 
     if ($mode -eq "reconfigure") {
-        Push-Location $RepoRoot
-        try {
-            & pnpm install
-            if ($LASTEXITCODE -ne 0) { throw "pnpm install failed (exit code $LASTEXITCODE)." }
-            & pnpm build
-            if ($LASTEXITCODE -ne 0) { throw "pnpm build failed (exit code $LASTEXITCODE) - cannot verify a reconfiguration candidate without a build." }
-        } finally {
-            Pop-Location
-        }
+        # `pnpm install` already ran in Install-HallDependencies above, so
+        # only the workspace build is left. Invoke-HallBuild is the same
+        # function the fresh-install path uses, which also makes
+        # `pnpm typecheck` blocking here as it already is there.
+        Invoke-HallBuild -RepoRoot $RepoRoot
         $result = Invoke-HallReconfigure -RepoRoot $RepoRoot -ConfigPath $configPath -Candidate $answers
         if (-not $result.Success) {
             Write-Host "Reconfiguration failed at stage '$($result.Stage)':" -ForegroundColor Red

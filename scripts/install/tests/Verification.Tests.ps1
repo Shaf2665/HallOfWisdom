@@ -31,6 +31,13 @@ if (workspaceRoot.includes("trigger-verify-failure")) {
   console.error("simulated verify-only failure");
   process.exit(2);
 }
+// 5 = EXIT_VERIFICATION_INCOMPLETE (apps/server/src/config/server-config.ts):
+// a live Hall Core instance holds the data dir, so the durable checks were
+// skipped. Neither success nor failure.
+if (workspaceRoot.includes("trigger-verify-incomplete")) {
+  console.log("Hall Core is currently running against this data directory");
+  process.exit(5);
+}
 let effectiveComparisonRoot = argValue("--comparison-root");
 if (effectiveComparisonRoot === undefined) {
   const configDir = process.env.HALL_CONFIG_DIR;
@@ -72,10 +79,22 @@ try {
     $ok = Invoke-HallVerifyOnly -RepoRoot $fixtureRoot -WorkspaceRoot "D:\HallOfWisdom"
     Assert-Equal 0 $ok.ExitCode "a normal workspace root should verify successfully"
     Assert-True $ok.Success "Success should be true on exit code 0"
+    Assert-False $ok.Incomplete "a fully successful verification must never be reported as Incomplete"
 
     $bad = Invoke-HallVerifyOnly -RepoRoot $fixtureRoot -WorkspaceRoot "D:\trigger-verify-failure"
     Assert-Equal 2 $bad.ExitCode "a workspace root that triggers the fake failure should propagate exit code 2"
     Assert-False $bad.Success "Success should be false on a non-zero exit code"
+    Assert-False $bad.Incomplete "a genuine verification failure must not be reported as Incomplete"
+
+    # Exit 5 (EXIT_VERIFICATION_INCOMPLETE) is the third outcome: a live
+    # Hall Core instance holds the data directory, so the durable
+    # storage/fingerprint checks never ran. It must be reported as neither
+    # success nor an ordinary failure, or a caller cannot tell "skipped,
+    # expected" apart from "fully verified".
+    $incomplete = Invoke-HallVerifyOnly -RepoRoot $fixtureRoot -WorkspaceRoot "D:\trigger-verify-incomplete"
+    Assert-Equal 5 $incomplete.ExitCode "exit code 5 must be propagated verbatim"
+    Assert-False $incomplete.Success "an incomplete verification must never be reported as success"
+    Assert-True $incomplete.Incomplete "exit code 5 must be surfaced as Incomplete (keep in sync with EXIT_VERIFICATION_INCOMPLETE)"
 
     Assert-Throws { Get-HallServerDistPath -RepoRoot "C:\definitely-does-not-exist-hall-test" } "a missing server.js must throw a clear 'run pnpm build first' error"
 

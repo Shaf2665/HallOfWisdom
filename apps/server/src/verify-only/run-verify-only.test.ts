@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runVerifyOnly, VERIFY_STORAGE_SKIPPED_LIVE_INSTANCE } from "./run-verify-only.js";
 import type { ResolvedServerConfig } from "../config/resolve-server-config.js";
 import { openDurableStorage } from "../persistence/durable-startup.js";
-import { EXIT_INVALID_INPUT } from "../config/server-config.js";
+import { EXIT_INVALID_INPUT, EXIT_VERIFICATION_INCOMPLETE } from "../config/server-config.js";
 
 let workspaceRoot: string;
 let dataDir: string;
@@ -56,7 +56,11 @@ describe("runVerifyOnly — durable mode, fresh data dir", () => {
 });
 
 describe("runVerifyOnly — a live instance already holds the data dir", () => {
-  it("reports skip (not failure) and exits 0, never touching the epoch", async () => {
+  // EXIT_VERIFICATION_INCOMPLETE, deliberately NOT 0: the skip is expected
+  // and safe, but it is a distinct third outcome, not success. Returning 0
+  // here let install.ps1's reconfigure flow promote a candidate whose
+  // durable fingerprint compatibility had never been checked.
+  it("reports skip as EXIT_VERIFICATION_INCOMPLETE (not success, not failure), never touching the epoch", async () => {
     const live = openDurableStorage({ dataDir, bootId: "live-instance", busyTimeoutMs: 5000 });
     try {
       const logs: string[] = [];
@@ -70,7 +74,7 @@ describe("runVerifyOnly — a live instance already holds the data dir", () => {
       } finally {
         console.log = originalLog;
       }
-      expect(exitCode).toBe(0);
+      expect(exitCode).toBe(EXIT_VERIFICATION_INCOMPLETE);
       expect(logs.some((line) => line.includes(VERIFY_STORAGE_SKIPPED_LIVE_INSTANCE))).toBe(true);
     } finally {
       live.db.close();

@@ -44,11 +44,19 @@ const args = process.argv.slice(2);
 const rootIndex = args.indexOf("--workspace-root");
 const workspaceRoot = rootIndex === -1 ? "" : args[rootIndex + 1];
 if (workspaceRoot.includes("trigger-verify-failure")) { console.error("simulated verify-only failure"); process.exit(2); }
+// 5 = EXIT_VERIFICATION_INCOMPLETE: a live Hall Core instance holds the
+// data dir. The preflight's own output reads like success, which is
+// exactly why the exit code (not the text) has to carry the distinction.
+if (workspaceRoot.includes("trigger-verify-incomplete")) { console.log("OK: workspaceRoot is valid."); process.exit(5); }
 const webOriginIndex = args.indexOf("--web-origin");
 const webOrigin = webOriginIndex === -1 ? "" : args[webOriginIndex + 1];
 // Proves Invoke-HallReconfigure actually passes the candidate's hallWebPort
 // through to Invoke-HallVerifyOnly (as --web-origin), not just workspaceRoot.
-if (webOrigin.includes("64999")) { console.error("simulated verify-only failure (web-origin port marker)"); process.exit(5); }
+// Exit 4, not 5: 5 is EXIT_VERIFICATION_INCOMPLETE (a live instance holds
+// the data dir), which Invoke-HallReconfigure reports with different,
+// live-instance-specific guidance - so using it here would silently make
+// this case test the wrong branch. Matches Verification.Tests.ps1's fake.
+if (webOrigin.includes("64999")) { console.error("simulated verify-only failure (web-origin port marker)"); process.exit(4); }
 console.log("OK: installation verified.");
 process.exit(0);
 '@
@@ -92,6 +100,22 @@ try {
     Assert-Equal "verify-only" $webPortResult.Stage "the failure stage must be reported as verify-only when hallWebPort fails verification"
     Assert-Equal $originalContent (Get-Content -LiteralPath $configPath -Raw) "the active config file must be untouched after a hallWebPort verify-only failure"
     Assert-False (Test-Path -LiteralPath $saveMarkerPath) "save must never be called when hallWebPort fails verify-only"
+
+    # Case 3b: --verify-only reports EXIT_VERIFICATION_INCOMPLETE (5) - a live Hall Core
+    # instance holds the data directory, so durable fingerprint compatibility was never
+    # checked. That is NOT a verification failure, but it is also not grounds to promote:
+    # the candidate's compatibility is simply unknown. Save must never be called, the
+    # active config must survive untouched, and the operator must be told to stop Hall
+    # Core rather than shown preflight output that reads like success.
+    $incompleteCandidate = @{ schemaVersion = 1; workspaceRoot = "D:\trigger-verify-incomplete"; comparisonRoot = $null; hallCorePort = 4310; hallWebPort = 3000; codexTrustedLocal = $false }
+    $incompleteResult = Invoke-HallReconfigure -RepoRoot $fixtureRoot -ConfigPath $configPath -Candidate $incompleteCandidate
+    Assert-False $incompleteResult.Success "a candidate whose durable compatibility could not be verified must not be promoted"
+    Assert-Equal "verify-only" $incompleteResult.Stage "an incomplete verification must still be reported at the verify-only stage"
+    $incompleteErrorText = ($incompleteResult.Errors -join " ")
+    Assert-True ($incompleteErrorText -like "*currently running against this data directory*") "the operator must be told a live Hall Core instance is holding the data directory"
+    Assert-True ($incompleteErrorText -like "*Stop Hall Core*") "the operator must be told to stop Hall Core and reconfigure again"
+    Assert-Equal $originalContent (Get-Content -LiteralPath $configPath -Raw) "the active config file must be untouched after an incomplete verification"
+    Assert-False (Test-Path -LiteralPath $saveMarkerPath) "save must never be called when verification was incomplete"
 
     # Case 4: everything passes -> active config is promoted (overwritten) exactly once, atomically.
     $goodCandidate = @{ schemaVersion = 1; workspaceRoot = "D:\NewActiveWorkspace"; comparisonRoot = $null; hallCorePort = 4310; hallWebPort = 3000; codexTrustedLocal = $false }

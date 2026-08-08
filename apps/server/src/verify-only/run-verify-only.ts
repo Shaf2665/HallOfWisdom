@@ -2,7 +2,13 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { isContainedPath, validateWorkspace } from "@hall-of-wisdom/hall-runner";
 import type { ResolvedServerConfig } from "../config/resolve-server-config.js";
-import { DATABASE_BUSY_TIMEOUT_MS, DEFAULT_LIMITS, EXIT_INTERNAL_ERROR, EXIT_INVALID_INPUT } from "../config/server-config.js";
+import {
+  DATABASE_BUSY_TIMEOUT_MS,
+  DEFAULT_LIMITS,
+  EXIT_INTERNAL_ERROR,
+  EXIT_INVALID_INPUT,
+  EXIT_VERIFICATION_INCOMPLETE,
+} from "../config/server-config.js";
 import { resolveDataDir } from "../persistence/database-config.js";
 import { openDurableStorage } from "../persistence/durable-startup.js";
 import { checkOrRecordConfigurationFingerprint } from "../persistence/server-metadata-repository.js";
@@ -120,7 +126,13 @@ function runVerifyOnlySync(resolved: ResolvedServerConfig): number {
   } catch (error) {
     if (error instanceof InstanceOwnershipConflictError) {
       console.log(VERIFY_STORAGE_SKIPPED_LIVE_INSTANCE);
-      return 0;
+      // NOT 0: the durable fingerprint compatibility check below never
+      // ran, so reporting full success here would let a caller
+      // (install.ps1's reconfigure flow) promote a candidate whose
+      // compatibility with the already-recorded fingerprint was never
+      // established. Skipping is expected and safe; claiming it was
+      // verified is not.
+      return EXIT_VERIFICATION_INCOMPLETE;
     }
     console.error(formatError(error));
     return error instanceof PersistenceError ? EXIT_INVALID_INPUT : EXIT_INTERNAL_ERROR;

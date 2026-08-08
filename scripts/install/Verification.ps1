@@ -77,8 +77,16 @@ function Invoke-HallVerifyOnly {
         Remove-Item -LiteralPath $isolatedConfigDir -Recurse -Force -ErrorAction SilentlyContinue
     }
     [PSCustomObject]@{
-        ExitCode = $exitCode
-        Success  = ($exitCode -eq 0)
-        Output   = ($output -join [Environment]::NewLine)
+        ExitCode   = $exitCode
+        Success    = ($exitCode -eq 0)
+        # 5 must stay in sync with EXIT_VERIFICATION_INCOMPLETE in
+        # apps/server/src/config/server-config.ts. It means --verify-only
+        # could not fully verify durable configuration because a live Hall
+        # Core instance already holds the data directory - deliberately
+        # distinct from BOTH success (0) and a genuine failure, so a caller
+        # can neither promote on it nor report it as an installation
+        # failure.
+        Incomplete = ($exitCode -eq 5)
+        Output     = ($output -join [Environment]::NewLine)
     }
 }

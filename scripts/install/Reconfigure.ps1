@@ -24,7 +24,22 @@ function Invoke-HallReconfigure {
         -EnableCodexTrustedLocal:([bool]$Candidate.codexTrustedLocal)
 
     if (-not $verify.Success) {
-        return [PSCustomObject]@{ Success = $false; Stage = "verify-only"; Errors = @($verify.Output) }
+        # An "incomplete" verification (a live Hall Core instance holds the
+        # data directory, so the durable fingerprint compatibility check
+        # never ran) is not a verification FAILURE - but it is emphatically
+        # not grounds to promote either: the candidate's compatibility with
+        # the already-recorded fingerprint is simply unknown. It stays
+        # Success = $false; only the reported message differs, because the
+        # raw preflight output reads like success and would mislead.
+        $verifyErrors = if ($verify.Incomplete) {
+            @(
+                "Hall Core is currently running against this data directory, so its durable configuration compatibility could not be verified.",
+                "Stop Hall Core, then reconfigure again."
+            )
+        } else {
+            @($verify.Output)
+        }
+        return [PSCustomObject]@{ Success = $false; Stage = "verify-only"; Errors = $verifyErrors }
     }
 
     $saved = Invoke-HallConfigSave -RepoRoot $RepoRoot -ConfigPath $ConfigPath -Candidate $Candidate

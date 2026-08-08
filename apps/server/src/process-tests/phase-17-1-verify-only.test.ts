@@ -5,6 +5,7 @@ import type { ChildProcess } from "node:child_process";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { HALL_CONFIG_DIR_ENV_OVERRIDE } from "@hall-of-wisdom/hall-config";
 import { HallDatabase } from "../persistence/database.js";
+import { EXIT_VERIFICATION_INCOMPLETE } from "../config/server-config.js";
 import {
   attemptStart,
   killAndWait,
@@ -115,7 +116,7 @@ describe("--verify-only against the real built binary", () => {
     }
   }, 20000);
 
-  it("skips storage checks (exit 0) when a real instance is already running against the same dataDir", async () => {
+  it("skips storage checks with EXIT_VERIFICATION_INCOMPLETE (not 0) when a real instance is already running against the same dataDir", async () => {
     tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hall-verify-only-live-"));
     isolateHallConfigDir();
     const workspaceRoot = path.join(tempRoot, "workspace");
@@ -154,7 +155,12 @@ describe("--verify-only against the real built binary", () => {
     spawned.push(verify);
     await waitForExit(verify);
 
-    expect(verify.exitCode).toBe(0);
+    // Deliberately NOT 0: the skip is expected and safe, but the durable
+    // fingerprint compatibility check never ran, so this is a third
+    // outcome — neither full success nor a failure. Reporting 0 let
+    // install.ps1's reconfigure flow promote a candidate nothing had
+    // checked, over the active config of this very running instance.
+    expect(verify.exitCode).toBe(EXIT_VERIFICATION_INCOMPLETE);
     expect(output.text).toContain("storage and fingerprint checks were skipped");
 
     const stillHealthy = await fetch(`http://127.0.0.1:${String(livePort)}/api/v1/health`);
