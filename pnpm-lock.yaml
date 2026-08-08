@@ -147,6 +147,9 @@ importers:
       '@hall-of-wisdom/codex-adapter':
         specifier: workspace:*
         version: link:../../adapters/codex
+      '@hall-of-wisdom/hall-config':
+        specifier: workspace:*
+        version: link:../../packages/hall-config
       '@hall-of-wisdom/hall-runner':
         specifier: workspace:*
         version: link:../../runners/hall-runner
