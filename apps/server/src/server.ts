@@ -61,7 +61,20 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     return EXIT_INVALID_INPUT;
   }
 
-  const persisted = tryLoadConfig()?.config;
+  // `tryLoadConfig` deliberately throws on a corrupt file or an
+  // unsupported `schemaVersion` (only a *missing* file is a soft miss).
+  // Without this guard that throw escapes to the top-level catch and exits
+  // EXIT_INTERNAL_ERROR, and — because it runs before `resolveServerConfig`
+  // — it fires even when the operator supplied every value explicitly on
+  // the command line, leaving no way to work around a broken config file.
+  // Treated as the configuration problem it is, like every other one here.
+  let persisted;
+  try {
+    persisted = tryLoadConfig()?.config;
+  } catch (error) {
+    console.error(formatError(error));
+    return EXIT_INVALID_INPUT;
+  }
 
   let cliOptions;
   try {

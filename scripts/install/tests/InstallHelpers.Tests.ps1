@@ -25,11 +25,20 @@ Assert-Equal "default-value" (Read-HallAnswer -Prompt "x" -Default "default-valu
 
 # Finding 5: Get-HallAnswers coverage.
 
+# (a0) -NonInteractive with neither an existing config nor an explicit
+# workspace root must FAIL, never silently fall back to the caller's
+# current directory: an unattended run launched from the wrong folder (the
+# Hall repo itself, say) would otherwise persist that as the workspace.
+# Every other field has a genuinely well-defined %LOCALAPPDATA%-derived
+# default; workspaceRoot is the one that does not.
+Assert-Throws { Get-HallAnswers -NonInteractive } "-NonInteractive with no existing config and no -BoundWorkspaceRoot must throw, never guess the workspace root from the current directory"
+Assert-Throws { Get-HallAnswers -NonInteractive -BoundDataDir "C:\Some\Data" } "supplying other fields does not excuse a missing workspace root under -NonInteractive"
+
 # (a) -NonInteractive with no -ExistingConfig: a fresh install must return
 # all 8 fields populated with sensible defaults, never blank/null/zero.
-$freshAnswers = Get-HallAnswers -NonInteractive
+$freshAnswers = Get-HallAnswers -NonInteractive -BoundWorkspaceRoot "C:\Fresh\Workspace"
 Assert-Equal 1 $freshAnswers.schemaVersion "a fresh Get-HallAnswers result must have schemaVersion 1"
-Assert-True ([bool]$freshAnswers.workspaceRoot) "a fresh Get-HallAnswers result must populate workspaceRoot"
+Assert-Equal "C:\Fresh\Workspace" $freshAnswers.workspaceRoot "a fresh Get-HallAnswers result must use the supplied workspaceRoot verbatim"
 Assert-True ([bool]$freshAnswers.dataDir) "a fresh Get-HallAnswers result must populate dataDir with the derived default"
 Assert-True ([bool]$freshAnswers.agentWorktreeRoot) "a fresh Get-HallAnswers result must populate agentWorktreeRoot with the derived default"
 Assert-True ([bool]$freshAnswers.comparisonRoot) "a fresh Get-HallAnswers result with no existing config must populate comparisonRoot with the derived default, not leave it null"

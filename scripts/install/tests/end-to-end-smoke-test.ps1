@@ -64,7 +64,10 @@ try {
     if (-not (Test-Path -LiteralPath $configPath)) {
         throw "Expected config file was not written at '$configPath'."
     }
-    $config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+    # -Encoding UTF8 is required: hall-config always writes UTF-8, but
+    # Windows PowerShell 5.1's Get-Content defaults to the ANSI code page
+    # and would silently turn any non-ASCII path into mojibake here.
+    $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($config.workspaceRoot -ne $workspaceRoot) {
         throw "Persisted workspaceRoot '$($config.workspaceRoot)' does not match the requested '$workspaceRoot'."
     }
@@ -88,14 +91,25 @@ try {
     # LOCALAPPDATA/HALL_CONFIG_DIR must take the reconfigure path and
     # succeed idempotently - never destroy the SQLite database it just
     # verified above.
-    & pwsh -NoProfile -File $installPs1 `
+    #
+    # This second run deliberately uses Windows PowerShell 5.1
+    # (powershell.exe), the project's stated primary host, rather than
+    # repeating pwsh: it buys a real 5.1 end-to-end pass over the
+    # PowerShell->Node config pipe at zero extra runtime, where duplicating
+    # the whole multi-minute script under a second host would not. Narrow
+    # per-host stdin encoding coverage (BOM + non-ASCII, both hosts, real
+    # dist/cli.js) lives in HallConfigStdinEncoding.Tests.ps1, which
+    # run-tests.ps1 executes in seconds.
+    $secondRunHost = if (Get-Command powershell -ErrorAction SilentlyContinue) { "powershell" } else { "pwsh" }
+    Write-Host "Second (reconfigure) run under host: $secondRunHost"
+    & $secondRunHost -NoProfile -File $installPs1 `
         -WorkspaceRoot $workspaceRoot `
         -DataDir $dataDir `
         -AgentWorktreeRoot $agentWorktreeRoot `
         -ComparisonRoot $comparisonRoot `
         -NonInteractive
     if ($LASTEXITCODE -ne 0) {
-        throw "second install.ps1 -NonInteractive run (idempotent reconfigure) exited $LASTEXITCODE"
+        throw "second install.ps1 -NonInteractive run under $secondRunHost (idempotent reconfigure) exited $LASTEXITCODE"
     }
     if (-not (Test-Path -LiteralPath (Join-Path $dataDir "hall-core.db"))) {
         throw "SQLite database (hall-core.db, see apps/server/src/persistence/database.ts's DATABASE_FILE_NAME) appears to have been removed by a reconfigure run - this must never happen."

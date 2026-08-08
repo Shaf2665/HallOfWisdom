@@ -62,13 +62,18 @@ function Get-HallInstallerConfigPath {
     Join-Path (Join-Path $LocalAppData "HallOfWisdom") "config.json"
 }
 
-# Reads and parses the persisted config file at $ConfigPath. Used both for
-# the just-saved candidate re-read (see the "keep" branch of
-# Invoke-HallInstaller, Finding 1) and, when convenient, for the initial
-# existing-config detection.
+# Reads and parses the persisted config file at $ConfigPath, used for the
+# initial existing-config detection.
+#
+# -Encoding UTF8 is required, not cosmetic: hall-config always writes the
+# file as UTF-8, but Windows PowerShell 5.1's Get-Content defaults to the
+# ANSI code page, which decodes a non-ASCII path (a user name like
+# "M<u+00FC>ller" in a %LOCALAPPDATA%-derived default) into mojibake -
+# silently, and the mojibake would then be shown as the "current value"
+# and re-persisted.
 function Get-HallPersistedConfig {
     param([Parameter(Mandatory)][string]$ConfigPath)
-    Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+    Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
 function Write-HallBanner {
@@ -130,6 +135,18 @@ function Get-HallAnswers {
         [PSCustomObject]$ExistingConfig
     )
     $defaults = Get-HallDefaultPaths
+
+    # workspaceRoot is the one field with no well-defined default: every
+    # other field derives from %LOCALAPPDATA%, but the workspace is
+    # wherever the user keeps their projects. Interactively, the current
+    # directory is a reasonable pre-filled prompt default the user can see
+    # and correct. Unattended it is not - an `install.ps1 -NonInteractive`
+    # launched from the wrong directory (the Hall repo itself, say) would
+    # silently persist that as the workspace. The plan requires
+    # -NonInteractive to fail with a clear error rather than guess.
+    if ($NonInteractive -and -not $ExistingConfig -and -not $BoundWorkspaceRoot) {
+        throw "-WorkspaceRoot is required when running -NonInteractive without an existing configuration."
+    }
 
     $defaultWorkspaceRoot = if ($ExistingConfig) { $ExistingConfig.workspaceRoot } else { (Get-Location).Path }
     $workspaceRoot = Read-HallAnswer -Prompt "Projects/workspace folder" -Default $defaultWorkspaceRoot -BoundValue $BoundWorkspaceRoot -NonInteractive:$NonInteractive
@@ -197,8 +214,14 @@ function Get-HallAnswers {
     }
 }
 
-function Install-HallDependenciesAndConfig {
-    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$ConfigPath, [Parameter(Mandatory)]$Answers)
+# Split out of the former Install-HallDependenciesAndConfig so the "keep
+# current configuration" path can run the install/build half WITHOUT the
+# config-save half - see the "keep" branch of Invoke-HallInstaller. The
+# documented step order (pnpm install -> hall-config build -> save ->
+# typecheck -> build) is preserved: the caller performs the save between
+# these two functions.
+function Install-HallDependencies {
+    param([Parameter(Mandatory)][string]$RepoRoot)
     Write-Host "Installing Hall..."
     Push-Location $RepoRoot
     try {
@@ -206,13 +229,19 @@ function Install-HallDependenciesAndConfig {
         if ($LASTEXITCODE -ne 0) { throw "pnpm install failed (exit code $LASTEXITCODE)." }
         Write-Host "  [OK] Dependencies installed" -ForegroundColor Green
 
+        # Built ahead of the rest of the workspace because every
+        # Invoke-HallConfig* call below needs dist/cli.js to exist.
         & pnpm --filter "@hall-of-wisdom/hall-config" run build
         if ($LASTEXITCODE -ne 0) { throw "Building @hall-of-wisdom/hall-config failed (exit code $LASTEXITCODE)." }
+    } finally {
+        Pop-Location
+    }
+}
 
-        $saved = Invoke-HallConfigSave -RepoRoot $RepoRoot -ConfigPath $ConfigPath -Candidate $Answers
-        if ($saved.ExitCode -ne 0) { throw "Saving Hall configuration failed: $($saved.Result.errors -join '; ')" }
-        Write-Host "  [OK] Configuration saved ($ConfigPath)" -ForegroundColor Green
-
+function Invoke-HallBuild {
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    Push-Location $RepoRoot
+    try {
         & pnpm typecheck
         if ($LASTEXITCODE -ne 0) { throw "pnpm typecheck failed (exit code $LASTEXITCODE) - this is a blocking installation failure." }
 
@@ -223,6 +252,13 @@ function Install-HallDependenciesAndConfig {
     } finally {
         Pop-Location
     }
+}
+
+function Save-HallConfiguration {
+    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$ConfigPath, [Parameter(Mandatory)]$Answers)
+    $saved = Invoke-HallConfigSave -RepoRoot $RepoRoot -ConfigPath $ConfigPath -Candidate $Answers
+    if ($saved.ExitCode -ne 0) { throw "Saving Hall configuration failed: $($saved.Result.errors -join '; ')" }
+    Write-Host "  [OK] Configuration saved ($ConfigPath)" -ForegroundColor Green
 }
 
 function Invoke-HallInstallVerification {
@@ -288,12 +324,13 @@ function Invoke-HallInstaller {
         # pipeline.
         $mode = $null
         while (-not $mode) {
-            # Cast to [string] before the switch: PowerShell's switch
-            # statement treats a raw $null as an empty collection and runs
-            # NO clause at all - not even default - which would leave
-            # $mode permanently $null and spin this loop forever if
-            # Read-Host ever returns $null (e.g. redirected/closed stdin).
-            # [string]$null is "", which the "" case below already handles.
+            # The [string] cast makes the $null case explicit rather than
+            # implicit: PowerShell's switch stringifies its condition for
+            # comparison, so a raw $null from Read-Host (redirected/closed
+            # stdin) compares equal to "" and already hits the "" clause
+            # below - the loop terminates either way. Casting documents
+            # that "no input" is deliberately treated as "keep" instead of
+            # leaving it to implicit stringification.
             $choice = [string](Read-Host "Choose an option [1]")
             switch ($choice) {
                 "" { $mode = "keep" }
@@ -308,16 +345,27 @@ function Invoke-HallInstaller {
     }
 
     if ($mode -eq "keep") {
-        Install-HallDependenciesAndConfig -RepoRoot $RepoRoot -ConfigPath $configPath -Answers $existing
-        # Install-HallDependenciesAndConfig just ran Invoke-HallConfigSave,
-        # which re-validates $existing through the real zod schema and
-        # normalizes every default-backed field the on-disk file may have
-        # omitted (hallCorePort, hallWebPort, codexTrustedLocal). Re-read
-        # the just-saved file rather than reusing the possibly-incomplete
-        # $existing object, so verification runs against a complete
-        # candidate instead of silently binding missing fields to 0/false.
-        $verifiedCandidate = Get-HallPersistedConfig -ConfigPath $configPath
-        Invoke-HallInstallVerification -RepoRoot $RepoRoot -Answers $verifiedCandidate
+        # "Keep current configuration" re-runs build + --verify-only and
+        # NOTHING else - it must never write config.json. Writing first and
+        # verifying second made this the one path capable of destroying the
+        # configuration it promised to keep (a bad read would be persisted
+        # before verification ever got a chance to reject it).
+        Install-HallDependencies -RepoRoot $RepoRoot
+        Invoke-HallBuild -RepoRoot $RepoRoot
+        # `status` runs hall-config's real load path and returns the
+        # zod-normalized config - every default-backed field the on-disk
+        # file may have omitted (hallCorePort, hallWebPort,
+        # codexTrustedLocal) filled in - WITHOUT writing anything. That is
+        # exactly what verification needs: a complete candidate, from the
+        # single source of truth (the schema), with no round-trip through
+        # config.json.
+        $status = Invoke-HallConfigStatus -RepoRoot $RepoRoot -ConfigPath $configPath
+        if (-not $status.config) {
+            Write-Host "The existing Hall configuration at '$configPath' is not valid: $($status.error)" -ForegroundColor Red
+            Write-Host "Re-run .\install.ps1 and choose 'Reconfigure Hall', or fix that file manually." -ForegroundColor Red
+            exit 1
+        }
+        Invoke-HallInstallVerification -RepoRoot $RepoRoot -Answers $status.config
         Invoke-HallDiagnostics -RepoRoot $RepoRoot
         Write-Host ""; Write-Host "Hall of Wisdom is ready." -ForegroundColor Cyan
         return
@@ -351,7 +399,9 @@ function Invoke-HallInstaller {
         return
     }
 
-    Install-HallDependenciesAndConfig -RepoRoot $RepoRoot -ConfigPath $configPath -Answers $answers
+    Install-HallDependencies -RepoRoot $RepoRoot
+    Save-HallConfiguration -RepoRoot $RepoRoot -ConfigPath $configPath -Answers $answers
+    Invoke-HallBuild -RepoRoot $RepoRoot
     Invoke-HallInstallVerification -RepoRoot $RepoRoot -Answers $answers
     Invoke-HallDiagnostics -RepoRoot $RepoRoot
     Write-Host ""; Write-Host "Hall of Wisdom is ready." -ForegroundColor Cyan
