@@ -45,3 +45,7 @@ Thumbs.db
 .playwright-mcp/
 
 .claude/scheduled_tasks.lock
+
+# Subagent-driven-development workspace (task briefs, reports, review diffs) — working
+# artifacts for the current session, never part of a phase's deliverable.
+.superpowers/
