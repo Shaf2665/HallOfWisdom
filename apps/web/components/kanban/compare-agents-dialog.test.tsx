@@ -33,6 +33,7 @@ function makeAdapter(overrides: Partial<AdapterSummary> = {}): AdapterSummary {
       mcp: false,
       acp: false,
     },
+    installed: true,
     availability: "available",
     declaredCapabilities: ["project.read", "project.edit", "structured.events", "cancellation"],
     assignable: true,

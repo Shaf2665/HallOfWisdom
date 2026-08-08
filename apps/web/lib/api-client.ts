@@ -19,6 +19,7 @@ import {
   errorResponseSchema,
   getCeoPlanResponseSchema,
   getCeoPlanRunResponseSchema,
+  getAdapterResponseSchema,
   healthResponseSchema,
   listAdaptersResponseSchema,
   listBoardMessagesResponseSchema,
@@ -278,6 +279,19 @@ export function listAdapters(
     `${baseUrl}/api/v1/adapters`,
     { method: "GET" },
     listAdaptersResponseSchema,
+    options,
+  );
+}
+
+export function getAdapter(
+  baseUrl: string,
+  adapterId: string,
+  options: RequestOptions = {},
+): Promise<z.infer<typeof getAdapterResponseSchema>> {
+  return request(
+    `${baseUrl}/api/v1/adapters/${encodeURIComponent(adapterId)}`,
+    { method: "GET" },
+    getAdapterResponseSchema,
     options,
   );
 }

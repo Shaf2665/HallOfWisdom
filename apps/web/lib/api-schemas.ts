@@ -388,12 +388,22 @@ export const adapterSummarySchema = z
     integrationLevel: integrationLevelSchema,
     supportedOperatingSystems: z.array(operatingSystemSchema),
     capabilities: agentCapabilitiesSchema,
+    // Phase 17.2 — straight from AgentDetectionResult's own already-safe
+    // `installed` field (see apps/server's routes/adapters.ts).
+    installed: z.boolean(),
     availability: availabilityStatusSchema,
     // Phase 10.2 — present only when availability is "available"; a
     // small, fixed, adapter-authored caveat about that otherwise-normal
     // result (e.g. Codex's trusted-local bypass notice). Never present
     // for any other availability value. See apps/server's adapters.ts.
     limitationNotice: z.string().optional(),
+    // Phase 17.2 — the SAME underlying diagnosticMessage widened to
+    // every availability value, not just "available" — used by the
+    // Providers page to explain why a provider isn't connected. See
+    // apps/server's routes/adapters.ts SafeAdapterSummary doc comment
+    // for why widening this specific field is safe.
+    statusMessage: z.string().optional(),
+    detectedVersion: z.string().optional(),
     // Phase 11 — declaredCapabilities is static descriptor metadata;
     // everything else here is a fresh runtime observation from this
     // adapter's own detect() call. See apps/server's routes/adapters.ts.
@@ -410,6 +420,8 @@ export type AdapterSummary = z.infer<typeof adapterSummarySchema>;
 export const listAdaptersResponseSchema = z
   .object({ adapters: z.array(adapterSummarySchema) })
   .strict();
+
+export const getAdapterResponseSchema = z.object({ adapter: adapterSummarySchema }).strict();
 
 /**
  * Phase 11 — routing routes' response shapes. Mirrors
