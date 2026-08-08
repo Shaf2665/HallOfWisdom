@@ -58,3 +58,9 @@ export const SHUTDOWN_TIMEOUT_MS = 5000;
 
 /** `PRAGMA busy_timeout` for the durable-mode SQLite connection — see `persistence/database.ts`. */
 export const DATABASE_BUSY_TIMEOUT_MS = 5000;
+
+export const EXIT_INVALID_INPUT = 2;
+export const EXIT_INTERNAL_ERROR = 3;
+export const EXIT_FORCED_SHUTDOWN = 130;
+/** This instance's durable ownership epoch was superseded by another instance (Phase 13.2) — distinguished from `EXIT_INTERNAL_ERROR` purely for operator diagnosability; nothing branches on the specific value. */
+export const EXIT_OWNERSHIP_LOST = 4;

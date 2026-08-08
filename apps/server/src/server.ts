@@ -10,6 +10,10 @@ import { resolveServerConfig } from "./config/resolve-server-config.js";
 import {
   DATABASE_BUSY_TIMEOUT_MS,
   DEFAULT_LIMITS,
+  EXIT_FORCED_SHUTDOWN,
+  EXIT_INTERNAL_ERROR,
+  EXIT_INVALID_INPUT,
+  EXIT_OWNERSHIP_LOST,
   LOCAL_ONLY_HOST,
   SHUTDOWN_TIMEOUT_MS,
 } from "./config/server-config.js";
@@ -29,17 +33,6 @@ import { reconcileAllPlanProgress } from "./ceo-plans/ceo-plan-progress-reconcil
 import { runCeoPlanExecutionRecovery } from "./ceo-execution/ceo-plan-execution-recovery.js";
 import { canonicalizeHallOwnedRoot } from "./agent-worktrees/path-safety.js";
 import { AgentWorktreePathError } from "./agent-worktrees/agent-worktree-errors.js";
-
-const EXIT_INVALID_INPUT = 2;
-const EXIT_INTERNAL_ERROR = 3;
-const EXIT_FORCED_SHUTDOWN = 130;
-/**
- * This instance's durable ownership epoch was superseded by another
- * instance (Phase 13.2) — distinguished from `EXIT_INTERNAL_ERROR` purely
- * for operator diagnosability in logs/process supervisors; nothing in this
- * codebase branches on the specific value.
- */
-const EXIT_OWNERSHIP_LOST = 4;
 
 function formatError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
