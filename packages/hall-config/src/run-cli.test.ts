@@ -100,9 +100,10 @@ describe("runCli validate", () => {
     if (typeof parsed !== "object" || parsed === null) {
       throw new Error("Invalid parsed object");
     }
-    const obj = parsed as { valid?: unknown; errors?: unknown };
+    const obj = parsed as { valid?: unknown; errors?: unknown; saved?: unknown };
     expect(obj.valid).toBe(false);
     expect(Array.isArray(obj.errors) ? obj.errors.length : 0).toBeGreaterThan(0);
+    expect(obj.saved).toBeUndefined();
   });
 
   it("reports valid:false for a schema-invalid candidate", () => {
@@ -125,11 +126,13 @@ describe("runCli validate", () => {
     if (typeof parsed !== "object" || parsed === null) {
       throw new Error("Invalid parsed object");
     }
-    const obj = parsed as { errors?: unknown };
+    const obj = parsed as { errors?: unknown; valid?: unknown; saved?: unknown };
     if (!Array.isArray(obj.errors)) {
       throw new Error("Invalid errors array");
     }
     expect(String(obj.errors[0])).toMatch(/workspaceRoot/);
+    expect(obj.valid).toBe(false);
+    expect(obj.saved).toBeUndefined();
   });
 
   it("never writes a file", () => {
@@ -158,6 +161,40 @@ describe("runCli save", () => {
     });
     expect(code).toBe(1);
     expect(fs.existsSync(configPath)).toBe(false);
+  });
+
+  it("reports saved:false and exit 1 for malformed stdin JSON, never including valid key", () => {
+    const out = captureStdout();
+    const code = runCli(["save", "--path", configPath], { stdin: "{ not json", writeStdout: out.writeStdout });
+    expect(code).toBe(1);
+    const parsed = parseOutput(out.lines[0]);
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new Error("Invalid parsed object");
+    }
+    const obj = parsed as { saved?: unknown; errors?: unknown; valid?: unknown };
+    expect(obj.saved).toBe(false);
+    expect(Array.isArray(obj.errors) ? obj.errors.length : 0).toBeGreaterThan(0);
+    expect(obj.valid).toBeUndefined();
+  });
+
+  it("reports saved:false for a relative workspaceRoot (path pre-check), never including valid key", () => {
+    const out = captureStdout();
+    const code = runCli(["save", "--path", configPath], {
+      stdin: JSON.stringify({ ...VALID_CANDIDATE, workspaceRoot: "relative\\path" }),
+      writeStdout: out.writeStdout,
+    });
+    expect(code).toBe(1);
+    const parsed = parseOutput(out.lines[0]);
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new Error("Invalid parsed object");
+    }
+    const obj = parsed as { errors?: unknown; saved?: unknown; valid?: unknown };
+    if (!Array.isArray(obj.errors)) {
+      throw new Error("Invalid errors array");
+    }
+    expect(String(obj.errors[0])).toMatch(/workspaceRoot/);
+    expect(obj.saved).toBe(false);
+    expect(obj.valid).toBeUndefined();
   });
 });
 

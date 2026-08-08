@@ -75,13 +75,15 @@ export function runCli(argv: readonly string[], io: CliIo): number {
         error instanceof HallConfigValidationError || error instanceof UnsupportedHallConfigSchemaVersionError
           ? error.message
           : `stdin was not valid JSON: ${error instanceof Error ? error.message : String(error)}`;
-      io.writeStdout(JSON.stringify({ valid: false, saved: false, errors: [message] }));
+      const failurePayload = command === "save" ? { saved: false, errors: [message] } : { valid: false, errors: [message] };
+      io.writeStdout(JSON.stringify(failurePayload));
       return 1;
     }
 
     const pathErrors = precheckAllPaths(candidate);
     if (pathErrors.length > 0) {
-      io.writeStdout(JSON.stringify({ valid: false, saved: false, errors: pathErrors }));
+      const failurePayload = command === "save" ? { saved: false, errors: pathErrors } : { valid: false, errors: pathErrors };
+      io.writeStdout(JSON.stringify(failurePayload));
       return 1;
     }
 
