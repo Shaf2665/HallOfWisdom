@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import * as apiClient from "../../lib/api-client";
 import type { AdapterSummary } from "../../lib/api-schemas";
 import { ProvidersPanel } from "./providers-panel";
@@ -89,11 +90,30 @@ describe("ProvidersPanel", () => {
     vi.mocked(apiClient.getAdapter).mockResolvedValue({
       adapter: makeAdapter({ availability: "available" }),
     });
+    const user = userEvent.setup();
     render(<ProvidersPanel baseUrl={BASE_URL} />);
     await waitFor(() => {
       expect(screen.getByText("Claude Code")).toBeInTheDocument();
     });
     expect(screen.getAllByText("Not connected")).toHaveLength(1);
     expect(screen.getAllByText("Connected")).toHaveLength(1);
+
+    const cards = screen.getAllByRole("listitem");
+    const claudeCodeCard = cards.find((card) => within(card).queryByText("Claude Code"));
+    if (!claudeCodeCard) throw new Error("Claude Code card not found");
+    await user.click(within(claudeCodeCard).getByRole("button", { name: "Recheck" }));
+
+    await waitFor(() => {
+      expect(within(claudeCodeCard).getByText("Connected")).toBeInTheDocument();
+    });
+    // Codex's own card must be untouched — a `handleUpdated` that replaces
+    // every adapter instead of matching by `adapterId` would clobber Codex
+    // with the rechecked Claude Code summary and make this fail.
+    const codexCard = cards.find((card) => within(card).queryByText("Codex"));
+    if (!codexCard) throw new Error("Codex card not found");
+    expect(within(codexCard).getByText("Codex")).toBeInTheDocument();
+    expect(within(codexCard).getByText("Connected")).toBeInTheDocument();
+    expect(screen.queryByText("Not connected")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Connected")).toHaveLength(2);
   });
 });
