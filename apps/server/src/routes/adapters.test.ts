@@ -3,6 +3,7 @@ import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import { MockAgentAdapter } from "@hall-of-wisdom/mock-agent";
 import type { AgentAdapter } from "@hall-of-wisdom/agent-adapter-sdk";
 import Fastify, { type FastifyInstance } from "fastify";
+import { installErrorHandler, installNotFoundHandler } from "../errors/error-handler.js";
 import { registerAdapterRoutes } from "./adapters.js";
 
 function buildFakeAdapter(overrides: {
@@ -47,6 +48,8 @@ function buildFakeAdapter(overrides: {
 
 async function buildApp(registry: AgentRegistry): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
+  installErrorHandler(app);
+  installNotFoundHandler(app);
   registerAdapterRoutes(app, { registry });
   await app.ready();
   return app;
@@ -361,6 +364,72 @@ describe("GET /api/v1/adapters", () => {
     const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
     expect(response.body).not.toContain("TOKEN=xyz789");
     expect(response.body).not.toContain("secret internal detail");
+    await app.close();
+  });
+});
+
+describe("GET /api/v1/adapters/:adapterId", () => {
+  it("returns the same safe summary shape as the list route, for one adapter", async () => {
+    const registry = new AgentRegistry();
+    registry.register(new MockAgentAdapter());
+    const app = await buildApp(registry);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters/hall.mock-agent" });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{ adapter: AdapterSummaryJson }>();
+    expect(body.adapter).toMatchObject({
+      adapterId: "hall.mock-agent",
+      displayName: "Mock Agent",
+      availability: "available",
+    });
+    await app.close();
+  });
+
+  it("returns 404 ADAPTER_NOT_FOUND for an unregistered adapterId", async () => {
+    const registry = new AgentRegistry();
+    registry.register(new MockAgentAdapter());
+    const app = await buildApp(registry);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters/hall.does-not-exist" });
+    expect(response.statusCode).toBe(404);
+    expect(response.json<{ error: { code: string } }>().error.code).toBe("ADAPTER_NOT_FOUND");
+    await app.close();
+  });
+
+  it("isolates a detect() failure the same way the list route does", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      buildFakeAdapter({
+        adapterId: "hall.broken-single",
+        detect: () => Promise.reject(new Error("simulated detection crash")),
+      }),
+    );
+    const app = await buildApp(registry);
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/adapters/hall.broken-single",
+    });
+    expect(response.statusCode).toBe(200);
+    const body = response.json<{ adapter: AdapterSummaryJson & { installed?: boolean } }>();
+    expect(body.adapter.availability).toBe("unavailable");
+    expect(body.adapter.installed).toBe(false);
+    await app.close();
+  });
+
+  it("never exposes executablePath or a thrown error's message for the single-adapter route", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      buildFakeAdapter({
+        adapterId: "hall.leaky-single",
+        detect: () => Promise.reject(new Error("secret internal detail: TOKEN=single456")),
+      }),
+    );
+    const app = await buildApp(registry);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters/hall.leaky-single" });
+    expect(response.body).not.toContain("TOKEN=single456");
+    expect(response.body).not.toContain("executablePath");
     await app.close();
   });
 });

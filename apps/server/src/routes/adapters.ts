@@ -12,6 +12,7 @@ import type {
   CapabilityObservation,
   ExecutionTrust,
 } from "@hall-of-wisdom/protocol";
+import { AdapterNotFoundError } from "../errors/app-error.js";
 
 export interface AdapterRoutesDeps {
   readonly registry: AgentRegistry;
@@ -200,4 +201,28 @@ export function registerAdapterRoutes(app: FastifyInstance, deps: AdapterRoutesD
 
     return { adapters };
   });
+
+  /**
+   * `GET /api/v1/adapters/:adapterId`: the same safe summary as the list
+   * route, for exactly one adapter — used by the Providers page's Recheck
+   * action (Phase 17.2) so rechecking one provider never needs to
+   * re-fetch or re-render every other one. Throws the same
+   * `AdapterNotFoundError` `TaskOrchestrator`/`ComparisonOrchestrator`
+   * already use for an unknown adapterId, so this route's 404 shape is
+   * identical to every other resource-not-found response in this API.
+   */
+  app.get<{ Params: { adapterId: string } }>(
+    "/api/v1/adapters/:adapterId",
+    async (request) => {
+      const { adapterId } = request.params;
+      const descriptor = deps.registry
+        .listDescriptors()
+        .find((candidate) => candidate.adapterId === adapterId);
+      if (descriptor === undefined) {
+        throw new AdapterNotFoundError(adapterId);
+      }
+      const detection = await detectSafely(deps.registry, adapterId);
+      return { adapter: buildAdapterSummary(descriptor, detection) };
+    },
+  );
 }
