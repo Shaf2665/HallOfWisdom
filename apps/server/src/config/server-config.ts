@@ -58,3 +58,11 @@ export const SHUTDOWN_TIMEOUT_MS = 5000;
 
 /** `PRAGMA busy_timeout` for the durable-mode SQLite connection — see `persistence/database.ts`. */
 export const DATABASE_BUSY_TIMEOUT_MS = 5000;
+
+export const EXIT_INVALID_INPUT = 2;
+export const EXIT_INTERNAL_ERROR = 3;
+export const EXIT_FORCED_SHUTDOWN = 130;
+/** This instance's durable ownership epoch was superseded by another instance (Phase 13.2) — distinguished from `EXIT_INTERNAL_ERROR` purely for operator diagnosability; nothing branches on the specific value. */
+export const EXIT_OWNERSHIP_LOST = 4;
+/** `--verify-only` could not fully verify durable configuration because a live Hall Core instance already holds the data directory — distinct from success (0) and from every failure code, so callers can tell "skipped, expected" apart from both "fully verified" and "genuinely invalid". `scripts/install/Verification.ps1` hard-codes this value; keep the two in sync. */
+export const EXIT_VERIFICATION_INCOMPLETE = 5;

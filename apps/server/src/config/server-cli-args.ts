@@ -1,7 +1,6 @@
 import { parseArgs } from "node:util";
 import { z } from "zod";
 import { boundedNonBlankString } from "@hall-of-wisdom/protocol";
-import { DEFAULT_WEB_ORIGIN } from "./server-config.js";
 import { InvalidWebOriginError, parseWebOrigin } from "./web-origin.js";
 
 export class ServerCliError extends Error {
@@ -11,43 +10,36 @@ export class ServerCliError extends Error {
   }
 }
 
-const serverCliOptionsSchema = z
+/**
+ * Raw command-line overrides only — every field optional, including
+ * `workspaceRoot`. Hall must be able to start from a persisted
+ * `@hall-of-wisdom/hall-config` configuration alone, with zero flags; the
+ * "workspaceRoot is actually required" rule is enforced one step later, on
+ * the *merged* result, by `resolve-server-config.ts`'s
+ * `resolvedServerConfigSchema`. This split is what lets an explicit CLI
+ * flag win per-field over persisted config without a schema-level default
+ * masking "not supplied" as "supplied with the default value."
+ */
+const serverCliOverridesSchema = z
   .object({
-    workspaceRoot: boundedNonBlankString(4096),
+    workspaceRoot: boundedNonBlankString(4096).optional(),
     port: z.number().int().min(1).max(65535).optional(),
-    // Named after Mock Agent specifically because this whole CLI is a
-    // development entry point (see composition/mock-agent-composition-root.ts) —
-    // the generic parts of the server (app.ts, TaskOrchestrator, routes)
-    // never see this value.
     mockScenario: boundedNonBlankString(50).optional(),
     mockStepDelayMs: z.number().int().min(0).max(5000).optional(),
-    webOrigin: boundedNonBlankString(2048).default(DEFAULT_WEB_ORIGIN),
-    // Phase 10.2 — process-startup-only. There is deliberately no way to
-    // set this from Hall Web, a task, or any REST request body; see
-    // docs/architecture/0010-paperclip-compatible-codex-mode.md.
-    enableCodexTrustedLocal: z.boolean().default(false),
-    // Phase 12 — optional. When omitted, the multi-agent comparison
-    // feature is not composed at all (no comparison routes, no
-    // comparison store): comparisons are additive and every existing
-    // startup command remains valid without this flag. Never settable
-    // via any client input — process-startup-only, exactly like
-    // `--workspace-root`.
+    webOrigin: boundedNonBlankString(2048).optional(),
+    enableCodexTrustedLocal: z.boolean().optional(),
     comparisonRoot: boundedNonBlankString(4096).optional(),
-    // Phase 13 — optional. When omitted, Hall Core runs exactly as it did
-    // before this phase: every store is purely in-memory and a restart
-    // loses all state. Supplying it opts into SQLite-backed durable state
-    // under this directory — see `persistence/database-config.ts` for the
-    // actual filesystem validation (absolute, created if missing,
-    // symlink-canonicalized, mutually non-contained with `workspaceRoot`
-    // and `comparisonRoot`), which `server.ts` performs, not this schema.
-    // Never settable via any client input — process-startup-only, exactly
-    // like `--workspace-root`.
     dataDir: boundedNonBlankString(4096).optional(),
     agentWorktreeRoot: boundedNonBlankString(4096).optional(),
+    // Phase 17.1 — a side-effect-minimized configuration preflight. No
+    // corresponding persisted-config field: it is a pure CLI-only mode
+    // switch, so a schema default (rather than `.optional()`) is correct
+    // here — there is no other source to defer to.
+    verifyOnly: z.boolean().default(false),
   })
   .strict();
 
-export type ServerCliOptions = z.infer<typeof serverCliOptionsSchema>;
+export type ServerCliOverrides = z.infer<typeof serverCliOverridesSchema>;
 
 function parseOptionalInteger(raw: unknown, flagName: string): number | undefined {
   if (raw === undefined) return undefined;
@@ -73,30 +65,11 @@ function parseOptionalWebOrigin(raw: unknown): string | undefined {
 }
 
 /**
- * Strips exactly one leading standalone `--` from `argv`, if present.
- * `pnpm run <script> -- <args>` is documented to forward `<args>` after
- * the script's own command — but this pnpm version (10.33.0, pinned)
- * forwards the literal `--` separator token itself as the first
- * argument too. Node's own `parseArgs` treats a bare `--` as "end of
- * options: everything after this is positional" (matching the POSIX
- * convention), so an unstripped leading `--` turns every real flag that
- * follows into a rejected positional — this is what caused the
- * documented `pnpm --filter ... run dev -- --workspace-root ...` startup
- * command to fail with "Unexpected argument '--workspace-root'".
- *
- * Only a `--` in the very first position is stripped, and only once:
- * - A later, second `--` (e.g. a genuinely malformed `-- --
- *   --workspace-root ...`) is left for `parseArgs` to reject exactly as
- *   before — garbage input still fails loudly, it is never silently
- *   absorbed.
- * - A `--` occurring after real flags/values (not at index 0) is left
- *   untouched — this function only ever looks at `argv[0]`.
- * - A flag *value* that happens to contain two hyphens (e.g. a
- *   workspace-root path like `D:\Foo--Bar`) is never affected — this
- *   compares the whole first token for exact equality with `--`, never
- *   a substring.
- * - Direct `node dist/server.js --workspace-root ...` invocation (no
- *   leading `--`) is a no-op — `argv[0]` is already a real flag.
+ * Strips exactly one leading standalone `--` from `argv`, if present — see
+ * the historical note in git blame / Phase 11.1: pnpm 10.33.0's `run
+ * <script> -- <args>` forwards the literal `--` separator token itself as
+ * the first argument, which Node's `parseArgs` would otherwise treat as
+ * "end of options."
  */
 export function stripLeadingScriptSeparator(argv: readonly string[]): string[] {
   const args = Array.from(argv);
@@ -105,10 +78,11 @@ export function stripLeadingScriptSeparator(argv: readonly string[]): string[] {
 
 /**
  * Parses and bounds-validates raw `argv` using `node:util`'s built-in
- * `parseArgs` — the same small, dependency-free approach used by Hall
- * Runner's CLI (`runners/hall-runner/src/cli-args.ts`).
+ * `parseArgs`. Produces `ServerCliOverrides` — raw, optional-everywhere
+ * overrides; see that type's doc comment for why `workspaceRoot` is
+ * optional here.
  */
-export function parseServerCliArguments(argv: readonly string[]): ServerCliOptions {
+export function parseServerCliArguments(argv: readonly string[]): ServerCliOverrides {
   let raw: ReturnType<typeof parseArgs>;
   try {
     raw = parseArgs({
@@ -123,6 +97,7 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
         "comparison-root": { type: "string" },
         "data-dir": { type: "string" },
         "agent-worktree-root": { type: "string" },
+        "verify-only": { type: "boolean" },
       },
       strict: true,
       allowPositionals: false,
@@ -137,7 +112,7 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
 
   const webOrigin = parseOptionalWebOrigin(values["web-origin"]);
   const candidate = {
-    workspaceRoot: values["workspace-root"],
+    ...(values["workspace-root"] === undefined ? {} : { workspaceRoot: values["workspace-root"] }),
     port: parseOptionalInteger(values.port, "port"),
     mockScenario: values["mock-scenario"],
     mockStepDelayMs: parseOptionalInteger(values["mock-step-delay-ms"], "mock-step-delay-ms"),
@@ -145,16 +120,15 @@ export function parseServerCliArguments(argv: readonly string[]): ServerCliOptio
     ...(values["enable-codex-trusted-local"] === undefined
       ? {}
       : { enableCodexTrustedLocal: values["enable-codex-trusted-local"] }),
-    ...(values["comparison-root"] === undefined
-      ? {}
-      : { comparisonRoot: values["comparison-root"] }),
+    ...(values["comparison-root"] === undefined ? {} : { comparisonRoot: values["comparison-root"] }),
     ...(values["data-dir"] === undefined ? {} : { dataDir: values["data-dir"] }),
     ...(values["agent-worktree-root"] === undefined
       ? {}
       : { agentWorktreeRoot: values["agent-worktree-root"] }),
+    ...(values["verify-only"] === undefined ? {} : { verifyOnly: values["verify-only"] }),
   };
 
-  const result = serverCliOptionsSchema.safeParse(candidate);
+  const result = serverCliOverridesSchema.safeParse(candidate);
   if (!result.success) {
     const issues = result.error.issues
       .map((issue) => `${issue.path.join(".") || "(root)"}: ${issue.message}`)

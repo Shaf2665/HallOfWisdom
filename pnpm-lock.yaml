@@ -147,6 +147,9 @@ importers:
       '@hall-of-wisdom/codex-adapter':
         specifier: workspace:*
         version: link:../../adapters/codex
+      '@hall-of-wisdom/hall-config':
+        specifier: workspace:*
+        version: link:../../packages/hall-config
       '@hall-of-wisdom/hall-runner':
         specifier: workspace:*
         version: link:../../runners/hall-runner
@@ -238,6 +241,19 @@ importers:
         version: 3.2.7(@types/node@24.13.3)(jiti@2.7.0)(jsdom@25.0.1)(lightningcss@1.32.0)
 
   packages/agent-adapter-sdk:
+    dependencies:
+      '@hall-of-wisdom/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      zod:
+        specifier: ^3.24.1
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.0
+        version: 24.13.3
+
+  packages/hall-config:
     dependencies:
       '@hall-of-wisdom/protocol':
         specifier: workspace:*

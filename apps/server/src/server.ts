@@ -2,13 +2,18 @@ import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { isContainedPath, validateWorkspace } from "@hall-of-wisdom/hall-runner";
+import { tryLoadConfig } from "@hall-of-wisdom/hall-config";
 import { createHallCoreApp } from "./app.js";
 import { createServerComposition } from "./composition/server-composition.js";
 import { parseServerCliArguments, ServerCliError } from "./config/server-cli-args.js";
+import { resolveServerConfig } from "./config/resolve-server-config.js";
 import {
   DATABASE_BUSY_TIMEOUT_MS,
   DEFAULT_LIMITS,
-  DEFAULT_PORT,
+  EXIT_FORCED_SHUTDOWN,
+  EXIT_INTERNAL_ERROR,
+  EXIT_INVALID_INPUT,
+  EXIT_OWNERSHIP_LOST,
   LOCAL_ONLY_HOST,
   SHUTDOWN_TIMEOUT_MS,
 } from "./config/server-config.js";
@@ -28,17 +33,7 @@ import { reconcileAllPlanProgress } from "./ceo-plans/ceo-plan-progress-reconcil
 import { runCeoPlanExecutionRecovery } from "./ceo-execution/ceo-plan-execution-recovery.js";
 import { canonicalizeHallOwnedRoot } from "./agent-worktrees/path-safety.js";
 import { AgentWorktreePathError } from "./agent-worktrees/agent-worktree-errors.js";
-
-const EXIT_INVALID_INPUT = 2;
-const EXIT_INTERNAL_ERROR = 3;
-const EXIT_FORCED_SHUTDOWN = 130;
-/**
- * This instance's durable ownership epoch was superseded by another
- * instance (Phase 13.2) — distinguished from `EXIT_INTERNAL_ERROR` purely
- * for operator diagnosability in logs/process supervisors; nothing in this
- * codebase branches on the specific value.
- */
-const EXIT_OWNERSHIP_LOST = 4;
+import { runVerifyOnly } from "./verify-only/run-verify-only.js";
 
 function formatError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -58,12 +53,39 @@ function formatError(error: unknown): string {
  * at the process boundary only.
  */
 export async function runServer(argv: readonly string[]): Promise<number> {
-  let cliOptions;
+  let overrides;
   try {
-    cliOptions = parseServerCliArguments(argv);
+    overrides = parseServerCliArguments(argv);
   } catch (error) {
     console.error(formatError(error));
     return EXIT_INVALID_INPUT;
+  }
+
+  // `tryLoadConfig` deliberately throws on a corrupt file or an
+  // unsupported `schemaVersion` (only a *missing* file is a soft miss).
+  // Without this guard that throw escapes to the top-level catch and exits
+  // EXIT_INTERNAL_ERROR, and — because it runs before `resolveServerConfig`
+  // — it fires even when the operator supplied every value explicitly on
+  // the command line, leaving no way to work around a broken config file.
+  // Treated as the configuration problem it is, like every other one here.
+  let persisted;
+  try {
+    persisted = tryLoadConfig()?.config;
+  } catch (error) {
+    console.error(formatError(error));
+    return EXIT_INVALID_INPUT;
+  }
+
+  let cliOptions;
+  try {
+    cliOptions = resolveServerConfig(overrides, persisted);
+  } catch (error) {
+    console.error(formatError(error));
+    return EXIT_INVALID_INPUT;
+  }
+
+  if (cliOptions.verifyOnly) {
+    return runVerifyOnly(cliOptions);
   }
 
   let workspaceRoot: string;
@@ -321,7 +343,10 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     readiness,
   });
 
-  const port = cliOptions.port ?? DEFAULT_PORT;
+  // `cliOptions.port` is always defined here — `resolveServerConfig` already
+  // applies the CLI/persisted/built-in-default precedence (including
+  // `DEFAULT_PORT` as the final fallback) before this function ever sees it.
+  const port = cliOptions.port;
 
   try {
     await app.listen({ port, host: LOCAL_ONLY_HOST });

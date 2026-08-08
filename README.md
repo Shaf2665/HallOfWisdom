@@ -12,6 +12,17 @@ Requirements:
   2.54); Phase 16 isolated worktree execution fails closed with a bounded Git-failure code on a Git
   too old to support it, never a silent permissive fallback
 
+**Recommended for most Windows users:** clone the repository, then run `.\install.ps1` from the
+repository root. It checks prerequisites, prompts for your workspace/data/agent-worktree
+locations, installs dependencies, builds Hall, saves your configuration, and verifies the
+installation — see
+[`docs/architecture/0017-persistent-hall-configuration.md`](docs/architecture/0017-persistent-hall-configuration.md).
+Once you've run it, Hall Core no longer needs any of the manual `--workspace-root` /
+`--data-dir` / `--agent-worktree-root` flags shown below.
+
+The manual steps below remain fully supported for development and are still how you'd start Hall
+Core with CLI flags that override your saved configuration for a single run.
+
 ```powershell
 git clone https://github.com/Shaf2665/HallOfWisdom.git
 cd HallOfWisdom
@@ -152,6 +163,7 @@ Key architecture documents:
 - [`docs/architecture/0013-durable-persistence-and-recovery.md`](docs/architecture/0013-durable-persistence-and-recovery.md)
 - [`docs/architecture/0015-autonomous-plan-execution-and-scheduling.md`](docs/architecture/0015-autonomous-plan-execution-and-scheduling.md)
 - [`docs/architecture/0016-codex-worktree-execution.md`](docs/architecture/0016-codex-worktree-execution.md)
+- [`docs/architecture/0017-persistent-hall-configuration.md`](docs/architecture/0017-persistent-hall-configuration.md)
 
 Phase 16 dependency direction:
 
