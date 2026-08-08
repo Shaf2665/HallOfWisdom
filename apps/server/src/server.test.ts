@@ -78,6 +78,33 @@ describe("runServer", () => {
     expect(exitCode).toBe(2);
   });
 
+  /**
+   * Phase 17.1 Task 9 — `--verify-only` must take the dedicated
+   * `runVerifyOnly` early return, never `runServer`'s own normal-startup
+   * path: no `app.listen()`, no ownership-fence monitor, no shutdown-signal
+   * installation. Confirmed here three ways: the exit code returns
+   * immediately as a plain `0` (never routed through the
+   * `exitCodePromise`/signal-shutdown machinery normal startup uses), a
+   * connection attempt to the port it would have bound is refused, and no
+   * SIGINT/SIGTERM listener was ever installed — the same signal every
+   * other test in this file uses as proof that normal startup actually ran
+   * (see `installShutdownSignals`/`waitUntil` usage above).
+   */
+  it("--verify-only exits 0 and never starts the HTTP server", async () => {
+    const port = 47050;
+    const beforeSigint = process.listenerCount("SIGINT");
+    const exitCode = await runServer([
+      "--workspace-root",
+      tempRoot,
+      "--port",
+      String(port),
+      "--verify-only",
+    ]);
+    expect(exitCode).toBe(0);
+    expect(process.listenerCount("SIGINT")).toBe(beforeSigint);
+    await expect(fetch(`http://127.0.0.1:${String(port)}/api/v1/health`)).rejects.toThrow();
+  });
+
   it("rejects an invalid --mock-scenario with exit code 2", async () => {
     const exitCode = await runServer([
       "--workspace-root",

@@ -33,6 +33,7 @@ import { reconcileAllPlanProgress } from "./ceo-plans/ceo-plan-progress-reconcil
 import { runCeoPlanExecutionRecovery } from "./ceo-execution/ceo-plan-execution-recovery.js";
 import { canonicalizeHallOwnedRoot } from "./agent-worktrees/path-safety.js";
 import { AgentWorktreePathError } from "./agent-worktrees/agent-worktree-errors.js";
+import { runVerifyOnly } from "./verify-only/run-verify-only.js";
 
 function formatError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -68,6 +69,10 @@ export async function runServer(argv: readonly string[]): Promise<number> {
   } catch (error) {
     console.error(formatError(error));
     return EXIT_INVALID_INPUT;
+  }
+
+  if (cliOptions.verifyOnly) {
+    return runVerifyOnly(cliOptions);
   }
 
   let workspaceRoot: string;
