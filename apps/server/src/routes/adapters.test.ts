@@ -62,10 +62,13 @@ interface AdapterSummaryJson {
   readonly integrationLevel: string;
   readonly supportedOperatingSystems: readonly string[];
   readonly capabilities: Record<string, boolean>;
+  readonly installed: boolean;
   readonly availability: string;
   readonly executablePath?: string;
   readonly diagnosticMessage?: string;
   readonly limitationNotice?: string;
+  readonly statusMessage?: string;
+  readonly detectedVersion?: string;
 }
 
 describe("GET /api/v1/adapters", () => {
@@ -238,17 +241,18 @@ describe("GET /api/v1/adapters", () => {
           Promise.resolve({
             installed: true,
             availability: "unsupported",
-            diagnosticMessage: "This should never reach the client.",
+            diagnosticMessage: "Adapter unsupported on this platform.",
           } as { installed: boolean; availability: string }),
       }),
     );
     const app = await buildApp(registry);
 
     const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
-    expect(response.body).not.toContain("This should never reach the client.");
     const body = response.json<{ adapters: AdapterSummaryJson[] }>();
     const adapter = body.adapters.find((a) => a.adapterId === "hall.unsupported-agent");
     expect(adapter?.limitationNotice).toBeUndefined();
+    // Phase 17.2: statusMessage now carries diagnosticMessage for all availability values
+    expect(adapter?.statusMessage).toBe("Adapter unsupported on this platform.");
     await app.close();
   });
 
@@ -258,6 +262,105 @@ describe("GET /api/v1/adapters", () => {
     const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
     expect(response.statusCode).toBe(200);
     expect(response.json<{ adapters: AdapterSummaryJson[] }>().adapters).toEqual([]);
+    await app.close();
+  });
+
+  it("exposes installed, statusMessage, and detectedVersion regardless of availability", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      buildFakeAdapter({
+        adapterId: "hall.logged-out-agent",
+        detect: () =>
+          Promise.resolve({
+            installed: true,
+            availability: "logged_out",
+            diagnosticMessage: "Example Agent is installed but not logged in.",
+            detectedVersion: "1.2.3",
+          } as { installed: boolean; availability: string }),
+      }),
+    );
+    const app = await buildApp(registry);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const body = response.json<{
+      adapters: (AdapterSummaryJson & {
+        installed?: boolean;
+        statusMessage?: string;
+        detectedVersion?: string;
+      })[];
+    }>();
+    const adapter = body.adapters.find((a) => a.adapterId === "hall.logged-out-agent");
+    expect(adapter?.installed).toBe(true);
+    expect(adapter?.statusMessage).toBe("Example Agent is installed but not logged in.");
+    expect(adapter?.detectedVersion).toBe("1.2.3");
+    // limitationNotice keeps its existing, narrower, available-only contract — unchanged.
+    expect(adapter?.limitationNotice).toBeUndefined();
+    await app.close();
+  });
+
+  it("still exposes limitationNotice for an available adapter, alongside the new statusMessage carrying the same text", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      buildFakeAdapter({
+        adapterId: "hall.caveat-agent-2",
+        detect: () =>
+          Promise.resolve({
+            installed: true,
+            availability: "available",
+            diagnosticMessage: "Running in a reduced-trust mode.",
+          } as { installed: boolean; availability: string }),
+      }),
+    );
+    const app = await buildApp(registry);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const body = response.json<{
+      adapters: (AdapterSummaryJson & { statusMessage?: string })[];
+    }>();
+    const adapter = body.adapters.find((a) => a.adapterId === "hall.caveat-agent-2");
+    expect(adapter?.limitationNotice).toBe("Running in a reduced-trust mode.");
+    expect(adapter?.statusMessage).toBe("Running in a reduced-trust mode.");
+    await app.close();
+  });
+
+  it("defaults installed to false and omits statusMessage/detectedVersion when detect() throws", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      buildFakeAdapter({
+        adapterId: "hall.broken-agent-2",
+        detect: () => Promise.reject(new Error("simulated detection crash")),
+      }),
+    );
+    const app = await buildApp(registry);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    const body = response.json<{
+      adapters: (AdapterSummaryJson & {
+        installed?: boolean;
+        statusMessage?: string;
+        detectedVersion?: string;
+      })[];
+    }>();
+    const adapter = body.adapters.find((a) => a.adapterId === "hall.broken-agent-2");
+    expect(adapter?.installed).toBe(false);
+    expect(adapter?.statusMessage).toBeUndefined();
+    expect(adapter?.detectedVersion).toBeUndefined();
+    await app.close();
+  });
+
+  it("never exposes a thrown error's message under statusMessage", async () => {
+    const registry = new AgentRegistry();
+    registry.register(
+      buildFakeAdapter({
+        adapterId: "hall.broken-agent-3",
+        detect: () => Promise.reject(new Error("secret internal detail: TOKEN=xyz789")),
+      }),
+    );
+    const app = await buildApp(registry);
+
+    const response = await app.inject({ method: "GET", url: "/api/v1/adapters" });
+    expect(response.body).not.toContain("TOKEN=xyz789");
+    expect(response.body).not.toContain("secret internal detail");
     await app.close();
   });
 });
