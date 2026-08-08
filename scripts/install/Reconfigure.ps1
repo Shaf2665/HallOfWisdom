@@ -20,6 +20,7 @@ function Invoke-HallReconfigure {
         -AgentWorktreeRoot $Candidate.agentWorktreeRoot `
         -ComparisonRoot $Candidate.comparisonRoot `
         -Port $Candidate.hallCorePort `
+        -HallWebPort $Candidate.hallWebPort `
         -EnableCodexTrustedLocal:([bool]$Candidate.codexTrustedLocal)
 
     if (-not $verify.Success) {
