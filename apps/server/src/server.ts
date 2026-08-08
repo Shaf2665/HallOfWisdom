@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { isContainedPath, validateWorkspace } from "@hall-of-wisdom/hall-runner";
+import { tryLoadConfig } from "@hall-of-wisdom/hall-config";
 import { createHallCoreApp } from "./app.js";
 import { createServerComposition } from "./composition/server-composition.js";
 import { parseServerCliArguments, ServerCliError } from "./config/server-cli-args.js";
+import { resolveServerConfig } from "./config/resolve-server-config.js";
 import {
   DATABASE_BUSY_TIMEOUT_MS,
   DEFAULT_LIMITS,
-  DEFAULT_PORT,
   LOCAL_ONLY_HOST,
   SHUTDOWN_TIMEOUT_MS,
 } from "./config/server-config.js";
@@ -58,9 +59,19 @@ function formatError(error: unknown): string {
  * at the process boundary only.
  */
 export async function runServer(argv: readonly string[]): Promise<number> {
+  let overrides;
+  try {
+    overrides = parseServerCliArguments(argv);
+  } catch (error) {
+    console.error(formatError(error));
+    return EXIT_INVALID_INPUT;
+  }
+
+  const persisted = tryLoadConfig()?.config;
+
   let cliOptions;
   try {
-    cliOptions = parseServerCliArguments(argv);
+    cliOptions = resolveServerConfig(overrides, persisted);
   } catch (error) {
     console.error(formatError(error));
     return EXIT_INVALID_INPUT;
@@ -321,7 +332,10 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     readiness,
   });
 
-  const port = cliOptions.port ?? DEFAULT_PORT;
+  // `cliOptions.port` is always defined here — `resolveServerConfig` already
+  // applies the CLI/persisted/built-in-default precedence (including
+  // `DEFAULT_PORT` as the final fallback) before this function ever sees it.
+  const port = cliOptions.port;
 
   try {
     await app.listen({ port, host: LOCAL_ONLY_HOST });
