@@ -8,6 +8,7 @@ const LINKS = [
   { href: "/board", label: "Kanban Board" },
   { href: "/boards", label: "Communication Boards" },
   { href: "/agents", label: "Agents" },
+  { href: "/providers", label: "Providers" },
   { href: "/comparisons", label: "Comparisons" },
   { href: "/ceo", label: "CEO Plans" },
   { href: "/system", label: "System" },
