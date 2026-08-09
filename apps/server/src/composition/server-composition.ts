@@ -11,6 +11,11 @@ import { createComparisonComposition } from "./comparison-composition-root.js";
 export type { ServerComposition, ServerCompositionOptions };
 export type { ComparisonComposition } from "./comparison-composition-root.js";
 
+export const DEFAULT_DURABLE_ISOLATED_AGENT_ADAPTER_IDS = [
+  "hall.codex",
+  "hall.hermes-router",
+] as const;
+
 /**
  * The single Hall Core startup composition entry point. Assembles the
  * stores/orchestrator/buses via `createMockAgentServerComposition` (which
@@ -31,7 +36,7 @@ export function createServerComposition(options: ServerCompositionOptions): Serv
   const durableIsolationIds =
     options.db === undefined || options.agentWorktreeRoot === undefined
       ? [...(options.isolatedAgentAdapterIds ?? [])]
-      : ["hall.codex", ...(options.isolatedAgentAdapterIds ?? [])];
+      : [...DEFAULT_DURABLE_ISOLATED_AGENT_ADAPTER_IDS, ...(options.isolatedAgentAdapterIds ?? [])];
   const composition = createMockAgentServerComposition({
     ...options,
     isolatedAgentAdapterIds: durableIsolationIds,

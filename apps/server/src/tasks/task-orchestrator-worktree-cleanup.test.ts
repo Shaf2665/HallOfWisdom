@@ -28,7 +28,7 @@ import { ExplicitAdapterIsolationPolicy } from "../agent-execution/isolation-pol
 import { IsolatedAgentExecutionCoordinator } from "../agent-execution/isolated-agent-execution-coordinator.js";
 
 const NOW = "2026-08-05T10:00:00.000Z";
-const ISOLATED_ADAPTER_ID = "hall.isolated-agent";
+const ISOLATED_ADAPTER_ID = "hall.hermes-router";
 const tempDirs: string[] = [];
 
 afterEach(() => {
