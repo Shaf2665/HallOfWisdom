@@ -55,12 +55,13 @@ describe("ProvidersPanel", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders exactly Claude Code and Codex, never Mock Agent", async () => {
+  it("renders Claude Code, Codex, and Hermes Router, never Mock Agent", async () => {
     vi.mocked(apiClient.listAdapters).mockResolvedValue({
       adapters: [
         makeAdapter({ adapterId: "hall.mock-agent", displayName: "Mock Agent" }),
         makeAdapter(),
         makeAdapter({ adapterId: "hall.codex", displayName: "Codex" }),
+        makeAdapter({ adapterId: "hall.hermes-router", displayName: "Hermes Router" }),
       ],
     });
     render(<ProvidersPanel baseUrl={BASE_URL} />);
@@ -68,7 +69,15 @@ describe("ProvidersPanel", () => {
       expect(screen.getByText("Claude Code")).toBeInTheDocument();
     });
     expect(screen.getByText("Codex")).toBeInTheDocument();
+    expect(screen.getByText("Hermes Router")).toBeInTheDocument();
     expect(screen.queryByText("Mock Agent")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("listitem")).toHaveLength(3);
+    expect(
+      screen.getByText(
+        /Hermes Router uses configuration from the environment that starts Hall Core/i,
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/never asks for or stores your credentials/i)).toBeInTheDocument();
   });
 
   it("shows a loading state, then an accessible error state on failure", async () => {

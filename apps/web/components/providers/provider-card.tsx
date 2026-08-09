@@ -3,7 +3,13 @@
 import { useState } from "react";
 import { ApiClientError, getAdapter } from "../../lib/api-client";
 import type { AdapterSummary } from "../../lib/api-schemas";
-import { connectCommandFor, deriveConnectionState, deriveGuidanceText } from "./provider-status";
+import { HermesSetupGuide } from "./hermes-setup-guide";
+import {
+  connectCommandFor,
+  deriveConnectionState,
+  deriveGuidanceText,
+  HERMES_ROUTER_ADAPTER_ID,
+} from "./provider-status";
 
 function safeMessage(error: unknown): string {
   return error instanceof ApiClientError ? error.message : "Could not recheck this provider.";
@@ -18,7 +24,7 @@ export function ProviderCard({
   readonly adapter: AdapterSummary;
   readonly onUpdated: (updated: AdapterSummary) => void;
 }) {
-  const [showConnect, setShowConnect] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const [rechecking, setRechecking] = useState(false);
   const [recheckError, setRecheckError] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
@@ -27,6 +33,7 @@ export function ProviderCard({
   const state = deriveConnectionState(adapter);
   const guidance = deriveGuidanceText(adapter);
   const command = connectCommandFor(adapter.adapterId);
+  const isHermes = adapter.adapterId === HERMES_ROUTER_ADAPTER_ID;
 
   async function handleRecheck() {
     setRechecking(true);
@@ -34,7 +41,7 @@ export function ProviderCard({
     try {
       const response = await getAdapter(baseUrl, adapter.adapterId, {});
       onUpdated(response.adapter);
-      setShowConnect(false);
+      setShowOnboarding(false);
     } catch (error) {
       setRecheckError(safeMessage(error));
     } finally {
@@ -82,15 +89,15 @@ export function ProviderCard({
       ) : null}
 
       <div className="flex flex-wrap items-center gap-2 pt-1">
-        {command ? (
+        {command || isHermes ? (
           <button
             type="button"
             onClick={() => {
-              setShowConnect((value) => !value);
+              setShowOnboarding((value) => !value);
             }}
             className="rounded bg-amber-100 px-3 py-1.5 text-sm font-medium text-amber-900 hover:bg-amber-200 dark:bg-amber-900/40 dark:text-amber-200 dark:hover:bg-amber-900/60"
           >
-            Connect
+            {isHermes ? "Setup" : "Connect"}
           </button>
         ) : null}
         <button
@@ -109,7 +116,7 @@ export function ProviderCard({
         </p>
       ) : null}
 
-      {showConnect && command ? (
+      {showOnboarding && command ? (
         <div className="flex flex-col gap-2 rounded border border-stone-200 bg-stone-50 p-3 text-sm dark:border-stone-800 dark:bg-stone-950/40">
           <p>Run this command in your own terminal, then click Recheck above:</p>
           <div className="flex items-center gap-2">
@@ -131,6 +138,8 @@ export function ProviderCard({
         </div>
       ) : null}
 
+      {showOnboarding && isHermes ? <HermesSetupGuide /> : null}
+
       <button
         type="button"
         onClick={() => {
@@ -148,10 +157,12 @@ export function ProviderCard({
           <dd>{adapter.integrationLevel}</dd>
           <dt>Adapter package version</dt>
           <dd>{adapter.adapterVersion}</dd>
-          <dt>Detected CLI version</dt>
+          <dt>Detected runtime version</dt>
           <dd>{adapter.detectedVersion ?? "Unknown"}</dd>
           <dt>Raw availability</dt>
           <dd>{adapter.availability}</dd>
+          <dt>Execution trust</dt>
+          <dd>{adapter.executionTrust}</dd>
           <dt>Declared capabilities</dt>
           <dd>{adapter.declaredCapabilities.join(", ") || "None"}</dd>
         </dl>

@@ -11,13 +11,10 @@ function safeMessage(error: unknown): string {
 }
 
 /**
- * Phase 17.2 — onboarding/troubleshooting view for the two providers with
- * a real login flow (Claude Code, Codex). Distinct from the `/agents`
- * capability-comparison page (unmodified by this phase): this page never
- * shows Mock Agent, shows a two-state Connected/Not-connected headline
- * instead of a technical availability table, and adds mutating Connect
- * (client-only guidance, no server call)/Recheck actions that `/agents`
- * deliberately never has.
+ * Onboarding/troubleshooting view for Claude Code, Codex, and Hermes
+ * Router. Distinct from the `/agents` capability-comparison page: this
+ * page never shows Mock Agent, keeps connection status server-driven,
+ * and offers only local guidance plus the existing Recheck action.
  */
 export function ProvidersPanel({ baseUrl }: { readonly baseUrl: string }) {
   const [adapters, setAdapters] = useState<readonly AdapterSummary[]>([]);
@@ -29,7 +26,9 @@ export function ProvidersPanel({ baseUrl }: { readonly baseUrl: string }) {
     listAdapters(baseUrl, { signal: controller.signal })
       .then((response) => {
         if (controller.signal.aborted) return;
-        setAdapters(response.adapters.filter((adapter) => isKnownProviderAdapter(adapter.adapterId)));
+        setAdapters(
+          response.adapters.filter((adapter) => isKnownProviderAdapter(adapter.adapterId)),
+        );
         setState("ready");
       })
       .catch((error: unknown) => {
@@ -52,9 +51,9 @@ export function ProvidersPanel({ baseUrl }: { readonly baseUrl: string }) {
     <div className="flex flex-col gap-4">
       <div className="rounded border border-stone-200 bg-stone-50 p-3 text-sm text-stone-700 dark:border-stone-800 dark:bg-stone-950/40 dark:text-stone-300">
         <p>
-          Claude Code is the recommended default provider. Hall never collects your password, API
-          key, or login session — sign-in always happens through each provider&apos;s own official
-          command in your own terminal.
+          Claude Code is the recommended default provider. Claude Code and Codex sign in through
+          their official CLI flows. Hermes Router uses configuration from the environment that
+          starts Hall Core. This page never asks for or stores your credentials.
         </p>
       </div>
 

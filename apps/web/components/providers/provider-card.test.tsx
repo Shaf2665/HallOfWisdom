@@ -61,9 +61,7 @@ describe("ProviderCard", () => {
   });
 
   it("shows Connected for an available provider", () => {
-    render(
-      <ProviderCard baseUrl={BASE_URL} adapter={makeAdapter()} onUpdated={vi.fn()} />,
-    );
+    render(<ProviderCard baseUrl={BASE_URL} adapter={makeAdapter()} onUpdated={vi.fn()} />);
     expect(screen.getByText("Connected")).toBeInTheDocument();
   });
 
@@ -83,18 +81,29 @@ describe("ProviderCard", () => {
     expect(screen.getByText("Claude Code is installed but not logged in.")).toBeInTheDocument();
   });
 
-  it("Connect reveals the exact official login command", async () => {
-    const user = userEvent.setup();
-    render(
-      <ProviderCard
-        baseUrl={BASE_URL}
-        adapter={makeAdapter({ availability: "logged_out", assignable: false })}
-        onUpdated={vi.fn()}
-      />,
-    );
-    await user.click(screen.getByRole("button", { name: "Connect" }));
-    expect(screen.getByText("claude auth login")).toBeInTheDocument();
-  });
+  it.each([
+    ["hall.claude-code", "Claude Code", "claude auth login"],
+    ["hall.codex", "Codex", "codex login"],
+  ])(
+    "Connect preserves the official login command for %s",
+    async (adapterId, displayName, command) => {
+      const user = userEvent.setup();
+      render(
+        <ProviderCard
+          baseUrl={BASE_URL}
+          adapter={makeAdapter({
+            adapterId,
+            displayName,
+            availability: "logged_out",
+            assignable: false,
+          })}
+          onUpdated={vi.fn()}
+        />,
+      );
+      await user.click(screen.getByRole("button", { name: "Connect" }));
+      expect(screen.getByText(command)).toBeInTheDocument();
+    },
+  );
 
   it("never shows a Connect button for an adapter with no known login command", () => {
     render(
@@ -105,6 +114,117 @@ describe("ProviderCard", () => {
       />,
     );
     expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
+  });
+
+  it("shows Hermes as Connected only when the server reports available", () => {
+    const { rerender } = render(
+      <ProviderCard
+        baseUrl={BASE_URL}
+        adapter={makeAdapter({
+          adapterId: "hall.hermes-router",
+          displayName: "Hermes Router",
+          availability: "available",
+          executionTrust: "isolated",
+        })}
+        onUpdated={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Connected")).toBeInTheDocument();
+
+    rerender(
+      <ProviderCard
+        baseUrl={BASE_URL}
+        adapter={makeAdapter({
+          adapterId: "hall.hermes-router",
+          displayName: "Hermes Router",
+          availability: "unsupported",
+          assignable: false,
+          executionTrust: "unavailable",
+          statusMessage: "Hermes requires Hall durable isolated-worktree execution.",
+        })}
+        onUpdated={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Not connected")).toBeInTheDocument();
+    expect(
+      screen.getByText("Hermes requires Hall durable isolated-worktree execution."),
+    ).toBeInTheDocument();
+  });
+
+  it.each([
+    ["unavailable", "Hermes Router runtime root is not configured."],
+    ["unsupported", "Hermes coding runtime is installed but its configured router is unavailable."],
+  ] as const)(
+    "shows Hermes as Not connected with server guidance when availability is %s",
+    (availability, statusMessage) => {
+      render(
+        <ProviderCard
+          baseUrl={BASE_URL}
+          adapter={makeAdapter({
+            adapterId: "hall.hermes-router",
+            displayName: "Hermes Router",
+            availability,
+            assignable: false,
+            executionTrust: "unavailable",
+            statusMessage,
+          })}
+          onUpdated={vi.fn()}
+        />,
+      );
+
+      expect(screen.getByText("Not connected")).toBeInTheDocument();
+      expect(screen.getByText(statusMessage)).toBeInTheDocument();
+    },
+  );
+
+  it("shows Hermes Setup with placeholder-only environment guidance and no credential fields or storage", async () => {
+    const browserStorageSet = vi.spyOn(Storage.prototype, "setItem");
+    const user = userEvent.setup();
+    render(
+      <ProviderCard
+        baseUrl={BASE_URL}
+        adapter={makeAdapter({
+          adapterId: "hall.hermes-router",
+          displayName: "Hermes Router",
+          availability: "unsupported",
+          assignable: false,
+          executionTrust: "unavailable",
+        })}
+        onUpdated={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Setup" }));
+    const guide = screen.getByRole("region", { name: "Hermes Router setup guide" });
+    expect(guide).toHaveTextContent("HALL_HERMES_ROUTER_ROOT");
+    expect(guide).toHaveTextContent("HERMES_ROUTER_BASE_URL");
+    expect(guide).toHaveTextContent("HERMES_ROUTER_API_KEY");
+    expect(guide).toHaveTextContent("HALL_HERMES_PYTHON");
+    expect(guide).toHaveTextContent("Hermes proxy key");
+    expect(guide).toHaveTextContent("never an upstream OpenRouter or provider key");
+    expect(guide).toHaveTextContent("environment that starts Hall Core");
+    expect(guide).toHaveTextContent("Restart Hall");
+    expect(guide).toHaveTextContent("durable isolated-worktree execution");
+
+    const examples = Array.from(guide.querySelectorAll("pre code")).map(
+      (element) => element.textContent,
+    );
+    expect(examples).toEqual([
+      '$env:HALL_HERMES_ROUTER_ROOT="C:\\path\\to\\Hermes-router"\n' +
+        '$env:HERMES_ROUTER_BASE_URL="https://your-router.example/v1"\n' +
+        '$env:HERMES_ROUTER_API_KEY="<hermes-proxy-key>"',
+      'export HALL_HERMES_ROUTER_ROOT="/path/to/Hermes-router"\n' +
+        'export HERMES_ROUTER_BASE_URL="https://your-router.example/v1"\n' +
+        'export HERMES_ROUTER_API_KEY="<hermes-proxy-key>"',
+    ]);
+    expect(guide.querySelector("input, textarea, select")).toBeNull();
+    expect(browserStorageSet).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole("button", { name: "Copy Windows PowerShell setup example" }));
+    expect(
+      screen.getByRole("button", { name: "Copy Windows PowerShell setup example" }),
+    ).toHaveTextContent("Copied");
   });
 
   it("Recheck calls getAdapter for this adapter's id and reports the refreshed summary via onUpdated", async () => {
@@ -126,14 +246,43 @@ describe("ProviderCard", () => {
     expect(onUpdated).toHaveBeenCalledWith(updated);
   });
 
+  it("Recheck uses the existing single-adapter flow for Hermes", async () => {
+    const updated = makeAdapter({
+      adapterId: "hall.hermes-router",
+      displayName: "Hermes Router",
+      availability: "available",
+      executionTrust: "isolated",
+    });
+    vi.mocked(apiClient.getAdapter).mockResolvedValue({ adapter: updated });
+    const onUpdated = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <ProviderCard
+        baseUrl={BASE_URL}
+        adapter={makeAdapter({
+          adapterId: "hall.hermes-router",
+          displayName: "Hermes Router",
+          availability: "unsupported",
+          assignable: false,
+          executionTrust: "unavailable",
+        })}
+        onUpdated={onUpdated}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: "Recheck" }));
+    await waitFor(() => {
+      expect(apiClient.getAdapter).toHaveBeenCalledWith(BASE_URL, "hall.hermes-router", {});
+    });
+    expect(onUpdated).toHaveBeenCalledWith(updated);
+  });
+
   it("shows an accessible error message when Recheck fails", async () => {
     vi.mocked(apiClient.getAdapter).mockRejectedValue(
       new apiClient.ApiClientError("NETWORK_ERROR", "Could not reach Hall Core."),
     );
     const user = userEvent.setup();
-    render(
-      <ProviderCard baseUrl={BASE_URL} adapter={makeAdapter()} onUpdated={vi.fn()} />,
-    );
+    render(<ProviderCard baseUrl={BASE_URL} adapter={makeAdapter()} onUpdated={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: "Recheck" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Could not reach Hall Core.");
   });
@@ -153,14 +302,31 @@ describe("ProviderCard", () => {
     expect(screen.getByText(/not OS-sandboxed/)).toBeInTheDocument();
   });
 
-  it("hides technical details (adapterId, integrationLevel, raw availability) until expanded", async () => {
+  it("shows Hermes execution trust and runtime metadata only after technical details expand", async () => {
     const user = userEvent.setup();
     render(
-      <ProviderCard baseUrl={BASE_URL} adapter={makeAdapter()} onUpdated={vi.fn()} />,
+      <ProviderCard
+        baseUrl={BASE_URL}
+        adapter={makeAdapter({
+          adapterId: "hall.hermes-router",
+          displayName: "Hermes Router",
+          adapterVersion: "0.1.0",
+          detectedVersion: "0.2.0",
+          declaredCapabilities: ["project.read", "structured.events"],
+          executionTrust: "isolated",
+        })}
+        onUpdated={vi.fn()}
+      />,
     );
-    expect(screen.queryByText("hall.claude-code")).not.toBeInTheDocument();
+    expect(screen.queryByText("hall.hermes-router")).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Show technical details" }));
-    expect(screen.getByText("hall.claude-code")).toBeInTheDocument();
+    expect(screen.getByText("hall.hermes-router")).toBeInTheDocument();
+    expect(screen.getByText("structured_cli")).toBeInTheDocument();
+    expect(screen.getByText("0.2.0")).toBeInTheDocument();
+    expect(screen.getByText("available")).toBeInTheDocument();
+    expect(screen.getByText("project.read, structured.events")).toBeInTheDocument();
+    expect(screen.getByText("Execution trust")).toBeInTheDocument();
+    expect(screen.getByText("isolated")).toBeInTheDocument();
   });
 
   it("never renders executablePath, CODEX_HOME, or other leaked technical data", () => {
