@@ -17,7 +17,7 @@ export const DEFAULT_HERMES_PYTHON = "python";
 export const DEFAULT_HERMES_DETECTION_TIMEOUT_MS = 5000;
 export const MAX_HERMES_DETECTION_OUTPUT_BYTES = 16_384;
 export const HERMES_EXECUTION_DISABLED_MESSAGE =
-  "Hermes coding runtime detected; Hall task execution is not enabled yet.";
+  "Hermes task execution requires Hall durable isolated-worktree execution.";
 
 const ROOT_NOT_CONFIGURED_MESSAGE = "Hermes Router runtime root is not configured.";
 const RUNNER_NOT_FOUND_MESSAGE = "Hermes coding runtime runner was not found.";
@@ -84,6 +84,7 @@ export interface HermesDetectionOptions {
   readonly parentEnv: Readonly<NodeJS.ProcessEnv>;
   readonly fs: FileSystemProbe;
   readonly processRunner: DetectionProcessRunner;
+  readonly isolatedExecutionEnabled: boolean;
 }
 
 export type HermesRuntimeConfigurationResolution =
@@ -150,11 +151,24 @@ function unsupported(
   });
 }
 
+function available(
+  detectedVersion: string,
+  capabilityObservations: readonly CapabilityObservation[],
+): AgentDetectionResult {
+  return result({
+    installed: true,
+    availability: "available",
+    detectedVersion,
+    executionTrust: "isolated",
+    capabilityObservations: [...capabilityObservations],
+  });
+}
+
 function declaredCapabilityObservations(): CapabilityObservation[] {
   return HERMES_RUNTIME_CAPABILITIES.map((capability) => ({
     capability,
     status: "declared",
-    safeSummary: "Declared by the detected Hermes runtime; Hall execution is not enabled yet.",
+    safeSummary: "Declared by the detected Hermes runtime.",
     evidence: "declared_only",
   }));
 }
@@ -211,11 +225,14 @@ export async function detectHermesRouter(
     return unsupported(ROUTER_UNAVAILABLE_MESSAGE, document.runtime_version);
   }
 
-  return unsupported(
-    HERMES_EXECUTION_DISABLED_MESSAGE,
-    document.runtime_version,
-    declaredCapabilityObservations(),
-  );
+  const capabilityObservations = declaredCapabilityObservations();
+  return options.isolatedExecutionEnabled
+    ? available(document.runtime_version, capabilityObservations)
+    : unsupported(
+        HERMES_EXECUTION_DISABLED_MESSAGE,
+        document.runtime_version,
+        capabilityObservations,
+      );
 }
 
 export function createDefaultHermesDetectionOptions(
@@ -226,5 +243,6 @@ export function createDefaultHermesDetectionOptions(
     parentEnv: overrides.parentEnv ?? process.env,
     fs: overrides.fs ?? realFileSystemProbe,
     processRunner: overrides.processRunner ?? nodeDetectionProcessRunner,
+    isolatedExecutionEnabled: overrides.isolatedExecutionEnabled ?? false,
   };
 }

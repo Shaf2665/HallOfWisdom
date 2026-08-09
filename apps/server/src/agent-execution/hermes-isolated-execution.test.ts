@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { type AgentAdapter, type AgentTaskInput } from "@hall-of-wisdom/agent-adapter-sdk";
+import type { AgentTaskInput } from "@hall-of-wisdom/agent-adapter-sdk";
 import {
   HERMES_PROTOCOL_VERSION,
   HermesRouterAdapter,
@@ -189,22 +189,16 @@ function createHarness(
     ownedRoot: makeTempDir("hall hermes worktrees "),
   });
   const hermes = new HermesRouterAdapter({
+    isolatedExecutionEnabled: true,
     platform: process.platform,
     parentEnv: { HALL_HERMES_ROUTER_ROOT: sourceRepository },
     fs: { isFile: () => true },
+    processRunner: {
+      run: () => Promise.resolve({ status: "success", stdout: healthyDetectionDocument() }),
+    },
     startTransport: (options) => startTransport(options, worktreeStore),
   });
-  const testRoutableHermes: AgentAdapter = {
-    descriptor: hermes.descriptor,
-    detect: () =>
-      Promise.resolve({
-        installed: true,
-        availability: "available",
-        executionTrust: "isolated",
-      }),
-    startTask: (input, options) => hermes.startTask(input, options),
-  };
-  registry.register(testRoutableHermes);
+  registry.register(hermes);
   const taskStore = new TaskStore({ maxTasks: 10 });
   const eventStore = new EventStore({ maxEventsPerTask: 100 });
   const artifactStore = new InMemoryAgentExecutionArtifactStore();
@@ -230,6 +224,23 @@ function createHarness(
     }),
   });
   return { orchestrator, taskStore, eventStore, worktreeStore, artifactStore };
+}
+
+function healthyDetectionDocument(): string {
+  return JSON.stringify({
+    protocol: HERMES_PROTOCOL_VERSION,
+    runtime_version: "0.1.0",
+    available: true,
+    capabilities: [
+      "project.read",
+      "project.edit",
+      "command.execute",
+      "structured.events",
+      "cancellation",
+    ],
+    integration_level: "structured_cli",
+    execution_trust: "trusted_local",
+  });
 }
 
 function completedTransport(

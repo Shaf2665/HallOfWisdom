@@ -50,7 +50,13 @@ export function createServerComposition(options: ServerCompositionOptions): Serv
     worktreeStore: composition.agentWorktreeStore,
     worktreeValidator: composition.agentWorktreeValidator,
   });
-  registerHermesRouterAdapter(composition.registry);
+  registerHermesRouterAdapter(composition.registry, {
+    isolatedExecutionEnabled:
+      options.db !== undefined &&
+      options.agentWorktreeRoot !== undefined &&
+      composition.agentWorktreeManager !== undefined &&
+      composition.agentWorktreeValidator !== undefined,
+  });
 
   if (options.comparisonRoot === undefined) {
     return composition;
