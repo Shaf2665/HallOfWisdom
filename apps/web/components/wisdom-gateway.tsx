@@ -3,12 +3,14 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { SubmitEvent } from "react";
 import {
+  approveCeoPlan,
   createCeoPlan,
   createDeferredTask,
   getCeoPlan,
   getCeoPlanVersion,
   listCeoPlans,
   listTasks,
+  submitCeoPlan,
 } from "../lib/api-client";
 import type { CeoPlan, CeoPlanVersion } from "../lib/api-schemas";
 import { CeoPlanSummaryCard } from "./ceo/ceo-plan-summary-card";
@@ -20,6 +22,7 @@ const MAX_TITLE_LENGTH = 200;
 const MAX_RECENT_REQUESTS = 10;
 
 type MessageStatus = "sending" | "planning_started" | "request_failed" | "planning_failed";
+type PlanAction = "continuing" | "approving";
 
 interface ConversationEntry {
   readonly id: string;
@@ -28,12 +31,22 @@ interface ConversationEntry {
   readonly status: MessageStatus;
   readonly parentTaskId?: string;
   readonly plan?: CeoPlan;
-  readonly version?: CeoPlanVersion;
+  readonly version?: CeoPlanVersion | undefined;
+  readonly mutationToken?: string | undefined;
+  readonly planAction: PlanAction | null;
+  readonly planActionError: string | null;
+  readonly approvalConfirmed: boolean;
 }
 
 interface PlanResult {
   readonly plan: CeoPlan;
-  readonly version?: CeoPlanVersion;
+  readonly version?: CeoPlanVersion | undefined;
+  readonly mutationToken?: string | undefined;
+}
+
+interface CurrentPlanResult extends PlanResult {
+  readonly version: CeoPlanVersion;
+  readonly mutationToken: string;
 }
 
 function requestTitle(request: string): string {
@@ -61,8 +74,11 @@ async function loadPlanResult(
   signal?: AbortSignal,
 ): Promise<PlanResult> {
   let plan = knownPlan;
+  let mutationToken: string | undefined;
   try {
-    plan = (await getCeoPlan(baseUrl, knownPlan.id, { signal })).plan;
+    const detail = await getCeoPlan(baseUrl, knownPlan.id, { signal });
+    plan = detail.plan;
+    mutationToken = detail.mutationToken;
   } catch {
     // The list/create response is already a validated plan snapshot. Keep
     // it so navigation remains available even if this refresh fails.
@@ -70,10 +86,24 @@ async function loadPlanResult(
 
   try {
     const version = await getCeoPlanVersion(baseUrl, plan.id, plan.activeVersion, { signal });
-    return { plan, version };
+    return { plan, version, mutationToken };
   } catch {
-    return { plan };
+    return { plan, mutationToken };
   }
+}
+
+async function loadCurrentPlanResult(baseUrl: string, planId: string): Promise<CurrentPlanResult> {
+  const detail = await getCeoPlan(baseUrl, planId);
+  const version = await getCeoPlanVersion(baseUrl, planId, detail.plan.activeVersion);
+  if (version.version !== detail.plan.activeVersion) {
+    throw new Error("The active CEO plan version changed while it was being loaded.");
+  }
+  return { plan: detail.plan, version, mutationToken: detail.mutationToken };
+}
+
+function hasUsableActionContext(result: PlanResult): boolean {
+  if (result.mutationToken === undefined) return false;
+  return result.version?.version === result.plan.activeVersion;
 }
 
 export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
@@ -97,9 +127,9 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
     tasksRequest
       .then(({ tasks }) => {
         if (controller.signal.aborted) return;
-        const discoveredProjects = [
-          ...new Set(tasks.map((record) => record.task.projectId)),
-        ].sort((left, right) => left.localeCompare(right));
+        const discoveredProjects = [...new Set(tasks.map((record) => record.task.projectId))].sort(
+          (left, right) => left.localeCompare(right),
+        );
         setProjects(discoveredProjects);
         setSelectedProject(discoveredProjects[0] ?? NEW_PROJECT);
         setProjectsState("ready");
@@ -136,6 +166,9 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
                 request: record.task.description,
                 status: "planning_failed",
                 parentTaskId: record.task.taskId,
+                planAction: null,
+                planActionError: null,
+                approvalConfirmed: false,
               };
             }
 
@@ -148,6 +181,12 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
               parentTaskId: record.task.taskId,
               plan: result.plan,
               ...(result.version !== undefined ? { version: result.version } : {}),
+              ...(result.mutationToken !== undefined
+                ? { mutationToken: result.mutationToken }
+                : {}),
+              planAction: null,
+              planActionError: null,
+              approvalConfirmed: false,
             };
           }),
         );
@@ -188,11 +227,146 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
         ...entry,
         status: "planning_started",
         plan: result.plan,
-        version: result.version ?? created.version,
+        version:
+          result.version ??
+          (created.version.version === result.plan.activeVersion ? created.version : undefined),
+        mutationToken: result.mutationToken,
+        planActionError: null,
+        approvalConfirmed: false,
       }));
     } catch {
       updateMessage(messageId, (entry) => ({ ...entry, status: "planning_failed" }));
     } finally {
+      setBusyMessageId(null);
+    }
+  }
+
+  async function refreshAfterMutationFailure(
+    messageId: string,
+    knownPlan: CeoPlan,
+    startingStatus: CeoPlan["status"],
+    completedStatus: CeoPlan["status"],
+    retryCopy: string,
+  ): Promise<void> {
+    const refreshed = await loadPlanResult(baseUrl, knownPlan);
+    let actionError: string | null;
+    if (refreshed.plan.status === completedStatus) {
+      actionError = null;
+    } else if (refreshed.plan.status !== startingStatus) {
+      actionError = "The plan changed while you were viewing it. Here is the latest status.";
+    } else if (!hasUsableActionContext(refreshed)) {
+      actionError =
+        "Hall couldn’t confirm the latest plan status. Reload this page before trying again.";
+    } else {
+      actionError = retryCopy;
+    }
+
+    updateMessage(messageId, (entry) => ({
+      ...entry,
+      status: "planning_started",
+      plan: refreshed.plan,
+      version: refreshed.version,
+      mutationToken: refreshed.mutationToken,
+      planActionError: actionError,
+      approvalConfirmed: false,
+    }));
+  }
+
+  async function refreshAfterMutationSuccess(
+    messageId: string,
+    mutatedPlan: CeoPlan,
+    reviewedVersion: CeoPlanVersion,
+  ): Promise<void> {
+    try {
+      const refreshed = await loadCurrentPlanResult(baseUrl, mutatedPlan.id);
+      updateMessage(messageId, (entry) => ({
+        ...entry,
+        status: "planning_started",
+        plan: refreshed.plan,
+        version: refreshed.version,
+        mutationToken: refreshed.mutationToken,
+        planActionError: null,
+        approvalConfirmed: false,
+      }));
+    } catch {
+      updateMessage(messageId, (entry) => ({
+        ...entry,
+        status: "planning_started",
+        plan: mutatedPlan,
+        version:
+          reviewedVersion.version === mutatedPlan.activeVersion ? reviewedVersion : undefined,
+        mutationToken: undefined,
+        planActionError:
+          "The plan moved forward, but Hall couldn’t refresh its latest status. Reload this page to continue.",
+        approvalConfirmed: false,
+      }));
+    }
+  }
+
+  async function continuePlan(
+    messageId: string,
+    knownPlan: CeoPlan,
+    mutationToken: string,
+    reviewedVersion: CeoPlanVersion,
+  ): Promise<void> {
+    if (busyMessageId !== null) return;
+    setBusyMessageId(messageId);
+    updateMessage(messageId, (entry) => ({
+      ...entry,
+      planAction: "continuing",
+      planActionError: null,
+      approvalConfirmed: false,
+    }));
+
+    try {
+      const submitted = await submitCeoPlan(baseUrl, knownPlan.id, mutationToken);
+      await refreshAfterMutationSuccess(messageId, submitted, reviewedVersion);
+    } catch {
+      await refreshAfterMutationFailure(
+        messageId,
+        knownPlan,
+        "draft",
+        "awaiting_approval",
+        "Hall couldn’t continue with the plan. Please try again.",
+      );
+    } finally {
+      updateMessage(messageId, (entry) => ({ ...entry, planAction: null }));
+      setBusyMessageId(null);
+    }
+  }
+
+  async function approvePlan(
+    messageId: string,
+    knownPlan: CeoPlan,
+    reviewedVersion: CeoPlanVersion,
+    mutationToken: string,
+  ): Promise<void> {
+    if (busyMessageId !== null) return;
+    setBusyMessageId(messageId);
+    updateMessage(messageId, (entry) => ({
+      ...entry,
+      planAction: "approving",
+      planActionError: null,
+      approvalConfirmed: false,
+    }));
+
+    try {
+      const approved = await approveCeoPlan(baseUrl, knownPlan.id, {
+        expectedMutationToken: mutationToken,
+        planVersion: reviewedVersion.version,
+        contentHash: reviewedVersion.contentHash,
+      });
+      await refreshAfterMutationSuccess(messageId, approved.plan, reviewedVersion);
+    } catch {
+      await refreshAfterMutationFailure(
+        messageId,
+        knownPlan,
+        "awaiting_approval",
+        "approved",
+        "Hall couldn’t approve the plan. Please try again.",
+      );
+    } finally {
+      updateMessage(messageId, (entry) => ({ ...entry, planAction: null }));
       setBusyMessageId(null);
     }
   }
@@ -228,7 +402,15 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
     setBusyMessageId(messageId);
     setConversation((current) => [
       ...current,
-      { id: messageId, projectName, request: trimmedRequest, status: "sending" },
+      {
+        id: messageId,
+        projectName,
+        request: trimmedRequest,
+        status: "sending",
+        planAction: null,
+        planActionError: null,
+        approvalConfirmed: false,
+      },
     ]);
 
     try {
@@ -250,7 +432,12 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
           ...entry,
           status: "planning_started",
           plan: result.plan,
-          version: result.version ?? created.version,
+          version:
+            result.version ??
+            (created.version.version === result.plan.activeVersion ? created.version : undefined),
+          mutationToken: result.mutationToken,
+          planActionError: null,
+          approvalConfirmed: false,
         }));
         setRequest("");
         if (selectedProject === NEW_PROJECT && !projects.includes(projectName)) {
@@ -324,11 +511,57 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
                   <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
                     Hall CEO
                   </p>
-                  <p className="text-sm leading-6 sm:text-base">{statusCopy(entry.status)}</p>
+                  {entry.plan === undefined ? (
+                    <p className="text-sm leading-6 sm:text-base">{statusCopy(entry.status)}</p>
+                  ) : null}
                   {entry.plan ? (
                     <CeoPlanSummaryCard
                       plan={entry.plan}
                       {...(entry.version !== undefined ? { version: entry.version } : {})}
+                      activeAction={entry.planAction}
+                      actionError={entry.planActionError}
+                      actionsDisabled={isBusy}
+                      canContinue={
+                        entry.mutationToken !== undefined &&
+                        entry.version?.version === entry.plan.activeVersion
+                      }
+                      canApprove={
+                        entry.mutationToken !== undefined &&
+                        entry.version?.version === entry.plan.activeVersion
+                      }
+                      approvalConfirmed={entry.approvalConfirmed}
+                      onContinue={() => {
+                        const plan = entry.plan;
+                        const version = entry.version;
+                        const mutationToken = entry.mutationToken;
+                        if (
+                          plan !== undefined &&
+                          version?.version === plan.activeVersion &&
+                          mutationToken !== undefined
+                        ) {
+                          void continuePlan(entry.id, plan, mutationToken, version);
+                        }
+                      }}
+                      onApprovalConfirmedChange={(confirmed) => {
+                        updateMessage(entry.id, (current) => ({
+                          ...current,
+                          approvalConfirmed: confirmed,
+                          planActionError: null,
+                        }));
+                      }}
+                      onApprove={() => {
+                        const plan = entry.plan;
+                        const version = entry.version;
+                        const mutationToken = entry.mutationToken;
+                        if (
+                          plan !== undefined &&
+                          version?.version === plan.activeVersion &&
+                          mutationToken !== undefined &&
+                          entry.approvalConfirmed
+                        ) {
+                          void approvePlan(entry.id, plan, version, mutationToken);
+                        }
+                      }}
                     />
                   ) : null}
                   {entry.status === "planning_failed" && entry.parentTaskId ? (
