@@ -764,6 +764,7 @@ export class TaskOrchestrator {
       ...(parsedRequest.requirements !== undefined
         ? { requirements: parsedRequest.requirements }
         : {}),
+      ...(parsedRequest.source !== undefined ? { source: parsedRequest.source } : {}),
     });
 
     const record: TaskRecord = {

@@ -1,4 +1,8 @@
-import type { CommunicationAuthor, CommunicationMessage } from "@hall-of-wisdom/protocol";
+import type {
+  CommunicationAuthor,
+  CommunicationMessage,
+  CommunicationMessageReference,
+} from "@hall-of-wisdom/protocol";
 import {
   BoardNotFoundError,
   MessageBoardIdentityMismatchError,
@@ -22,6 +26,7 @@ export interface AppendMessageInput {
   readonly boardId: string;
   readonly author: CommunicationAuthor;
   readonly text: string;
+  readonly reference?: CommunicationMessageReference;
   readonly createdAt: string;
 }
 
@@ -80,6 +85,7 @@ export class MessageStore implements MessageStorePort {
       sequence: messages.length,
       author: input.author,
       text: input.text,
+      ...(input.reference !== undefined ? { reference: input.reference } : {}),
       createdAt: input.createdAt,
     };
     messages.push(message);

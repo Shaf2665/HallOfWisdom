@@ -4,6 +4,7 @@ import {
   nonEmptyIdSchema,
   taskPrioritySchema,
   taskRequirementsSchema,
+  taskSourceSchema,
 } from "@hall-of-wisdom/protocol";
 
 /**
@@ -67,6 +68,7 @@ const deferredCreateTaskRequestSchema = z
     executionMode: z.literal("deferred"),
     workingDirectory: workingDirectorySchema.optional(),
     requirements: taskRequirementsSchema.optional(),
+    source: taskSourceSchema.optional(),
   })
   .strict();
 

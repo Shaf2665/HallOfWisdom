@@ -6,6 +6,10 @@ import { taskRequirementsSchema } from "./capability.js";
 export const taskPrioritySchema = z.enum(["low", "normal", "high", "critical"]);
 export type TaskPriority = z.infer<typeof taskPrioritySchema>;
 
+/** Optional provenance for task-entry surfaces that need durable reconstruction. */
+export const taskSourceSchema = z.enum(["wisdom_gateway"]);
+export type TaskSource = z.infer<typeof taskSourceSchema>;
+
 export const taskStatusSchema = z.enum([
   "backlog",
   "ready",
@@ -33,6 +37,7 @@ export const hallTaskSchema = z
     dependencyTaskIds: z.array(nonEmptyIdSchema).max(200, "must not exceed 200 dependencies"),
     createdAt: isoTimestampSchema,
     updatedAt: isoTimestampSchema,
+    source: taskSourceSchema.optional(),
     /**
      * Phase 11 — optional, provider-neutral capability/trust requirements.
      * Omitted entirely for every task created before this phase and for

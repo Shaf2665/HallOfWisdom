@@ -9,6 +9,7 @@ import {
   type CeoPlanVersion,
   type CommunicationAuthor,
   type CommunicationMessage,
+  type CommunicationMessageReference,
 } from "@hall-of-wisdom/protocol";
 import type { TaskRecord } from "../tasks/task-record.js";
 import type { TaskStorePort } from "../tasks/task-store-port.js";
@@ -138,7 +139,12 @@ export class CeoPlanOrchestrator {
     return currentRevision;
   }
 
-  #postAuditMessage(parentTaskId: string, text: string, now: string): CommunicationMessage {
+  #postAuditMessage(
+    parentTaskId: string,
+    text: string,
+    now: string,
+    reference?: CommunicationMessageReference,
+  ): CommunicationMessage {
     const { board, created } = this.#boardStore.ensureTaskBoard(parentTaskId, now);
     if (created) this.#messageStore.registerBoard(board.boardId);
     const message = this.#messageStore.append(board.boardId, {
@@ -146,6 +152,7 @@ export class CeoPlanOrchestrator {
       boardId: board.boardId,
       author: CEO_AGENT_AUTHOR,
       text,
+      ...(reference !== undefined ? { reference } : {}),
       createdAt: now,
     });
     this.#boardStore.recordMessageAppended(board.boardId, message.sequence + 1, now);
@@ -248,8 +255,9 @@ export class CeoPlanOrchestrator {
       );
       const message = this.#postAuditMessage(
         parentTaskId,
-        `CEO plan created (plan ${planId}, version 1, ${String(version.steps.length)} step(s)).`,
+        `Plan created · ${String(version.steps.length)} ${version.steps.length === 1 ? "step" : "steps"} · Draft`,
         now,
+        { kind: "ceo_plan_created", planId, stepCount: version.steps.length },
       );
       return { plan, version, event, message };
     });

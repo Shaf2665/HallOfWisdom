@@ -121,6 +121,7 @@ export interface CreateDeferredTaskRequestBody {
   readonly description?: string;
   readonly priority?: "low" | "normal" | "high" | "critical";
   readonly workingDirectory?: string;
+  readonly source?: "wisdom_gateway";
 }
 
 export interface AssignTaskRequestBody {

@@ -1,12 +1,18 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import type { CommunicationMessage } from "@hall-of-wisdom/protocol";
 import { EmptyState } from "../empty-state";
 
 const NEAR_BOTTOM_THRESHOLD_PX = 80;
 
 function MessageItem({ message }: { readonly message: CommunicationMessage }) {
+  const planReference =
+    message.author.kind === "system" && message.reference?.kind === "ceo_plan_created"
+      ? message.reference
+      : null;
+
   return (
     <div className="rounded border border-stone-200 bg-white p-2 text-sm dark:border-stone-800 dark:bg-stone-900">
       <div className="flex flex-wrap items-baseline justify-between gap-x-2 text-xs text-stone-500 dark:text-stone-400">
@@ -22,6 +28,14 @@ function MessageItem({ message }: { readonly message: CommunicationMessage }) {
       <p className="mt-1 break-words whitespace-pre-wrap text-stone-900 dark:text-stone-100">
         {message.text}
       </p>
+      {planReference ? (
+        <Link
+          href={`/ceo/${encodeURIComponent(planReference.planId)}`}
+          className="mt-2 inline-flex rounded border border-amber-300 px-2.5 py-1.5 text-xs font-semibold text-amber-800 hover:bg-amber-50 dark:border-amber-800 dark:text-amber-300 dark:hover:bg-amber-950/40"
+        >
+          Open plan
+        </Link>
+      ) : null}
       <p className="mt-1 text-[10px] text-stone-400 dark:text-stone-600">#{message.sequence}</p>
     </div>
   );

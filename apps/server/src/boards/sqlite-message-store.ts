@@ -21,6 +21,7 @@ interface MessageRow {
   sequence: number;
   author_json: string;
   text: string;
+  reference_json: string | null;
   created_at: string;
 }
 
@@ -32,6 +33,9 @@ function rowToMessage(row: MessageRow): CommunicationMessage {
       sequence: row.sequence,
       author: JSON.parse(row.author_json) as unknown,
       text: row.text,
+      ...(row.reference_json !== null
+        ? { reference: JSON.parse(row.reference_json) as unknown }
+        : {}),
       createdAt: row.created_at,
     });
   } catch (error) {
@@ -80,12 +84,22 @@ export class SqliteMessageStore implements MessageStorePort {
       }
 
       const authorJson = JSON.stringify(input.author);
+      const referenceJson = input.reference === undefined ? null : JSON.stringify(input.reference);
       this.#db
         .prepare(
-          `INSERT INTO messages (message_id, board_id, sequence, author_json, text, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO messages (
+             message_id, board_id, sequence, author_json, text, reference_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         )
-        .run(input.messageId, boardId, sequence, authorJson, input.text, input.createdAt);
+        .run(
+          input.messageId,
+          boardId,
+          sequence,
+          authorJson,
+          input.text,
+          referenceJson,
+          input.createdAt,
+        );
 
       return rowToMessage({
         message_id: input.messageId,
@@ -93,6 +107,7 @@ export class SqliteMessageStore implements MessageStorePort {
         sequence,
         author_json: authorJson,
         text: input.text,
+        reference_json: referenceJson,
         created_at: input.createdAt,
       });
     });

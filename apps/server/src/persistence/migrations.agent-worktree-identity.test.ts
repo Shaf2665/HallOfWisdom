@@ -82,6 +82,6 @@ describe("migration 9 — agent worktree immutable adapter/agent identity", () =
   });
 
   it("runs after migration 8 in the ordered migration list", () => {
-    expect(MIGRATIONS.at(-1)?.version).toBe(9);
+    expect(MIGRATIONS.find((migration) => migration.version === 9)?.version).toBe(9);
   });
 });

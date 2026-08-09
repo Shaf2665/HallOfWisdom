@@ -17,8 +17,14 @@ export type { AgentIdentity } from "./agent-identity.js";
 export { agentCapabilitiesSchema, parseAgentCapabilities } from "./agent-capabilities.js";
 export type { AgentCapabilities } from "./agent-capabilities.js";
 
-export { taskPrioritySchema, taskStatusSchema, hallTaskSchema, parseHallTask } from "./task.js";
-export type { TaskPriority, TaskStatus, HallTask } from "./task.js";
+export {
+  taskPrioritySchema,
+  taskSourceSchema,
+  taskStatusSchema,
+  hallTaskSchema,
+  parseHallTask,
+} from "./task.js";
+export type { TaskPriority, TaskSource, TaskStatus, HallTask } from "./task.js";
 
 export {
   capabilityIdSchema,
@@ -50,6 +56,7 @@ export {
   parseCommunicationBoard,
   MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH,
   communicationMessageTextSchema,
+  communicationMessageReferenceSchema,
   communicationMessageSchema,
   parseCommunicationMessage,
 } from "./communication.js";
@@ -57,6 +64,7 @@ export type {
   CommunicationBoardKind,
   CommunicationAuthor,
   CommunicationBoard,
+  CommunicationMessageReference,
   CommunicationMessage,
 } from "./communication.js";
 

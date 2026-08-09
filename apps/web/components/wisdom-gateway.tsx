@@ -2,21 +2,38 @@
 
 import { useEffect, useId, useRef, useState } from "react";
 import type { SubmitEvent } from "react";
-import { createCeoPlan, createDeferredTask, listTasks } from "../lib/api-client";
+import {
+  createCeoPlan,
+  createDeferredTask,
+  getCeoPlan,
+  getCeoPlanVersion,
+  listCeoPlans,
+  listTasks,
+} from "../lib/api-client";
+import type { CeoPlan, CeoPlanVersion } from "../lib/api-schemas";
+import { CeoPlanSummaryCard } from "./ceo/ceo-plan-summary-card";
 
 const NEW_PROJECT = "__hall_new_project__";
 const MAX_PROJECT_LENGTH = 128;
 const MAX_REQUEST_LENGTH = 20_000;
 const MAX_TITLE_LENGTH = 200;
+const MAX_RECENT_REQUESTS = 10;
 
 type MessageStatus = "sending" | "planning_started" | "request_failed" | "planning_failed";
 
 interface ConversationEntry {
-  readonly id: number;
+  readonly id: string;
   readonly projectName: string;
   readonly request: string;
   readonly status: MessageStatus;
   readonly parentTaskId?: string;
+  readonly plan?: CeoPlan;
+  readonly version?: CeoPlanVersion;
+}
+
+interface PlanResult {
+  readonly plan: CeoPlan;
+  readonly version?: CeoPlanVersion;
 }
 
 function requestTitle(request: string): string {
@@ -30,11 +47,32 @@ function statusCopy(status: MessageStatus): string {
     case "sending":
       return "I’ve received your request. I’m saving it and starting the plan now…";
     case "planning_started":
-      return "Thanks — your request is safely with Hall, and the CEO has started planning.";
+      return "Your plan is ready to review.";
     case "request_failed":
       return "I couldn’t send that request to Hall. Check that Hall is online, then try again.";
     case "planning_failed":
       return "Your request is safely saved, but planning couldn’t start. You can try planning again without resending it.";
+  }
+}
+
+async function loadPlanResult(
+  baseUrl: string,
+  knownPlan: CeoPlan,
+  signal?: AbortSignal,
+): Promise<PlanResult> {
+  let plan = knownPlan;
+  try {
+    plan = (await getCeoPlan(baseUrl, knownPlan.id, { signal })).plan;
+  } catch {
+    // The list/create response is already a validated plan snapshot. Keep
+    // it so navigation remains available even if this refresh fails.
+  }
+
+  try {
+    const version = await getCeoPlanVersion(baseUrl, plan.id, plan.activeVersion, { signal });
+    return { plan, version };
+  } catch {
+    return { plan };
   }
 }
 
@@ -47,12 +85,16 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
   const [newProjectName, setNewProjectName] = useState("");
   const [request, setRequest] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
-  const [busyMessageId, setBusyMessageId] = useState<number | null>(null);
+  const [busyMessageId, setBusyMessageId] = useState<string | null>(null);
   const [conversation, setConversation] = useState<readonly ConversationEntry[]>([]);
+  const [historyState, setHistoryState] = useState<"loading" | "ready" | "error">("loading");
 
   useEffect(() => {
     const controller = new AbortController();
-    listTasks(baseUrl, { signal: controller.signal })
+    const tasksRequest = listTasks(baseUrl, { signal: controller.signal });
+    const plansRequest = listCeoPlans(baseUrl, { signal: controller.signal });
+
+    tasksRequest
       .then(({ tasks }) => {
         if (controller.signal.aborted) return;
         const discoveredProjects = [
@@ -67,13 +109,68 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
         setSelectedProject(NEW_PROJECT);
         setProjectsState("error");
       });
+
+    Promise.all([tasksRequest, plansRequest])
+      .then(async ([{ tasks }, { plans }]) => {
+        const latestPlanByParentTask = new Map<string, CeoPlan>();
+        for (const plan of plans) {
+          const current = latestPlanByParentTask.get(plan.parentTaskId);
+          if (current === undefined || current.createdAt < plan.createdAt) {
+            latestPlanByParentTask.set(plan.parentTaskId, plan);
+          }
+        }
+
+        const recentGatewayTasks = tasks
+          .filter((record) => record.task.source === "wisdom_gateway")
+          .sort((left, right) => right.task.createdAt.localeCompare(left.task.createdAt))
+          .slice(0, MAX_RECENT_REQUESTS)
+          .reverse();
+
+        const restoredConversation = await Promise.all(
+          recentGatewayTasks.map(async (record): Promise<ConversationEntry> => {
+            const linkedPlan = latestPlanByParentTask.get(record.task.taskId);
+            if (linkedPlan === undefined) {
+              return {
+                id: `task-${record.task.taskId}`,
+                projectName: record.task.projectId,
+                request: record.task.description,
+                status: "planning_failed",
+                parentTaskId: record.task.taskId,
+              };
+            }
+
+            const result = await loadPlanResult(baseUrl, linkedPlan, controller.signal);
+            return {
+              id: `task-${record.task.taskId}`,
+              projectName: record.task.projectId,
+              request: record.task.description,
+              status: "planning_started",
+              parentTaskId: record.task.taskId,
+              plan: result.plan,
+              ...(result.version !== undefined ? { version: result.version } : {}),
+            };
+          }),
+        );
+
+        if (controller.signal.aborted) return;
+        setConversation((current) => [
+          ...restoredConversation,
+          ...current.filter((entry) => entry.id.startsWith("local-")),
+        ]);
+        setHistoryState("ready");
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setHistoryState("error");
+      });
+
     return () => {
       controller.abort();
     };
   }, [baseUrl]);
 
   function updateMessage(
-    messageId: number,
+    messageId: string,
     update: (entry: ConversationEntry) => ConversationEntry,
   ): void {
     setConversation((current) =>
@@ -81,12 +178,18 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
     );
   }
 
-  async function startPlanning(messageId: number, parentTaskId: string): Promise<void> {
+  async function startPlanning(messageId: string, parentTaskId: string): Promise<void> {
     setBusyMessageId(messageId);
     updateMessage(messageId, (entry) => ({ ...entry, status: "sending", parentTaskId }));
     try {
-      await createCeoPlan(baseUrl, parentTaskId);
-      updateMessage(messageId, (entry) => ({ ...entry, status: "planning_started" }));
+      const created = await createCeoPlan(baseUrl, parentTaskId);
+      const result = await loadPlanResult(baseUrl, created.plan);
+      updateMessage(messageId, (entry) => ({
+        ...entry,
+        status: "planning_started",
+        plan: result.plan,
+        version: result.version ?? created.version,
+      }));
     } catch {
       updateMessage(messageId, (entry) => ({ ...entry, status: "planning_failed" }));
     } finally {
@@ -119,7 +222,7 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
       return;
     }
 
-    const messageId = nextMessageId.current;
+    const messageId = `local-${String(nextMessageId.current)}`;
     nextMessageId.current += 1;
     setFormError(null);
     setBusyMessageId(messageId);
@@ -133,6 +236,7 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
         projectId: projectName,
         title: requestTitle(trimmedRequest),
         description: trimmedRequest,
+        source: "wisdom_gateway",
       });
       updateMessage(messageId, (entry) => ({
         ...entry,
@@ -140,8 +244,14 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
       }));
 
       try {
-        await createCeoPlan(baseUrl, parentTask.task.taskId);
-        updateMessage(messageId, (entry) => ({ ...entry, status: "planning_started" }));
+        const created = await createCeoPlan(baseUrl, parentTask.task.taskId);
+        const result = await loadPlanResult(baseUrl, created.plan);
+        updateMessage(messageId, (entry) => ({
+          ...entry,
+          status: "planning_started",
+          plan: result.plan,
+          version: result.version ?? created.version,
+        }));
         setRequest("");
         if (selectedProject === NEW_PROJECT && !projects.includes(projectName)) {
           setProjects((current) =>
@@ -176,6 +286,19 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
         </p>
       </div>
 
+      {historyState === "loading" ? (
+        <p role="status" className="text-center text-sm text-stone-500 dark:text-stone-400">
+          Restoring your recent requests…
+        </p>
+      ) : historyState === "error" ? (
+        <p
+          role="alert"
+          className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-900 dark:bg-amber-950/30 dark:text-amber-200"
+        >
+          Recent requests couldn’t be restored. You can still send a new request.
+        </p>
+      ) : null}
+
       {conversation.length > 0 ? (
         <div aria-live="polite" aria-label="Conversation" className="flex flex-col gap-5">
           {conversation.map((entry) => {
@@ -202,6 +325,12 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
                     Hall CEO
                   </p>
                   <p className="text-sm leading-6 sm:text-base">{statusCopy(entry.status)}</p>
+                  {entry.plan ? (
+                    <CeoPlanSummaryCard
+                      plan={entry.plan}
+                      {...(entry.version !== undefined ? { version: entry.version } : {})}
+                    />
+                  ) : null}
                   {entry.status === "planning_failed" && entry.parentTaskId ? (
                     <button
                       type="button"

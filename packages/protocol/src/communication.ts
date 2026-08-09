@@ -101,6 +101,24 @@ export const communicationMessageTextSchema = z
   .refine((value) => !value.includes(NUL_CHARACTER), "text must not contain NUL characters");
 
 /**
+ * Server-owned navigation attached to a Hall-generated message. The
+ * browser's human-message endpoint accepts text only, so a user-authored
+ * message can never supply this reference.
+ */
+export const communicationMessageReferenceSchema = z.discriminatedUnion("kind", [
+  z
+    .object({
+      kind: z.literal("ceo_plan_created"),
+      planId: nonEmptyIdSchema,
+      stepCount: z.number().int().nonnegative().max(20),
+    })
+    .strict(),
+]);
+export type CommunicationMessageReference = z.infer<
+  typeof communicationMessageReferenceSchema
+>;
+
+/**
  * Communication-message `sequence` is a wholly independent counter from a
  * `NormalizedAgentEvent`'s `sequence` — same *shape* (non-negative integer,
  * starts at zero, strictly increasing per board), but a different
@@ -117,6 +135,7 @@ export const communicationMessageSchema = z
     sequence: z.number().int().nonnegative(),
     author: communicationAuthorSchema,
     text: communicationMessageTextSchema,
+    reference: communicationMessageReferenceSchema.optional(),
     createdAt: isoTimestampSchema,
   })
   .strict();

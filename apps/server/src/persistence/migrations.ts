@@ -647,6 +647,24 @@ const MIGRATION_9: Migration = {
   },
 };
 
+/**
+ * Migration 10 — durable provenance for Wisdom Gateway parent tasks and
+ * structured navigation on trusted Hall-generated communication messages.
+ * Both columns are nullable so every pre-feature row remains valid without
+ * fabricated backfill data.
+ */
+const MIGRATION_10: Migration = {
+  version: 10,
+  description: "Wisdom Gateway task provenance and CEO plan message references.",
+  up(db) {
+    db.exec(`
+      ALTER TABLE tasks ADD COLUMN source TEXT
+        CHECK (source IS NULL OR source = 'wisdom_gateway');
+      ALTER TABLE messages ADD COLUMN reference_json TEXT;
+    `);
+  },
+};
+
 /** Ordered by `version`, ascending — `migration-runner.ts` applies whichever ones a given database hasn't recorded yet, one transaction each. */
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -658,6 +676,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_7,
   MIGRATION_8,
   MIGRATION_9,
+  MIGRATION_10,
 ];
 
 export const HIGHEST_KNOWN_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

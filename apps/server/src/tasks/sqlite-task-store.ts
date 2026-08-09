@@ -37,6 +37,7 @@ interface TaskRow {
   description: string;
   priority: string;
   status: string;
+  source: string | null;
   dependency_task_ids_json: string;
   requirements_json: string | null;
   run_id: string | null;
@@ -76,6 +77,7 @@ function rowToTaskRecord(row: TaskRow): TaskRecord {
       description: row.description,
       priority: row.priority,
       status: row.status,
+      ...(row.source !== null ? { source: row.source } : {}),
       dependencyTaskIds: safeJsonParse("tasks", row.task_id, row.dependency_task_ids_json),
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -194,12 +196,12 @@ export class SqliteTaskStore implements TaskStorePort {
       this.#db
         .prepare(
           `INSERT INTO tasks (
-            task_id, project_id, title, description, priority, status,
+            task_id, project_id, title, description, priority, status, source,
             dependency_task_ids_json, requirements_json, run_id, adapter_id, agent_id,
             assigned_execution_trust, event_count, last_sequence, terminal_event_type,
             failure_json, cancellation_requested, created_at, updated_at, started_at,
             completed_at, revision
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
         )
         .run(
           record.task.taskId,
@@ -208,6 +210,7 @@ export class SqliteTaskStore implements TaskStorePort {
           record.task.description,
           record.task.priority,
           record.task.status,
+          record.task.source ?? null,
           JSON.stringify(record.task.dependencyTaskIds),
           record.task.requirements !== undefined ? JSON.stringify(record.task.requirements) : null,
           record.runId ?? null,
