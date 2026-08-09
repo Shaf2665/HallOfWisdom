@@ -11,7 +11,11 @@
     then a real start.ps1, genuinely minutes end to end.
 
     Proves what neither existing smoke test proves alone: that a config
-    install.ps1 ACTUALLY WROTE is what start.ps1 ACTUALLY CONSUMES, all the
+    install.ps1 ACTUALLY WROTE is what start.ps1 ACTUALLY CONSUMES (the
+    ports are deliberately pinned to non-default values immediately after
+    install.ps1 writes the file, since install.ps1 itself exposes no port
+    parameter to request non-default ones directly - everything else in
+    the file is exactly what install.ps1 persisted, unmodified), all the
     way through to a browser-reachable Hall Web and its Providers page,
     then a clean, orphan-free shutdown. install.ps1's own dual-host
     correctness is already proven by scripts/install/tests/end-to-end-smoke-test.ps1
@@ -20,12 +24,22 @@
     scripts/launch/tests/end-to-end-smoke-test.ps1. This script's only new
     surface is the install-to-launch handoff and the Providers page - not
     a reason to re-run install.ps1's own multi-minute pnpm build under a
-    second host here too.
+    second host here too. Runs under pwsh only; Windows PowerShell 5.1's
+    `Set-Content -Encoding utf8` writes a BOM that hall-config's JSON.parse
+    would reject, so this script's own config-mutation step deliberately
+    uses .NET's BOM-free UTF8 encoding instead (see below) - but the
+    script as a whole is not part of this project's dual-host PowerShell
+    test matrix.
 
     Isolation: a fake LOCALAPPDATA and an explicit HALL_CONFIG_DIR override
     (checked first by both install.ps1 and hall-config), matching
     scripts/install/tests/end-to-end-smoke-test.ps1's own isolation - the
     real user profile's Hall configuration is never read or written.
+
+    Note: this leaves apps/web/.next rebuilt for the non-default port this
+    script uses, so your next real .\start.ps1 will rebuild once more for
+    your own configured port - that's the marker mechanism (ADR 0019)
+    self-healing exactly as designed, not a defect.
 #>
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot))
@@ -90,7 +104,13 @@ try {
     # default that would coincidentally match.
     $config | Add-Member -NotePropertyName hallCorePort -NotePropertyValue $corePort -Force
     $config | Add-Member -NotePropertyName hallWebPort -NotePropertyValue $webPort -Force
-    ($config | ConvertTo-Json) | Set-Content -LiteralPath $configPath -Encoding utf8
+    # .NET's UTF8Encoding($false) writes no BOM - Set-Content -Encoding utf8
+    # would (on Windows PowerShell 5.1; pwsh's does not), and hall-config's
+    # JSON.parse rejects a leading BOM (see packages/hall-config/src/config-store.ts).
+    # This script only ever runs under pwsh (see the header comment), so this
+    # is defensive rather than load-bearing today.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($configPath, ($config | ConvertTo-Json), $utf8NoBom)
 
     Write-Host "--- Step 2/5: start.ps1, consuming that exact config, in its own process group (for a later real Ctrl+Break) ---"
     $startPs1 = Join-Path $RepoRoot "start.ps1"

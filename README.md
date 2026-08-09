@@ -14,9 +14,10 @@ below.
 
 ### 1. Requirements
 
-- Node.js `>=24.11.0 <25`
-- pnpm `10.33.0`
-- Git — recent enough to support `git worktree list --porcelain -z` (confirmed against Git 2.54)
+- [Node.js](https://nodejs.org/) `>=24.11.0 <25`
+- [pnpm](https://pnpm.io/installation) `10.33.0`
+- [Git](https://git-scm.com/downloads) — recent enough to support `git worktree list --porcelain -z`
+  (confirmed against Git 2.54)
 - Windows 10/11 (the installer and launcher below are PowerShell scripts)
 
 ### 2. Clone the repository
@@ -33,9 +34,11 @@ cd HallOfWisdom
 ```
 
 This checks your prerequisites, asks where you keep your projects (and, if you want, a data
-directory and an agent-worktree directory), installs dependencies, builds Hall, and saves your
-answers so you never have to type them again. Run it again any time — it detects an existing
-configuration and offers to keep it (and re-verify the install) or reconfigure it. See
+directory and an agent-worktree directory), asks whether to enable Codex trusted-local mode
+(default **No** — this is where that opt-in actually happens; see step 5 below for what it means),
+installs dependencies, builds Hall, and saves your answers so you never have to type them again. Run
+it again any time — it detects an existing configuration and offers to keep it (and re-verify the
+install) or reconfigure it. See
 [`docs/architecture/0017-persistent-hall-configuration.md`](docs/architecture/0017-persistent-hall-configuration.md).
 
 ### 4. Start Hall
@@ -55,12 +58,13 @@ Open the **Providers** page from the navigation bar. It shows Claude Code and Co
 shows the provider's own official sign-in command — Hall never touches your password, API key, or
 login session:
 
-- **Claude Code** is the recommended default provider. Connect runs `claude auth login` in your own
-  terminal.
-- **Codex** connects via `codex login`. **Codex trusted-local mode is explicit opt-in and is not
-  OS-sandboxed** — it bypasses Codex's own sandbox and approval enforcement and runs with your own
-  filesystem permissions. Only enable it if you understand and accept that; it is never turned on
-  automatically just because Codex is authenticated.
+- **Claude Code** is the recommended default provider. Connect shows `claude auth login`; run that
+  command yourself in your own terminal.
+- **Codex** connects via `codex login`, shown and run the same way. **Codex trusted-local mode is
+  explicit opt-in and is not OS-sandboxed** — it bypasses Codex's own sandbox and approval
+  enforcement and runs with your own filesystem permissions. Only enable it (during `install.ps1`,
+  step 3 above) if you understand and accept that; it is never turned on automatically just because
+  Codex is authenticated.
 
 After running the command in your terminal, click **Recheck** on the Providers page to confirm the
 connection. See
@@ -68,11 +72,12 @@ connection. See
 
 ### 6. Create and run your first task
 
-From the Task Console, fill in **Create Task** (project and title) and submit — a card appears on
-the Kanban board. Open the card's **Actions** menu, choose **Assign agent**, and pick a connected
-provider (or **Mock Agent** for a no-provider dry run that needs nothing connected). Once assigned,
-use **Actions → Start task** (it asks for confirmation) to begin the run. Task output streams live
-on the card as the agent works.
+From the **Task Console**, fill in **Create Task** — Project, Title, and **Agent** (pick a connected
+provider, or **Mock Agent** for a dry run that needs nothing connected; unavailable agents are
+greyed out) — and submit. The task is created already assigned to that agent, and its live event
+stream appears in the detail panel on the right of the Task Console. Go to the **Kanban Board**,
+find the card in the **Assigned** column, and click **Start task** (it asks you to confirm) to begin
+the run.
 
 ### 7. Stop Hall
 
@@ -81,8 +86,11 @@ Web are stopped cleanly — no processes are left running in the background.
 
 ### 8. Troubleshooting
 
+- **`.\install.ps1` says a prerequisite is missing** — install (or upgrade) the tool it names from
+  the links in step 1, then run `.\install.ps1` again.
 - **`.\start.ps1` says a port is already in use** — something else is already listening on your
-  configured Hall Core/Hall Web port. Close it, or run `.\install.ps1` again and reconfigure.
+  configured Hall Core/Hall Web port. Close it. (`install.ps1` doesn't currently prompt for a custom
+  port — the default ports are 4310 for Hall Core and 3000 for Hall Web.)
 - **`.\start.ps1` says a build is missing** — run `.\install.ps1` again; it rebuilds Hall.
 - **A provider shows "Not connected" after you ran its login command** — click **Recheck** on the
   Providers page; if it's still not connected, re-run the command shown and check your terminal for
@@ -324,8 +332,10 @@ milestone is complete.
   [`0019-one-command-hall-launcher.md`](docs/architecture/0019-one-command-hall-launcher.md)).
 - **17.4 — User Documentation & Phase 17 Release Verification.** This README, plus an end-to-end
   release verification of install → persisted config → launcher → browser-accessible Hall →
-  Providers page → clean shutdown, run against disposable configuration on both `pwsh` and Windows
-  PowerShell 5.1.
+  Providers page → clean shutdown, run against disposable configuration. The installer and launcher
+  unit test suites (`scripts/install/tests/`, `scripts/launch/tests/`) pass on both `pwsh` and
+  Windows PowerShell 5.1, as they already did before this phase; the new chained release-verification
+  smoke test itself runs under `pwsh` only.
 
 Last Completed and Merged Phase:
 
