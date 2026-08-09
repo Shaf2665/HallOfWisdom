@@ -11,7 +11,8 @@ deferred as optional future hardening rather than near-term scope: strict Codex 
 fail-closed, and exact sandbox equivalence has still never been proven. A real Codex trusted-local
 task did run in Phase 16.6, through a Hall-owned worktree, against a disposable fixture repository
 outside Hall of Wisdom — strict-mode smoke testing remains deferred alongside strict equivalence
-proof. Phase 17 has not started.
+proof. Phase 17 (Windows onboarding: persistent configuration, provider connection UX, and the
+one-command launcher) is complete — see ADRs 0017–0019.
 
 Phase 16 will make Codex execution run inside Hall-owned isolated Git worktrees. Phase 16.1 built
 the provider-neutral foundation inside Hall Core: a durable worktree model, in-memory and SQLite
