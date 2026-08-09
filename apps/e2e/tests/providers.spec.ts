@@ -27,9 +27,17 @@ test.describe("Providers page", () => {
     await expect(codexCard.getByText("Connected")).toBeVisible();
     await expect(codexCard.getByText(/not OS-sandboxed/)).toBeVisible();
 
+    // Expand technical details so the leak scan below actually covers the
+    // one panel most likely to ever carry a path or version string.
+    await claudeCard.getByRole("button", { name: "Show technical details" }).click();
+    await codexCard.getByRole("button", { name: "Show technical details" }).click();
+
     const bodyText = await page.locator("body").innerText();
     expect(bodyText).not.toMatch(/executablePath/i);
-    expect(bodyText).not.toMatch(/\.exe|\.cmd|\.bat/);
+    // Word-boundary after the extension: catches a real leaked path like
+    // "claude.exe" without false-matching capability names such as
+    // "command.execute" (declared-capabilities text now in scope below).
+    expect(bodyText).not.toMatch(/\.exe\b|\.cmd\b|\.bat\b/);
     expect(bodyText).not.toMatch(/CODEX_HOME/);
     expect(bodyText).not.toMatch(/api[_-]?key\s*[:=]/i);
     expect(bodyText).not.toMatch(/bearer\s+[a-z0-9._-]{10,}/i);
@@ -42,14 +50,17 @@ test.describe("Providers page", () => {
     await page.goto("/providers");
     const claudeCard = page.getByRole("listitem").filter({ hasText: "Claude Code" });
 
-    let connectRequestSeen = false;
+    // Attach the listener only once the initial listAdapters() page-load
+    // request has already settled, so it can't false-flag on normal load.
+    await expect(claudeCard.getByRole("button", { name: "Connect" })).toBeVisible();
+    const apiRequests: string[] = [];
     page.on("request", (request) => {
-      if (request.url().includes("/connect")) connectRequestSeen = true;
+      if (request.url().includes("/api/v1/adapters")) apiRequests.push(request.url());
     });
 
     await claudeCard.getByRole("button", { name: "Connect" }).click();
     await expect(claudeCard.getByText("claude login")).toBeVisible();
-    expect(connectRequestSeen).toBe(false);
+    expect(apiRequests).toEqual([]);
   });
 
   test("Recheck re-fetches this provider's status without reloading the page", async ({
@@ -64,6 +75,9 @@ test.describe("Providers page", () => {
     ]);
     expect(response.status()).toBe(200);
     await expect(claudeCard.getByText("Connected")).toBeVisible();
+    // Discriminates a real onUpdated() apply from handleRecheck()'s catch
+    // branch, which would leave a role="alert" error message in the card.
+    await expect(claudeCard.getByRole("alert")).toHaveCount(0);
   });
 
   test("is usable at a 390x844 mobile viewport with no page-level horizontal overflow", async ({
