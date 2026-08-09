@@ -49,6 +49,7 @@ function detectionOptions(
     platform?: NodeJS.Platform;
     parentEnv?: Readonly<NodeJS.ProcessEnv>;
     existingPaths?: readonly string[];
+    isolatedExecutionEnabled?: boolean;
   } = {},
 ) {
   return {
@@ -56,6 +57,7 @@ function detectionOptions(
     parentEnv: overrides.parentEnv ?? { HALL_HERMES_ROUTER_ROOT: LINUX_ROOT },
     fs: fakeFs(overrides.existingPaths ?? [LINUX_RUNNER]),
     processRunner: runner,
+    isolatedExecutionEnabled: overrides.isolatedExecutionEnabled ?? false,
   };
 }
 
@@ -174,7 +176,7 @@ describe("detectHermesRouter", () => {
     }
   });
 
-  it("parses valid output, surfaces the version, and remains non-assignable", async () => {
+  it("parses valid output but remains unsupported when Hall isolation is disabled", async () => {
     const parentEnv = {
       HALL_HERMES_ROUTER_ROOT: LINUX_ROOT,
       HALL_HERMES_PYTHON: "/usr/local/bin/python3",
@@ -188,7 +190,7 @@ describe("detectHermesRouter", () => {
       availability: "unsupported",
       detectedVersion: "0.1.0",
       executionTrust: "unavailable",
-      diagnosticMessage: "Hermes coding runtime detected; Hall task execution is not enabled yet.",
+      diagnosticMessage: "Hermes task execution requires Hall durable isolated-worktree execution.",
     });
     expect(result.capabilityObservations).toHaveLength(5);
     expect(
@@ -211,6 +213,28 @@ describe("detectHermesRouter", () => {
     });
   });
 
+  it("reports available with isolated trust when the healthy runtime is behind Hall isolation", async () => {
+    const runner = new RecordingProcessRunner({ status: "success", stdout: detectDocument() });
+    const result = await detectHermesRouter(
+      detectionOptions(runner, { isolatedExecutionEnabled: true }),
+    );
+
+    expect(result).toMatchObject({
+      installed: true,
+      availability: "available",
+      detectedVersion: "0.1.0",
+      executionTrust: "isolated",
+    });
+    expect(result.diagnosticMessage).toBeUndefined();
+    expect(result.capabilityObservations).toHaveLength(5);
+    expect(
+      result.capabilityObservations?.every(
+        (observation) =>
+          observation.status === "declared" && observation.evidence === "declared_only",
+      ),
+    ).toBe(true);
+  });
+
   it("maps a valid unavailable router document to a safe unsupported result", async () => {
     const runner = new RecordingProcessRunner({
       status: "success",
@@ -222,11 +246,14 @@ describe("detectHermesRouter", () => {
         message: "raw router detail must not escape",
       }),
     });
-    const result = await detectHermesRouter(detectionOptions(runner));
+    const result = await detectHermesRouter(
+      detectionOptions(runner, { isolatedExecutionEnabled: true }),
+    );
 
     expect(result).toMatchObject({
       installed: true,
       availability: "unsupported",
+      executionTrust: "unavailable",
       detectedVersion: "0.1.0",
       diagnosticMessage:
         "Hermes coding runtime is installed but its configured router is unavailable.",

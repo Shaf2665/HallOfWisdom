@@ -99,6 +99,7 @@ describe("HermesRouterAdapter.startTask", () => {
       HERMES_ROUTER_API_KEY: "must-remain-inherited",
     };
     const adapter = new HermesRouterAdapter({
+      isolatedExecutionEnabled: true,
       platform: "linux",
       parentEnv,
       fs: { isFile: () => true },
@@ -137,6 +138,7 @@ describe("HermesRouterAdapter.startTask", () => {
   it("rejects session resumption without invoking transport", async () => {
     let startCount = 0;
     const adapter = new HermesRouterAdapter({
+      isolatedExecutionEnabled: true,
       platform: "linux",
       parentEnv: { HALL_HERMES_ROUTER_ROOT: "/opt/Hermes Router" },
       fs: { isFile: () => true },
@@ -152,7 +154,25 @@ describe("HermesRouterAdapter.startTask", () => {
     expect(startCount).toBe(0);
   });
 
-  it("keeps detection unsupported after startTask becomes executable", async () => {
+  it("rejects execution before transport startup when Hall isolation is disabled", async () => {
+    let startCount = 0;
+    const adapter = new HermesRouterAdapter({
+      platform: "linux",
+      parentEnv: { HALL_HERMES_ROUTER_ROOT: "/opt/Hermes Router" },
+      fs: { isFile: () => true },
+      startTransport() {
+        startCount += 1;
+        return completedTransport();
+      },
+    });
+
+    await expect(adapter.startTask(taskInput())).rejects.toThrow(
+      "Hermes task execution requires Hall durable isolated-worktree execution.",
+    );
+    expect(startCount).toBe(0);
+  });
+
+  it("reports available with isolated trust when execution is enabled", async () => {
     const processRunner: DetectionProcessRunner = {
       run: () =>
         Promise.resolve({
@@ -174,6 +194,7 @@ describe("HermesRouterAdapter.startTask", () => {
         }),
     };
     const adapter = new HermesRouterAdapter({
+      isolatedExecutionEnabled: true,
       platform: "linux",
       parentEnv: { HALL_HERMES_ROUTER_ROOT: "/opt/Hermes Router" },
       fs: { isFile: () => true },
@@ -181,8 +202,8 @@ describe("HermesRouterAdapter.startTask", () => {
     });
 
     await expect(adapter.detect()).resolves.toMatchObject({
-      availability: "unsupported",
-      executionTrust: "unavailable",
+      availability: "available",
+      executionTrust: "isolated",
     });
   });
 });

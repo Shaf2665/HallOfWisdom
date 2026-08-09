@@ -10,6 +10,7 @@ import { hermesRouterDescriptor } from "./descriptor.js";
 import {
   createDefaultHermesDetectionOptions,
   detectHermesRouter,
+  HERMES_EXECUTION_DISABLED_MESSAGE,
   resolveHermesRuntimeConfiguration,
   type FileSystemProbe,
 } from "./detection.js";
@@ -24,6 +25,7 @@ export interface HermesRouterAdapterConfig {
   readonly fs?: FileSystemProbe;
   readonly processRunner?: DetectionProcessRunner;
   readonly startTransport?: HermesExecutionTransportStarter;
+  readonly isolatedExecutionEnabled?: boolean;
 }
 
 export class HermesRouterAdapter implements AgentAdapter {
@@ -31,10 +33,12 @@ export class HermesRouterAdapter implements AgentAdapter {
 
   readonly #detectionOptions: ReturnType<typeof createDefaultHermesDetectionOptions>;
   readonly #startTransport: HermesExecutionTransportStarter;
+  readonly #isolatedExecutionEnabled: boolean;
 
   constructor(config: HermesRouterAdapterConfig = {}) {
     this.#detectionOptions = createDefaultHermesDetectionOptions(config);
     this.#startTransport = config.startTransport ?? startHermesExecutionTransport;
+    this.#isolatedExecutionEnabled = config.isolatedExecutionEnabled ?? false;
   }
 
   detect(): Promise<AgentDetectionResult> {
@@ -42,6 +46,9 @@ export class HermesRouterAdapter implements AgentAdapter {
   }
 
   startTask(input: AgentTaskInput, options?: AgentExecutionOptions): Promise<AgentRunHandle> {
+    if (!this.#isolatedExecutionEnabled) {
+      return Promise.reject(new Error(HERMES_EXECUTION_DISABLED_MESSAGE));
+    }
     const parsedInput = parseAgentTaskInput(input);
     if (parsedInput.sessionId !== undefined) {
       return Promise.reject(
