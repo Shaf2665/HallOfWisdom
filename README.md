@@ -1,14 +1,16 @@
 # Hall of Wisdom
 
-Hall of Wisdom is a local, cross-platform Agent OS for coordinating coding agents (Claude Code,
-Codex, and others) against your own projects — while keeping your provider credentials on your own
-machine. Hall never collects passwords, API keys, or subscription auth files; each agent runs
-through your own already-authenticated local CLI.
+Hall of Wisdom is a local, cross-platform Agent OS for coordinating coding agents against your own
+projects. The current alpha supports **Claude Code**, **Codex**, and **Hermes Router** through one
+task, routing, event, and recovery workflow.
 
-This README's **Getting Started** section is the normal path for a Windows user: clone, install,
-start, connect a provider, run a task. Everything past that — manual CLI flags, architecture docs,
-package internals, security details — is for contributors and is clearly marked **For Developers**
-below.
+Claude Code and Codex use their locally installed CLIs and their own local authentication. Hermes
+uses a local Hermes Coding Runtime connected to a Hermes Router endpoint. Hall does not provide
+upstream OpenRouter or model-provider credentials to the router; Hermes uses a separate proxy/client
+key supplied through the environment that starts Hall Core.
+
+The normal Windows path is: clone, install, start, configure a provider, and run a task. Contributor
+commands and architecture details are under [For Developers](#for-developers).
 
 ## Getting Started
 
@@ -16,9 +18,13 @@ below.
 
 - [Node.js](https://nodejs.org/) `>=24.11.0 <25`
 - [pnpm](https://pnpm.io/installation) `10.33.0`
-- [Git](https://git-scm.com/downloads) — recent enough to support `git worktree list --porcelain -z`
-  (confirmed against Git 2.54)
-- Windows 10/11 (the installer and launcher below are PowerShell scripts)
+- [Git](https://git-scm.com/downloads) — recent enough to support
+  `git worktree list --porcelain -z` (confirmed against Git 2.54)
+- Windows 10/11 for the PowerShell installer and launcher below
+- At least one coding provider you intend to use:
+  - Claude Code CLI
+  - Codex CLI
+  - a local Hermes Coding Runtime and reachable Hermes Router endpoint
 
 ### 2. Clone the repository
 
@@ -33,12 +39,18 @@ cd HallOfWisdom
 .\install.ps1
 ```
 
-This checks your prerequisites, asks where you keep your projects (and, if you want, a data
-directory and an agent-worktree directory), asks whether to enable Codex trusted-local mode
-(default **No** — this is where that opt-in actually happens; see step 5 below for what it means),
-installs dependencies, builds Hall, and saves your answers so you never have to type them again. Run
-it again any time — it detects an existing configuration and offers to keep it (and re-verify the
-install) or reconfigure it. See
+The installer checks prerequisites, installs dependencies, builds Hall, and saves your local
+configuration. It asks for:
+
+- the directory containing projects Hall may work with;
+- a durable data directory;
+- a Hall-owned agent-worktree directory;
+- an optional comparison-worktree directory; and
+- whether to enable Codex trusted-local execution (default **No**).
+
+Keep the durable data and agent-worktree directories configured if you intend to use Hermes. They
+allow Hall to persist run state and keep Hermes away from the original project checkout. Run the
+installer again to verify or change the saved configuration. See
 [`docs/architecture/0017-persistent-hall-configuration.md`](docs/architecture/0017-persistent-hall-configuration.md).
 
 ### 4. Start Hall
@@ -47,63 +59,117 @@ install) or reconfigure it. See
 .\start.ps1
 ```
 
-This loads the configuration `install.ps1` saved, starts Hall Core and Hall Web, waits until both
-are ready, and opens Hall in your browser automatically. See
+The launcher loads the saved configuration, starts Hall Core and Hall Web, waits for both services,
+and opens Hall in your browser. See
 [`docs/architecture/0019-one-command-hall-launcher.md`](docs/architecture/0019-one-command-hall-launcher.md).
 
-### 5. Connect a provider
+### 5. Configure a provider
 
-Open the **Providers** page from the navigation bar. It shows Claude Code, Codex, and Hermes Router
-as **Connected** or **Not connected**, with provider-specific setup guidance. Hall never asks for
-or stores your credentials:
+Open **Providers** from the navigation bar. The page shows exactly:
 
-- **Claude Code** is the recommended default provider. Connect shows `claude auth login`; run that
-  command yourself in your own terminal.
-- **Codex** connects via `codex login`, shown and run the same way. **Codex trusted-local mode is
-  explicit opt-in and is not OS-sandboxed** — it bypasses Codex's own sandbox and approval
-  enforcement and runs with your own filesystem permissions. Only enable it (during `install.ps1`,
-  step 3 above) if you understand and accept that; it is never turned on automatically just because
-  Codex is authenticated.
-- **Hermes Router** uses environment configuration from the process that starts Hall Core. Expand
-  **Setup** for placeholder-only examples, restart Hall after changes, then click **Recheck**.
+- Claude Code
+- Codex
+- Hermes Router
 
-After completing the provider's setup, click **Recheck** on the Providers page to confirm the
-connection. See
-[`docs/architecture/0018-provider-connection-onboarding.md`](docs/architecture/0018-provider-connection-onboarding.md).
+Each card is driven by Hall Core detection and shows **Connected** or **Not connected** with
+provider-specific guidance. Click **Recheck** after changing a provider's setup.
+
+#### Claude Code and Codex
+
+- **Claude Code** is the recommended default. **Connect** shows `claude auth login`; run it in your
+  own terminal.
+- **Codex** uses `codex login` in the same way.
+- Codex trusted-local execution is a separate, explicit installer opt-in. It is not OS-sandboxed and
+  runs with the Hall Core process user's filesystem permissions.
+
+Hall does not collect or store either CLI's password, subscription token, auth files, or login
+session.
+
+#### Hermes Router
+
+Hermes is **Connected** only when both conditions are true:
+
+1. the local Hermes runtime and configured router pass detection; and
+2. Hall is running with durable SQLite state and its Hall-owned agent-worktree infrastructure.
+
+Otherwise Hermes remains **Not connected** and the card displays the server-provided reason. Hermes
+cannot run from Hall's ephemeral mode or directly against the source checkout.
+
+Configure these variables in the environment that starts Hall Core:
+
+| Variable                  | Requirement | Meaning                                          |
+| ------------------------- | ----------- | ------------------------------------------------ |
+| `HALL_HERMES_ROUTER_ROOT` | Required    | Path to the local Hermes-router runtime checkout |
+| `HERMES_ROUTER_BASE_URL`  | Required    | Hermes Router `/v1` endpoint                     |
+| `HERMES_ROUTER_API_KEY`   | Required    | Hermes proxy/client key                          |
+| `HALL_HERMES_PYTHON`      | Optional    | Python executable override                       |
+
+PowerShell placeholder example:
+
+```powershell
+$env:HALL_HERMES_ROUTER_ROOT="C:\path\to\Hermes-router"
+$env:HERMES_ROUTER_BASE_URL="https://your-router.example/v1"
+$env:HERMES_ROUTER_API_KEY="<hermes-proxy-key>"
+```
+
+Use the Hermes proxy/client key—never put an upstream OpenRouter or provider key into Hall. These
+variables must exist in the terminal environment that launches `start.ps1`. After changing them,
+restart Hall and click **Recheck** on the Providers page.
 
 ### 6. Create and run your first task
 
-From the **Task Console**, fill in **Create Task** — Project, Title, and **Agent** (pick a connected
-provider, or **Mock Agent** for a dry run that needs nothing connected; unavailable agents are
-greyed out) — and submit. The task is created already assigned to that agent, and its live event
-stream appears in the detail panel on the right of the Task Console. Go to the **Kanban Board**,
-find the card in the **Assigned** column, and click **Start task** (it asks you to confirm) to begin
-the run.
+1. Open **Task Console**.
+2. Select the project, enter a title and optional description, and choose a connected agent.
+3. Create the task.
+4. Open **Kanban Board** and find the task in **Assigned**.
+5. Click **Start task** and confirm.
+6. Watch normalized events and results in the task details.
+
+Coding-agent execution uses Hall-owned isolated worktrees where supported and configured. Hermes
+always receives a Hall-created worktree, never the original project checkout. Hall records the
+terminal result and execution artifact, then cleans up the worktree through its shared lifecycle.
 
 ### 7. Stop Hall
 
-Go back to the terminal where you ran `.\start.ps1` and press **Ctrl+C**. Both Hall Core and Hall
-Web are stopped cleanly — no processes are left running in the background.
+Return to the terminal running `start.ps1` and press **Ctrl+C**. Hall Core and Hall Web shut down
+cleanly.
 
 ### 8. Troubleshooting
 
-- **`.\install.ps1` says a prerequisite is missing** — install (or upgrade) the tool it names from
-  the links in step 1, then run `.\install.ps1` again.
-- **`.\start.ps1` says a port is already in use** — something else is already listening on your
-  configured Hall Core/Hall Web port. Close it. (`install.ps1` doesn't currently prompt for a custom
-  port — the default ports are 4310 for Hall Core and 3000 for Hall Web.)
-- **`.\start.ps1` says a build is missing** — run `.\install.ps1` again; it rebuilds Hall.
-- **A provider shows "Not connected" after you ran its login command** — click **Recheck** on the
-  Providers page; if it's still not connected, re-run the command shown and check your terminal for
-  errors from the provider's own CLI.
-- **You want to start over** — run `.\install.ps1` again and choose "Reconfigure Hall."
+- **A prerequisite is missing** — install or upgrade the named tool, then rerun `install.ps1`.
+- **A port is already in use** — stop the process using the configured port. Defaults are 4310 for
+  Hall Core and 3000 for Hall Web.
+- **A build is missing** — rerun `install.ps1`.
+- **Claude Code or Codex is Not connected** — run the card's CLI login command, then click
+  **Recheck**.
+- **Hermes is Not connected** — read the card's server-provided guidance. Confirm the runtime root,
+  router endpoint, proxy key, durable data directory, and agent-worktree directory, then restart
+  Hall and click **Recheck**.
+- **You want to reconfigure Hall** — rerun `install.ps1` and choose **Reconfigure Hall**.
+
+## Current Features
+
+- **Task Console** — create, assign, start, and monitor tasks.
+- **Kanban boards** — manage task state through the delivery workflow.
+- **Communication boards** — keep structured project and task discussions.
+- **Provider detection and onboarding** — server-driven status, setup guidance, and Recheck.
+- **Claude Code** — local CLI execution with normalized Hall events.
+- **Codex** — local CLI execution with explicit trust profiles.
+- **Hermes Router** — local runtime detection, transport, events, cancellation, and isolated runs.
+- **Capability/trust routing** — assign only adapters that satisfy task and execution policy.
+- **Isolated agent worktrees** — Hall-owned Git worktrees for supported coding-agent runs.
+- **Execution artifacts** — immutable run evidence and repository-change summaries.
+- **Durable SQLite state and recovery** — persisted tasks, events, plans, artifacts, and cleanup state.
+- **Agent comparison** — run candidates in isolated comparison worktrees.
+- **CEO planning and autonomous execution** — approve, delegate, schedule, and recover multi-step
+  plans.
+- **Restart-safe cleanup and recovery** — reconcile interrupted runs and conservatively resume
+  worktree cleanup.
+- **One-command Windows onboarding** — interactive `install.ps1` plus `start.ps1`.
 
 ## For Developers
 
-Everything below this point is for contributors working on Hall itself, or for anyone who needs to
-start Hall Core/Hall Web manually with specific flags instead of through `install.ps1`/`start.ps1`.
-
-### Manual setup and manual startup
+### Manual setup
 
 ```powershell
 git clone https://github.com/Shaf2665/HallOfWisdom.git
@@ -115,141 +181,95 @@ pnpm test
 pnpm build
 ```
 
-Start Hall Core in normal ephemeral development mode:
-
-```powershell
-pnpm --filter @hall-of-wisdom/hall-core run dev -- `
-  --workspace-root "D:\HallOfWisdom" `
-  --port 4310 `
-  --mock-scenario success `
-  --web-origin "http://127.0.0.1:3000"
-```
-
-Start Hall Web:
+Start Hall Web in one terminal:
 
 ```powershell
 pnpm --filter @hall-of-wisdom/web run dev
 ```
 
-Open `http://127.0.0.1:3000`.
-
-Durable SQLite mode:
+For normal durable development, start Hall Core in another terminal:
 
 ```powershell
 pnpm --filter @hall-of-wisdom/hall-core run dev -- `
-  --workspace-root "D:\HallOfWisdom" `
-  --data-dir "D:\HallOfWisdomData" `
-  --port 4310 `
-  --mock-scenario success `
-  --web-origin "http://127.0.0.1:3000"
-```
-
-Phase 16 isolated Codex mode additionally requires an explicit Hall-owned worktree root:
-
-```powershell
-pnpm --filter @hall-of-wisdom/hall-core run dev -- `
-  --workspace-root "D:\HallOfWisdom" `
+  --workspace-root "D:\Projects" `
   --data-dir "D:\HallOfWisdomData" `
   --agent-worktree-root "D:\HallOfWisdomAgentWorktrees" `
   --port 4310 `
+  --web-origin "http://127.0.0.1:3000"
+```
+
+Real Hermes routing requires all of the following:
+
+- durable SQLite mode through `--data-dir`;
+- a Hall-owned `--agent-worktree-root`; and
+- the Hermes environment configuration documented above.
+
+Hermes deliberately remains unavailable in ephemeral mode. Once an agent-worktree root has been
+used with a data directory, later startup against that data directory must supply the same root.
+
+Ephemeral mode remains useful for UI and Mock Agent development:
+
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run dev -- `
+  --workspace-root "D:\Projects" `
+  --port 4310 `
   --mock-scenario success `
   --web-origin "http://127.0.0.1:3000"
 ```
 
-Once `--agent-worktree-root` has been used with a given `--data-dir`, every later startup against
-that same data directory must keep supplying the exact same root — a different root, or omitting
-the flag entirely, fails startup closed (see "Security Limitations" below).
+Open `http://127.0.0.1:3000`.
 
-Trusted-local Codex mode is dangerous and optional. It bypasses Codex's own sandbox and approval
-enforcement, and should not be used as the default:
+Trusted-local Codex mode is optional and bypasses Codex sandbox and approval enforcement. Enable it
+only when intended with `--enable-codex-trusted-local`. An already-built Hall Core can be started
+with `node apps/server/dist/server.js`; without flags it loads the configuration saved by
+`install.ps1`.
 
-```powershell
-pnpm --filter @hall-of-wisdom/hall-core run dev -- `
-  --workspace-root "D:\HallOfWisdom" `
-  --port 4310 `
-  --mock-scenario success `
-  --web-origin "http://127.0.0.1:3000" `
-  --enable-codex-trusted-local
+### Hermes architecture
+
+```text
+Hall task
+  -> Hall isolated worktree
+  -> local Hermes Coding Runtime
+  -> Hermes Router
+  -> configured model/provider
 ```
 
-For an already-built Hall Core binary:
-
-```powershell
-pnpm --filter @hall-of-wisdom/hall-core run build
-node apps/server/dist/server.js `
-  --workspace-root "D:\HallOfWisdom" `
-  --port 4310 `
-  --mock-scenario success
-```
-
-`node apps/server/dist/server.js` with **no flags at all** also works if you've already run
-`.\install.ps1` — it loads your saved configuration the same way `.\start.ps1` does.
-
-### Features
-
-Hall Core is a localhost-only Fastify HTTP and WebSocket server. It can create tasks, assign
-adapters, stream normalized events, store durable state when SQLite mode is enabled, run
-deterministic Mock Agent tasks, route by capability and trust, compare agents in isolated comparison
-worktrees, and drive approved CEO plan execution. Hall Web is a local Next.js dashboard for task,
-board, communication, providers, system, comparison, and CEO workflows.
-
-Real provider adapters use the operator's locally installed CLIs and local subscription
-authentication. Hall does not collect provider credentials, API keys, auth files, or raw provider
-output.
+Hall owns task orchestration, normalized lifecycle state, artifacts, and worktree creation/cleanup.
+The local Hermes runtime owns coding tools. Hermes Router owns model/provider routing; it does not
+execute Hall filesystem or command tools.
 
 ### Architecture
 
-Key architecture documents:
+Key documents:
 
 - [`AGENTS.md`](AGENTS.md)
 - [`docs/architecture/0001-initial-architecture.md`](docs/architecture/0001-initial-architecture.md)
 - [`docs/architecture/0008-claude-code-adapter.md`](docs/architecture/0008-claude-code-adapter.md)
 - [`docs/architecture/0009-codex-adapter.md`](docs/architecture/0009-codex-adapter.md)
-- [`docs/architecture/0010-paperclip-compatible-codex-mode.md`](docs/architecture/0010-paperclip-compatible-codex-mode.md)
+- [`docs/architecture/0011-agent-capabilities-trust-and-routing.md`](docs/architecture/0011-agent-capabilities-trust-and-routing.md)
 - [`docs/architecture/0013-durable-persistence-and-recovery.md`](docs/architecture/0013-durable-persistence-and-recovery.md)
 - [`docs/architecture/0015-autonomous-plan-execution-and-scheduling.md`](docs/architecture/0015-autonomous-plan-execution-and-scheduling.md)
-- [`docs/architecture/0016-codex-worktree-execution.md`](docs/architecture/0016-codex-worktree-execution.md)
 - [`docs/architecture/0017-persistent-hall-configuration.md`](docs/architecture/0017-persistent-hall-configuration.md)
 - [`docs/architecture/0018-provider-connection-onboarding.md`](docs/architecture/0018-provider-connection-onboarding.md)
 - [`docs/architecture/0019-one-command-hall-launcher.md`](docs/architecture/0019-one-command-hall-launcher.md)
 
-Phase 16 dependency direction:
-
-```text
-TaskOrchestrator
-  -> IsolatedAgentExecutionCoordinator
-  -> AgentWorktreeManager
-  -> strict Codex adapter
-  -> normalized events
-  -> authoritative terminal task/event state
-  -> immutable execution artifact
-  -> worktree cleanup request (fail-soft)
-
-Restart:
-  task/event reconciliation
-    -> agent-worktree reconciliation (missing-artifact recovery, interrupted-worktree
-       classification, safe cleanup resumption)
-    -> comparison reconciliation
-    -> bounded recovery summary
-    -> server starts
-```
-
 ### Packages
 
-| Package                               | Purpose                                                                        |
-| ------------------------------------- | ------------------------------------------------------------------------------ |
-| `@hall-of-wisdom/protocol`            | Provider-neutral wire and validation contracts.                                |
-| `@hall-of-wisdom/agent-adapter-sdk`   | Adapter interface, task input, detection, events, and terminal guards.         |
-| `@hall-of-wisdom/mock-agent`          | Deterministic local adapter for tests and development.                         |
-| `@hall-of-wisdom/claude-code-adapter` | Local Claude Code CLI adapter.                                                 |
-| `@hall-of-wisdom/codex-adapter`       | Local Codex CLI adapter with strict and trusted-local profiles.                |
-| `@hall-of-wisdom/hall-config`         | Persisted, schema-validated Hall configuration (Phase 17.1).                   |
-| `@hall-of-wisdom/hall-runner`         | Local task runner and adapter registry.                                        |
-| `@hall-of-wisdom/hall-core`           | Local Fastify server, stores, orchestration, recovery, and Phase 16 internals. |
-| `@hall-of-wisdom/web`                 | Next.js browser dashboard.                                                     |
-| `@hall-of-wisdom/e2e`                 | Playwright E2E fixtures, not included in ordinary `pnpm test`.                 |
+| Package                                 | Purpose                                                         |
+| --------------------------------------- | --------------------------------------------------------------- |
+| `@hall-of-wisdom/protocol`              | Provider-neutral wire and validation contracts.                 |
+| `@hall-of-wisdom/agent-adapter-sdk`     | Adapter interfaces, detection, events, and terminal guards.     |
+| `@hall-of-wisdom/mock-agent`            | Deterministic adapter for tests and development.                |
+| `@hall-of-wisdom/claude-code-adapter`   | Local Claude Code CLI execution and normalized events.          |
+| `@hall-of-wisdom/codex-adapter`         | Local Codex CLI execution with strict and trusted-local modes.  |
+| `@hall-of-wisdom/hermes-router-adapter` | Hermes detection, transport, event lifecycle, and Hall adapter. |
+| `@hall-of-wisdom/hall-config`           | Persisted, schema-validated Hall configuration.                 |
+| `@hall-of-wisdom/hall-runner`           | Local task runner and adapter registry.                         |
+| `@hall-of-wisdom/hall-core`             | HTTP/WebSocket server, orchestration, stores, and recovery.     |
+| `@hall-of-wisdom/web`                   | Next.js local dashboard.                                        |
+| `@hall-of-wisdom/e2e`                   | Playwright E2E fixtures outside ordinary `pnpm test`.           |
 
-### Development and Validation
+### Development and validation
 
 ```powershell
 pnpm typecheck
@@ -261,88 +281,32 @@ pnpm verify:process-recovery
 pnpm verify:package-entry
 ```
 
-Useful focused commands:
+### Security limitations
 
-```powershell
-pnpm --filter @hall-of-wisdom/codex-adapter run test
-pnpm --filter @hall-of-wisdom/hall-core run test -- src/agent-worktrees src/agent-execution src/execution-artifacts src/recovery src/tasks src/composition
-```
+Hall binds to `127.0.0.1` and remains alpha software without a production authentication layer.
+Durable SQLite state is optional generally, but mandatory for Hermes routing.
 
-PowerShell installer/launcher test suites (both `pwsh` and Windows PowerShell 5.1 are expected to
-pass identically):
+Hall-owned worktrees isolate coding changes from the source checkout; they are not an OS sandbox.
+Cleanup is deliberately conservative: Git remains the primary removal mechanism, and ambiguous,
+redirected, or non-empty residual paths are retained and reported rather than recursively deleted.
+Restart reconciliation resumes interrupted artifact and worktree cleanup using the same checks.
 
-```powershell
-pwsh -NoProfile -File scripts/install/tests/run-tests.ps1
-pwsh -NoProfile -File scripts/launch/tests/run-tests.ps1
-powershell -NoProfile -File scripts/install/tests/run-tests.ps1
-powershell -NoProfile -File scripts/launch/tests/run-tests.ps1
-```
+Strict OS-sandboxed Codex compatibility remains deferred. Trusted-local Codex is an explicit opt-in
+that bypasses Codex's sandbox and approval enforcement. Hall prevents unsafe persistence categories
+such as raw stdout/stderr, environment maps, arbitrary provider payloads, and provider auth files,
+but does not claim generic secret detection.
 
-### Security Limitations
+## Current Project Status
 
-Hall binds locally to `127.0.0.1` and is still a prototype. It has no production authentication
-layer. SQLite durability is optional. Phase 16 worktrees are cleaned up automatically — after
-artifact persistence at runtime, and via restart reconciliation for anything a crash interrupted —
-but cleanup is deliberately conservative: Git remains the primary removal mechanism whenever it
-still has a registration to act on (`git worktree remove --force`, never a recursive filesystem
-delete); only once Git no longer registers a path at all may Hall remove what remains of it itself,
-and only an exact, freshly-revalidated, provably empty top-level directory — never a recursive
-delete, never `fs.rm`, never `git worktree prune`/`git clean`. A non-empty residual directory, a
-symlink/junction, or any path whose identity cannot be proven fresh is retained, not deleted, and
-cleanup fails closed with a bounded code; restart reconciliation converges a `cleanup_failed` record
-left in exactly this state to `cleaned` using the identical checks. A `--data-dir` durably remembers
-the `--agent-worktree-root` it was first started with, the same way it already remembers
-`--workspace-root`; reusing that data directory against a different (or omitted) worktree root fails
-startup closed rather than silently reconciling — or failing to reconcile — the wrong set of
-worktrees. Git worktree registration inspection uses one strict, NUL-delimited parser everywhere a
-registration list is read, so malformed, incomplete, or unexpectedly structured Git output is never
-silently treated as "no registrations."
+Hall of Wisdom is a working local alpha. The Windows onboarding milestone is complete: users can
+install, persist configuration, launch Hall, configure providers, and shut down cleanly through the
+root PowerShell scripts.
 
-**Strict, OS-sandboxed Codex isolation remains deferred as optional future hardening and stays
-fail-closed.** Exact equivalence for the real `codex exec --sandbox workspace-write` policy against
-Hall's zero-model helper probe was never proven, and strict mode is not a near-term goal — it is not
-required for normal application functionality. Trusted-local Codex mode is separate and explicitly
-opt-in: it bypasses Codex's sandbox and approval enforcement and runs with the Hall Core process
-user's filesystem permissions. Do not confuse trusted-local with strict isolated mode. Codex worktree
-preparation recognizes exactly the standard Git LFS checkout-filter profile (by key and value, never
-by name alone) and disables automatic LFS smudge/download for agent worktrees; every other checkout
-filter is still rejected, and Hall never installs, configures, or invokes Git LFS itself.
+Hermes Router integration is complete for the current alpha scope, including runtime/router
+detection, validated execution and event handling, cancellation, Hall-owned isolated-worktree
+routing, artifacts/recovery integration, and Providers onboarding. Hermes becomes assignable only
+when its runtime is healthy and Hall's durable isolation prerequisites are active.
 
-Hall does not claim generic secret detection. It prevents unsafe storage categories such as raw
-stdout, raw stderr, raw command lines, environment maps, arbitrary provider payloads, and provider
-authentication files.
-
-### Phase Roadmap
-
-Completed major phases include the monorepo foundation, adapter SDK, Mock Agent, Hall Runner, Hall
-Core, Hall Web, Claude Code and Codex adapters, routing, comparison worktrees, durable SQLite
-recovery, CEO planning, autonomous CEO plan execution, Hall-owned agent worktrees, bounded execution
-artifacts, isolated orchestration, strict isolated Codex compatibility infrastructure, restart-safe
-worktree reconciliation and cleanup (Phase 16.5), Codex trusted-local production readiness with Git
-LFS worktree compatibility (Phase 16.6), and Phase 17's onboarding milestone (below). The Phase 16
-milestone is complete.
-
-**Phase 17 — Windows Onboarding (complete):**
-
-- **17.1 — Persistent Hall Configuration & Interactive Installer.** `.\install.ps1` and
-  `@hall-of-wisdom/hall-config` (see
-  [`0017-persistent-hall-configuration.md`](docs/architecture/0017-persistent-hall-configuration.md)).
-- **17.2 — Provider Connection & Authentication UX.** The Providers page, guide-only Connect (see
-  [`0018-provider-connection-onboarding.md`](docs/architecture/0018-provider-connection-onboarding.md)).
-- **17.3 — One-Command Hall Launcher.** `.\start.ps1` (see
-  [`0019-one-command-hall-launcher.md`](docs/architecture/0019-one-command-hall-launcher.md)).
-- **17.4 — User Documentation & Phase 17 Release Verification.** This README, plus an end-to-end
-  release verification of install → persisted config → launcher → browser-accessible Hall →
-  Providers page → clean shutdown, run against disposable configuration. The installer and launcher
-  unit test suites (`scripts/install/tests/`, `scripts/launch/tests/`) pass on both `pwsh` and
-  Windows PowerShell 5.1, as they already did before this phase; the new chained release-verification
-  smoke test itself runs under `pwsh` only.
-
-Last Completed and Merged Phase:
-
-- Phase 17.4 — User Documentation & Phase 17 Release Verification (closes the Phase 17 milestone)
-
-Deferred future work includes strict, OS-sandboxed Codex isolation (optional future hardening,
-fail-closed and unclaimed unless a future phase proves exact policy equivalence — not required for
-normal application functionality), additional coding-agent adapters, production authentication,
-richer policy controls, public artifact routes/UI, merge workflows, and deployment integrations.
+The project is not production-hardened. Future work may include stronger authentication, richer
+policy controls, public artifact workflows, merge flows, and deployment integrations; no additional
+development phase is implied by this status summary.
