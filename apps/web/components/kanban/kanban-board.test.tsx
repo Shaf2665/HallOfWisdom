@@ -411,6 +411,7 @@ describe("KanbanBoard", () => {
             mcp: false,
             acp: false,
           },
+          installed: true,
           availability: "available",
           declaredCapabilities: ["structured.events", "cancellation"],
           assignable: true,
