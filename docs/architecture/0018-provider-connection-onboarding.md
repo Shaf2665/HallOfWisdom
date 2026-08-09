@@ -37,7 +37,7 @@ existing list route's summary-construction logic into a shared `buildAdapterSumm
 by duplicating detection logic.
 
 **"Connect" is guide-only, not launch.** It opens a static, client-rendered panel — the provider's
-own official login command (`claude login` / `codex login`), a copy button, and plain-language
+own official login command (`claude auth login` / `codex login`), a copy button, and plain-language
 steps — with no server call and nothing spawned by Hall Core. This was a deliberate choice: neither
 CLI's login flow had been probed in this codebase for exactly how it behaves end-to-end (browser
 OAuth vs. an interactive terminal), and Hall must never become a party to any part of a

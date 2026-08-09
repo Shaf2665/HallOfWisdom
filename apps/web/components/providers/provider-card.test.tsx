@@ -93,7 +93,7 @@ describe("ProviderCard", () => {
       />,
     );
     await user.click(screen.getByRole("button", { name: "Connect" }));
-    expect(screen.getByText("claude login")).toBeInTheDocument();
+    expect(screen.getByText("claude auth login")).toBeInTheDocument();
   });
 
   it("never shows a Connect button for an adapter with no known login command", () => {

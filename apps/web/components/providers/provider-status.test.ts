@@ -85,7 +85,7 @@ describe("deriveGuidanceText", () => {
 
 describe("connectCommandFor", () => {
   it("returns the official login command for Claude Code", () => {
-    expect(connectCommandFor("hall.claude-code")).toBe("claude login");
+    expect(connectCommandFor("hall.claude-code")).toBe("claude auth login");
   });
 
   it("returns the official login command for Codex", () => {

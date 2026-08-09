@@ -31,7 +31,7 @@ export function deriveGuidanceText(adapter: AdapterSummary): string {
 }
 
 const CONNECT_COMMAND_BY_ADAPTER_ID: Record<string, string> = {
-  "hall.claude-code": "claude login",
+  "hall.claude-code": "claude auth login",
   "hall.codex": "codex login",
 };
 

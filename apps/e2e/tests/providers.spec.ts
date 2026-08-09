@@ -59,7 +59,7 @@ test.describe("Providers page", () => {
     });
 
     await claudeCard.getByRole("button", { name: "Connect" }).click();
-    await expect(claudeCard.getByText("claude login")).toBeVisible();
+    await expect(claudeCard.getByText("claude auth login")).toBeVisible();
     expect(apiRequests).toEqual([]);
   });
 
