@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import type { DetectionProcessRunner } from "@hall-of-wisdom/hermes-router-adapter";
 import { registerHermesRouterAdapter } from "./hermes-router-composition-root.js";
-import { createServerComposition } from "./server-composition.js";
+import {
+  createServerComposition,
+  DEFAULT_DURABLE_ISOLATED_AGENT_ADAPTER_IDS,
+} from "./server-composition.js";
 import { DEFAULT_LIMITS } from "../config/server-config.js";
 
 describe("registerHermesRouterAdapter", () => {
@@ -54,5 +57,13 @@ describe("registerHermesRouterAdapter", () => {
     expect(
       composition.registry.listDescriptors().map((descriptor) => descriptor.adapterId),
     ).toContain("hall.hermes-router");
+  });
+
+  it("registers Hermes beside Codex in the existing durable isolation policy", () => {
+    expect(DEFAULT_DURABLE_ISOLATED_AGENT_ADAPTER_IDS).toEqual([
+      "hall.codex",
+      "hall.hermes-router",
+    ]);
+    expect(DEFAULT_DURABLE_ISOLATED_AGENT_ADAPTER_IDS).not.toContain("hall.claude-code");
   });
 });
