@@ -8,9 +8,10 @@ import {
 } from "@hall-of-wisdom/agent-adapter-sdk";
 import type { CapabilityObservation } from "@hall-of-wisdom/protocol";
 import { HERMES_RUNTIME_CAPABILITIES } from "./descriptor.js";
+import { HERMES_PROTOCOL_VERSION, hermesRuntimeVersionSchema } from "./hermes-protocol.js";
 import { nodeDetectionProcessRunner, type DetectionProcessRunner } from "./process-runner.js";
 
-export const HERMES_PROTOCOL_VERSION = "hermes-agent/v1";
+export { HERMES_PROTOCOL_VERSION } from "./hermes-protocol.js";
 export const HERMES_RUNNER_FILENAME = "hermes_agent_runner.py";
 export const DEFAULT_HERMES_PYTHON = "python";
 export const DEFAULT_HERMES_DETECTION_TIMEOUT_MS = 5000;
@@ -25,12 +26,6 @@ const DETECTION_FAILED_MESSAGE = "Hermes coding runtime detection could not be v
 const ROUTER_UNAVAILABLE_MESSAGE =
   "Hermes coding runtime is installed but its configured router is unavailable.";
 
-const runtimeVersionSchema = z
-  .string()
-  .min(1)
-  .max(64)
-  .regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
-
 const capabilitySchema = z.enum(HERMES_RUNTIME_CAPABILITIES);
 const exactCapabilitiesSchema = z
   .array(capabilitySchema)
@@ -43,7 +38,7 @@ const exactCapabilitiesSchema = z
 
 const detectBaseShape = {
   protocol: z.literal(HERMES_PROTOCOL_VERSION),
-  runtime_version: runtimeVersionSchema,
+  runtime_version: hermesRuntimeVersionSchema,
 };
 
 const availableDetectDocumentSchema = z

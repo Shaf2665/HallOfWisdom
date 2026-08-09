@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 const hermesRouterAdapter = await import("@hall-of-wisdom/hermes-router-adapter");
 
 assert.equal(typeof hermesRouterAdapter.HermesRouterAdapter, "function");
+assert.equal(typeof hermesRouterAdapter.startHermesExecutionTransport, "function");
+assert.equal(typeof hermesRouterAdapter.HermesJsonlParser, "function");
 assert.equal(hermesRouterAdapter.hermesRouterDescriptor.adapterId, "hall.hermes-router");
 assert.equal(hermesRouterAdapter.hermesRouterDescriptor.supportedAgent.agentId, "hermes-router");
 
