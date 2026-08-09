@@ -15,11 +15,12 @@ function Invoke-HallConfigCli {
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
         [Parameter(Mandatory)][ValidateSet("status", "validate", "save")][string]$Command,
-        [Parameter(Mandatory)][string]$ConfigPath,
+        [string]$ConfigPath,
         [string]$CandidateJson
     )
     $cliPath = Get-HallConfigCliPath -RepoRoot $RepoRoot
-    $arguments = @($cliPath, $Command, "--path", $ConfigPath)
+    $arguments = @($cliPath, $Command)
+    if ($ConfigPath) { $arguments += @("--path", $ConfigPath) }
 
     # Windows PowerShell 5.1 defaults $OutputEncoding to ASCIIEncoding, so
     # every non-ASCII character in piped stdin (e.g. a Windows user name
@@ -68,16 +69,16 @@ function Invoke-HallConfigCli {
 }
 
 function Invoke-HallConfigStatus {
-    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$ConfigPath)
+    param([Parameter(Mandatory)][string]$RepoRoot, [string]$ConfigPath)
     (Invoke-HallConfigCli -RepoRoot $RepoRoot -Command "status" -ConfigPath $ConfigPath).Result
 }
 
 function Invoke-HallConfigValidate {
-    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$ConfigPath, [Parameter(Mandatory)]$Candidate)
+    param([Parameter(Mandatory)][string]$RepoRoot, [string]$ConfigPath, [Parameter(Mandatory)]$Candidate)
     Invoke-HallConfigCli -RepoRoot $RepoRoot -Command "validate" -ConfigPath $ConfigPath -CandidateJson ($Candidate | ConvertTo-Json -Depth 10)
 }
 
 function Invoke-HallConfigSave {
-    param([Parameter(Mandatory)][string]$RepoRoot, [Parameter(Mandatory)][string]$ConfigPath, [Parameter(Mandatory)]$Candidate)
+    param([Parameter(Mandatory)][string]$RepoRoot, [string]$ConfigPath, [Parameter(Mandatory)]$Candidate)
     Invoke-HallConfigCli -RepoRoot $RepoRoot -Command "save" -ConfigPath $ConfigPath -CandidateJson ($Candidate | ConvertTo-Json -Depth 10)
 }
