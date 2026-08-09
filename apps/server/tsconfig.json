@@ -9,6 +9,7 @@
       "@hall-of-wisdom/agent-adapter-sdk": ["../../packages/agent-adapter-sdk/src/index.ts"],
       "@hall-of-wisdom/claude-code-adapter": ["../../adapters/claude-code/src/index.ts"],
       "@hall-of-wisdom/codex-adapter": ["../../adapters/codex/src/index.ts"],
+      "@hall-of-wisdom/hermes-router-adapter": ["../../adapters/hermes-router/src/index.ts"],
       "@hall-of-wisdom/hall-runner": ["../../runners/hall-runner/src/index.ts"],
       "@hall-of-wisdom/mock-agent": ["../../adapters/mock-agent/src/index.ts"],
       "@hall-of-wisdom/protocol": ["../../packages/protocol/src/index.ts"]

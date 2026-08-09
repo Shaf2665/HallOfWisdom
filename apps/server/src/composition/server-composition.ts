@@ -5,6 +5,7 @@ import {
 } from "./mock-agent-composition-root.js";
 import { registerClaudeCodeAdapter } from "./claude-code-composition-root.js";
 import { registerCodexAdapter } from "./codex-composition-root.js";
+import { registerHermesRouterAdapter } from "./hermes-router-composition-root.js";
 import { createComparisonComposition } from "./comparison-composition-root.js";
 
 export type { ServerComposition, ServerCompositionOptions };
@@ -14,11 +15,12 @@ export type { ComparisonComposition } from "./comparison-composition-root.js";
  * The single Hall Core startup composition entry point. Assembles the
  * stores/orchestrator/buses via `createMockAgentServerComposition` (which
  * remains the only place that knows Mock Agent's own configuration) and
- * then registers Claude Code and Codex on the same `AgentRegistry` via
- * `registerClaudeCodeAdapter`/`registerCodexAdapter` (the only places that
- * know each adapter's own configuration). No adapter-specific composition
- * root knows about any other adapter; this function is the one place
- * that assembles all three onto one shared, provider-neutral registry.
+ * then registers Claude Code, Codex, and Hermes Router on the same
+ * `AgentRegistry` via their dedicated composition roots (the only places
+ * that know each adapter's own configuration). No adapter-specific
+ * composition root knows about any other adapter; this function is the
+ * one place that assembles all four onto one shared, provider-neutral
+ * registry.
  *
  * Phase 12 — the multi-agent comparison feature is layered on afterward,
  * only when `options.comparisonRoot` is supplied, reusing the exact same
@@ -43,6 +45,7 @@ export function createServerComposition(options: ServerCompositionOptions): Serv
     worktreeStore: composition.agentWorktreeStore,
     worktreeValidator: composition.agentWorktreeValidator,
   });
+  registerHermesRouterAdapter(composition.registry);
 
   if (options.comparisonRoot === undefined) {
     return composition;
