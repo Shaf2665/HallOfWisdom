@@ -86,6 +86,41 @@ export interface HermesDetectionOptions {
   readonly processRunner: DetectionProcessRunner;
 }
 
+export type HermesRuntimeConfigurationResolution =
+  | {
+      readonly ok: true;
+      readonly pythonExecutable: string;
+      readonly runnerPath: string;
+    }
+  | { readonly ok: false; readonly reason: "root_not_configured" | "runner_not_found" };
+
+export function resolveHermesRuntimeConfiguration(
+  options: Pick<HermesDetectionOptions, "platform" | "parentEnv" | "fs">,
+): HermesRuntimeConfigurationResolution {
+  const configuredRoot = options.parentEnv.HALL_HERMES_ROUTER_ROOT?.trim();
+  const pathApi = pathApiForPlatform(options.platform);
+  if (
+    configuredRoot === undefined ||
+    configuredRoot.length === 0 ||
+    !pathApi.isAbsolute(configuredRoot)
+  ) {
+    return { ok: false, reason: "root_not_configured" };
+  }
+
+  const runnerPath = pathApi.resolve(configuredRoot, HERMES_RUNNER_FILENAME);
+  if (!options.fs.isFile(runnerPath)) return { ok: false, reason: "runner_not_found" };
+
+  const configuredPython = options.parentEnv.HALL_HERMES_PYTHON?.trim();
+  return {
+    ok: true,
+    runnerPath,
+    pythonExecutable:
+      configuredPython === undefined || configuredPython.length === 0
+        ? DEFAULT_HERMES_PYTHON
+        : configuredPython,
+  };
+}
+
 function result(input: AgentDetectionResult): AgentDetectionResult {
   return parseAgentDetectionResult(input);
 }
@@ -144,29 +179,17 @@ function pathApiForPlatform(platform: NodeJS.Platform): PlatformPath {
 export async function detectHermesRouter(
   options: HermesDetectionOptions,
 ): Promise<AgentDetectionResult> {
-  const configuredRoot = options.parentEnv.HALL_HERMES_ROUTER_ROOT?.trim();
-  const pathApi = pathApiForPlatform(options.platform);
-  if (
-    configuredRoot === undefined ||
-    configuredRoot.length === 0 ||
-    !pathApi.isAbsolute(configuredRoot)
-  ) {
-    return unavailable(ROOT_NOT_CONFIGURED_MESSAGE);
+  const configuration = resolveHermesRuntimeConfiguration(options);
+  if (!configuration.ok) {
+    return unavailable(
+      configuration.reason === "root_not_configured"
+        ? ROOT_NOT_CONFIGURED_MESSAGE
+        : RUNNER_NOT_FOUND_MESSAGE,
+    );
   }
-
-  const runnerPath = pathApi.resolve(configuredRoot, HERMES_RUNNER_FILENAME);
-  if (!options.fs.isFile(runnerPath)) {
-    return unavailable(RUNNER_NOT_FOUND_MESSAGE);
-  }
-
-  const configuredPython = options.parentEnv.HALL_HERMES_PYTHON?.trim();
-  const pythonCommand =
-    configuredPython === undefined || configuredPython.length === 0
-      ? DEFAULT_HERMES_PYTHON
-      : configuredPython;
   const processResult = await options.processRunner.run({
-    executablePath: pythonCommand,
-    args: [runnerPath, "detect"],
+    executablePath: configuration.pythonExecutable,
+    args: [configuration.runnerPath, "detect"],
     cwd: tmpdir(),
     env: options.parentEnv,
     timeoutMs: DEFAULT_HERMES_DETECTION_TIMEOUT_MS,

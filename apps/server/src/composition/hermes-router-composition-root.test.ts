@@ -6,7 +6,7 @@ import { createServerComposition } from "./server-composition.js";
 import { DEFAULT_LIMITS } from "../config/server-config.js";
 
 describe("registerHermesRouterAdapter", () => {
-  it("registers exactly one detection-only Hermes adapter", async () => {
+  it("registers exactly one non-assignable Hermes adapter", async () => {
     const processRunner: DetectionProcessRunner = {
       run: () =>
         Promise.resolve({
