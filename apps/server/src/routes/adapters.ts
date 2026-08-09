@@ -43,8 +43,9 @@ export interface AdapterRoutesDeps {
  * field with its own contract (used by the Providers page,
  * `apps/web/components/providers/`, to explain WHY a provider isn't
  * connected), never a change to `limitationNotice`'s existing, narrower,
- * still-fully-tested contract. All three are omitted (not `false`/empty
- * string) when `detect()` throws — see `detectSafely` below.
+ * still-fully-tested contract. `installed` defaults to `false` when
+ * `detect()` throws; `statusMessage`/`detectedVersion` are omitted
+ * entirely (never a stand-in value) — see `detectSafely` below.
  *
  * Phase 11 additions follow the exact same safety discipline:
  * `capabilityObservations`/`executionTrust`/`limitations` are read

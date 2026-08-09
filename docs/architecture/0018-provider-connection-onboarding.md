@@ -24,7 +24,12 @@ value — previously it was blocked from reaching the client except in the narro
 `limitationNotice` case. This widening is safe because every `diagnosticMessage` in this codebase
 is a fixed, hand-authored, non-secret sentence by contract (`agent-adapter-sdk`'s own doc comment:
 adapters must never put unredacted output into this field) — never raw CLI output, a path, or a
-token. `limitationNotice`'s existing, narrower contract is unchanged.
+token. `limitationNotice`'s existing, narrower contract is unchanged. `installed` is a plain
+boolean with no such nuance. `detectedVersion` is the one exception worth naming explicitly: it
+*is* raw CLI stdout (each adapter's own `--version` output, first line, trimmed and capped at 64
+characters) rather than a hand-authored string — bounded and incapable of carrying a credential,
+but not "already contractually safe" in the same sense as the other two fields, so it deserves
+scrutiny if any adapter's version-string format ever changes.
 
 A new, narrow route, `GET /api/v1/adapters/:adapterId`, lets the page's per-provider Recheck
 button refresh one card without re-fetching or re-rendering the other — built by extracting the
