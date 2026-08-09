@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Detection-only adapter for the local Hermes Router coding runtime.",
+  "description": "Disabled Hall adapter with raw execution transport for the local Hermes Router coding runtime.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "sideEffects": false,
