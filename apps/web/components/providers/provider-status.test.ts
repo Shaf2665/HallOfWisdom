@@ -93,14 +93,16 @@ describe("connectCommandFor", () => {
   });
 
   it("returns undefined for an adapter with no known login flow", () => {
+    expect(connectCommandFor("hall.hermes-router")).toBeUndefined();
     expect(connectCommandFor("hall.mock-agent")).toBeUndefined();
   });
 });
 
 describe("isKnownProviderAdapter", () => {
-  it("is true for Claude Code and Codex", () => {
+  it("is true for Claude Code, Codex, and Hermes Router", () => {
     expect(isKnownProviderAdapter("hall.claude-code")).toBe(true);
     expect(isKnownProviderAdapter("hall.codex")).toBe(true);
+    expect(isKnownProviderAdapter("hall.hermes-router")).toBe(true);
   });
 
   it("is false for Mock Agent and any unrecognized adapter", () => {

@@ -53,10 +53,9 @@ are ready, and opens Hall in your browser automatically. See
 
 ### 5. Connect a provider
 
-Open the **Providers** page from the navigation bar. It shows Claude Code and Codex, each as
-**Connected** or **Not connected**, with plain-language guidance and a **Connect** button that
-shows the provider's own official sign-in command — Hall never touches your password, API key, or
-login session:
+Open the **Providers** page from the navigation bar. It shows Claude Code, Codex, and Hermes Router
+as **Connected** or **Not connected**, with provider-specific setup guidance. Hall never asks for
+or stores your credentials:
 
 - **Claude Code** is the recommended default provider. Connect shows `claude auth login`; run that
   command yourself in your own terminal.
@@ -65,8 +64,10 @@ login session:
   enforcement and runs with your own filesystem permissions. Only enable it (during `install.ps1`,
   step 3 above) if you understand and accept that; it is never turned on automatically just because
   Codex is authenticated.
+- **Hermes Router** uses environment configuration from the process that starts Hall Core. Expand
+  **Setup** for placeholder-only examples, restart Hall after changes, then click **Recheck**.
 
-After running the command in your terminal, click **Recheck** on the Providers page to confirm the
+After completing the provider's setup, click **Recheck** on the Providers page to confirm the
 connection. See
 [`docs/architecture/0018-provider-connection-onboarding.md`](docs/architecture/0018-provider-connection-onboarding.md).
 

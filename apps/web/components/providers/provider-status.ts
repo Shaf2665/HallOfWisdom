@@ -35,6 +35,8 @@ const CONNECT_COMMAND_BY_ADAPTER_ID: Record<string, string> = {
   "hall.codex": "codex login",
 };
 
+export const HERMES_ROUTER_ADAPTER_ID = "hall.hermes-router";
+
 /**
  * The provider's own official login command — public documentation-level
  * knowledge, not detection logic. Returns `undefined` for an adapter with
@@ -45,13 +47,16 @@ export function connectCommandFor(adapterId: string): string | undefined {
   return CONNECT_COMMAND_BY_ADAPTER_ID[adapterId];
 }
 
-const KNOWN_PROVIDER_ADAPTER_IDS: readonly string[] = ["hall.claude-code", "hall.codex"];
+const KNOWN_PROVIDER_ADAPTER_IDS: readonly string[] = [
+  "hall.claude-code",
+  "hall.codex",
+  HERMES_ROUTER_ADAPTER_ID,
+];
 
 /**
- * The Providers page shows exactly Claude Code and Codex, matching the
- * target UX. Mock Agent and any future non-provider adapter are never
- * shown here — they belong on the `/agents` capability-comparison page
- * instead, which this phase does not modify.
+ * The Providers page shows exactly the supported external providers.
+ * Mock Agent and any future non-provider adapter are never shown here —
+ * they belong on the `/agents` capability-comparison page instead.
  */
 export function isKnownProviderAdapter(adapterId: string): boolean {
   return KNOWN_PROVIDER_ADAPTER_IDS.includes(adapterId);
