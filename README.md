@@ -165,6 +165,7 @@ Key architecture documents:
 - [`docs/architecture/0016-codex-worktree-execution.md`](docs/architecture/0016-codex-worktree-execution.md)
 - [`docs/architecture/0017-persistent-hall-configuration.md`](docs/architecture/0017-persistent-hall-configuration.md)
 - [`docs/architecture/0018-provider-connection-onboarding.md`](docs/architecture/0018-provider-connection-onboarding.md)
+- [`docs/architecture/0019-one-command-hall-launcher.md`](docs/architecture/0019-one-command-hall-launcher.md)
 
 Phase 16 dependency direction:
 
