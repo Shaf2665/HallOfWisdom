@@ -10,11 +10,12 @@ const idSchema = z
   .min(1)
   .max(128)
   .refine((value) => value.trim().length > 0);
-const toolNameSchema = z
-  .string()
-  .min(1)
-  .max(200)
-  .refine((value) => value.trim().length > 0);
+const toolNameSchema = z.enum([
+  "project_read",
+  "project_search",
+  "project_apply_patch",
+  "command_execute",
+]);
 const reasonSchema = z
   .string()
   .min(1)
@@ -36,7 +37,7 @@ const payloadSchemas = {
   "file.changed": z
     .object({
       path: z.string().min(1).max(1024),
-      operation: z.enum(["created", "modified", "deleted"]),
+      operation: z.enum(["created", "modified"]),
     })
     .strict(),
   "run.completed": z.object({ summary: z.string().max(20_000).optional() }).strict(),

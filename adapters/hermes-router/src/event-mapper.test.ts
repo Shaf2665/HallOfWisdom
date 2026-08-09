@@ -100,6 +100,68 @@ describe("HermesEventMapper", () => {
     });
   });
 
+  it.each(["project_read", "project_search", "project_apply_patch", "command_execute"] as const)(
+    "maps the supported Hermes tool name %s",
+    (toolName) => {
+      const subject = mapper();
+      subject.mapEvent(rawEvent(0, "run.started", {}));
+      const started = subject.mapEvent(
+        rawEvent(1, "tool.started", { tool_call_id: "call-1", tool_name: toolName }),
+      );
+      const completed = subject.mapEvent(
+        rawEvent(2, "tool.completed", {
+          tool_call_id: "call-1",
+          tool_name: toolName,
+          success: true,
+        }),
+      );
+
+      expect(started.payload).toEqual({ toolCallId: "call-1", toolName });
+      expect(completed.payload).toMatchObject({
+        toolCallId: "call-1",
+        toolName,
+        success: true,
+      });
+    },
+  );
+
+  it.each(["tool.started", "tool.completed"] as const)(
+    "rejects an arbitrary tool name in %s",
+    (type) => {
+      const subject = mapper();
+      subject.mapEvent(rawEvent(0, "run.started", {}));
+      expect(() =>
+        subject.mapEvent(
+          rawEvent(1, type, {
+            tool_call_id: "call-1",
+            tool_name: "arbitrary_provider_tool",
+            ...(type === "tool.completed" ? { success: true } : {}),
+          }),
+        ),
+      ).toThrow(HermesEventMappingError);
+    },
+  );
+
+  it.each(["created", "modified"] as const)(
+    "maps the supported Hermes file operation %s",
+    (operation) => {
+      const subject = mapper();
+      subject.mapEvent(rawEvent(0, "run.started", {}));
+      const event = subject.mapEvent(
+        rawEvent(1, "file.changed", { path: "src/app.ts", operation }),
+      );
+      expect(event.payload).toEqual({ path: "src/app.ts", operation });
+    },
+  );
+
+  it("rejects the unsupported deleted file operation", () => {
+    const subject = mapper();
+    subject.mapEvent(rawEvent(0, "run.started", {}));
+    expect(() =>
+      subject.mapEvent(rawEvent(1, "file.changed", { path: "src/app.ts", operation: "deleted" })),
+    ).toThrow(HermesEventMappingError);
+  });
+
   it.each([
     "/etc/passwd",
     "C:\\Windows\\system.ini",

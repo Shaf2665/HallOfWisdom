@@ -202,6 +202,20 @@ describe("HermesRun lifecycle", () => {
     expect(fake.cancelCount).toBe(1);
   });
 
+  it("maps unsupported Hermes deletion to HERMES_INVALID_EVENT", async () => {
+    const fake = new FakeTransportRun();
+    const { run } = runWith(fake);
+    const eventsPromise = collect(run.events);
+    fake.emit(rawEvent(0, "run.started"));
+    fake.emit(rawEvent(1, "file.changed", { path: "src/app.ts", operation: "deleted" }));
+
+    expect((await eventsPromise).at(-1)).toMatchObject({
+      type: "run.failed",
+      payload: { failure: { code: "HERMES_INVALID_EVENT" } },
+    });
+    expect(fake.cancelCount).toBe(1);
+  });
+
   it("cancels before iteration without starting transport", async () => {
     const fake = new FakeTransportRun();
     const { run, calls } = runWith(fake);
