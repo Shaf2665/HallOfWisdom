@@ -48,10 +48,11 @@ together until the user stops the launcher.
   (justified there *only* because it must run before any build exists, so the keep/reconfigure
   menu can appear first). `start.ps1` has no such ordering constraint (it assumes `install.ps1` has
   already run) and must not duplicate that path logic.
-- **`apps/web/.env.local`** is an existing, gitignored, documented mechanism
-  (`apps/web/.env.local.example`, ADR 0005) for overriding `NEXT_PUBLIC_HALL_CORE_URL` at Next.js
-  build time. `install.ps1`'s `pnpm build` step does not set it, so today's build is only ever
-  correct for the default Hall Core port (4310).
+- **`NEXT_PUBLIC_HALL_CORE_URL`** is read from `process.env` at Next.js build time (`.env.local` —
+  `apps/web/.env.local.example`, ADR 0005 — is only one *source* Next.js merges into that
+  environment; a process env var set directly on the spawned build works identically, without
+  writing any file). `install.ps1`'s `pnpm build` step does not set it, so today's build is only
+  ever correct for the default Hall Core port (4310).
 - **`scripts/install/tests/*.Tests.ps1` + `run-tests.ps1` + `TestHelpers.ps1`** establish this
   project's hand-rolled (non-Pester) PowerShell test convention: fake Node fixture scripts standing
   in for the real binaries, `Assert-True`/`Assert-False`/`Assert-Equal`/`Assert-Throws` helpers, one
@@ -67,20 +68,23 @@ together until the user stops the launcher.
    the `next` binary directly (mirroring `spawnDurableHallWeb`'s approach) — never through
    `apps/web`'s `package.json` `start` script, whose hardcoded `--port 3000` cannot be safely
    overridden by appending arguments.
-2. **Build-freshness proof is a launcher-owned marker file inside `apps/web/.next`, not
-   `.env.local`'s content.** `.env.local` can be stale relative to the last actual build (hand-edited,
-   or left over from a build that failed partway) — trusting its content alone as proof "the current
-   `.next` output matches" is unsound. The launcher writes `apps/web/.next/hall-launcher-build-marker.json`
-   (`{ "hallCoreUrl": "http://127.0.0.1:<port>" }`) itself, immediately after a build it ran
-   completes successfully. Before starting Hall Web, the launcher rebuilds (write/update
-   `.env.local`, run `pnpm --filter @hall-of-wisdom/web run build`, then rewrite the marker) if and
-   only if the marker is missing or its recorded URL differs from the persisted `hallCorePort`'s
-   expected URL. **Accepted consequence:** the very first `.\start.ps1` run after `.\install.ps1`
-   will always trigger exactly one rebuild to create the marker — even on the common default-port
-   path, where the pre-existing `install.ps1`-built `.next` output was already correct — because an
-   unmarked `.next` build carries no evidence of what it was built with. This is a one-time cost
-   (the marker exists afterward) and strictly safer than trusting an unmarked build; not treated as
-   a defect.
+2. **Build-freshness proof is a launcher-owned marker file inside `apps/web/.next`; no file is
+   written under `apps/web` itself.** The launcher never touches `.env.local` — it passes
+   `NEXT_PUBLIC_HALL_CORE_URL` directly in the *environment* of the spawned `pnpm --filter
+   @hall-of-wisdom/web run build` process (and, for consistency, the spawned `next start` process
+   too), which Next.js inlines into the client bundle exactly as it would from a `.env.local` file,
+   with no file left in the working tree to go stale, get hand-edited, or need cleanup. The launcher
+   writes `apps/web/.next/hall-launcher-build-marker.json` (`{ "hallCoreUrl": "http://127.0.0.1:<port>"
+   }`) itself, immediately after a build it ran completes successfully — this is the sole source of
+   truth for "what URL is actually baked into the current `.next` output," since nothing else
+   records that fact anywhere. Before starting Hall Web, the launcher rebuilds (spawn the build with
+   the env var set, then rewrite the marker) if and only if the marker is missing or its recorded
+   URL differs from the persisted `hallCorePort`'s expected URL. **Accepted consequence:** the very
+   first `.\start.ps1` run after `.\install.ps1` will always trigger exactly one rebuild to create
+   the marker — even on the common default-port path, where the pre-existing `install.ps1`-built
+   `.next` output was already correct — because an unmarked `.next` build carries no evidence of
+   what it was built with. This is a one-time cost (the marker exists afterward) and strictly safer
+   than trusting an unmarked build; not treated as a defect.
 3. **`scripts/install/HallConfigCli.ps1` is minimally adapted, not duplicated.** `Invoke-HallConfigCli`'s
    `$ConfigPath` parameter changes from mandatory to optional; when omitted, `--path` is not
    appended to the `node dist/cli.js` invocation at all, letting `run-cli.ts`'s own
@@ -94,11 +98,17 @@ together until the user stops the launcher.
    A separate `scripts/launch/tests/end-to-end-smoke-test.ps1` (not matching `*.Tests.ps1`, run
    explicitly, mirroring `install`'s own smoke test's role and its dual-host pattern) does a real
    build-artifact launch against an isolated, temp-directory persisted config, and verifies
-   lifecycle/shutdown — including a **real** Ctrl+C, sent via the Win32 `GenerateConsoleCtrlEvent`
-   API (the standard, documented technique for delivering an actual console Ctrl+C to a child
-   process from an automated test — not achievable with a plain .NET call alone) — under both
-   `pwsh` and `powershell.exe`, asserting no orphaned Hall Core/Hall Web process remains afterward
-   on either host.
+   lifecycle/shutdown — including a **real** console signal delivered to the launcher child process.
+   `GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid)` cannot target an arbitrary process group on
+   Windows — `CTRL_C_EVENT` only ever reaches the caller's own console group (group ID `0`). The
+   correct, documented technique: spawn the `start.ps1` child under `CREATE_NEW_PROCESS_GROUP`
+   (via a small `Add-Type` P/Invoke helper — `System.Diagnostics.Process` exposes no managed way to
+   set Win32 creation flags), then call `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, childPid)` to
+   target that specific group. `System.Console`'s `CancelKeyPress` event fires identically for
+   `ConsoleSpecialKey.ControlC` *and* `ControlBreak` — so `Register-HallLauncherCtrlCHandler`'s
+   single handler, exactly as designed for real interactive Ctrl+C, is what the test exercises;
+   nothing product-side is Ctrl+Break-specific. Verified under both `pwsh` and `powershell.exe`,
+   asserting no orphaned Hall Core/Hall Web process remains afterward on either host.
 
 ## 4. Architecture
 
@@ -115,10 +125,12 @@ plus the existing `scripts/install/HallConfigCli.ps1`:
   occupied. Called for both `hallCorePort` and `hallWebPort` before spawning anything.
 - **`scripts/launch/WebBuildEnv.ps1`** — build-freshness (decision 2): `Get-HallWebBuildMarkerPath`,
   `Get-HallWebBuildMarker` (reads/parses the marker, `$null` if absent/unreadable),
-  `Set-HallWebEnvLocal -HallCoreUrl <url>` (writes `apps/web/.env.local`),
   `Invoke-HallWebBuildIfStale -RepoRoot $RepoRoot -HallCoreUrl <url>` (the orchestrating function:
-  compares the marker, rebuilds + rewrites `.env.local` + rewrites the marker only if needed, throws
-  a clear error if the rebuild itself fails — "missing/invalid build" failure mode).
+  compares the marker; if missing or stale, spawns `pnpm --filter @hall-of-wisdom/web run build`
+  with `NEXT_PUBLIC_HALL_CORE_URL=<url>` set in that process's environment only — no file written
+  under `apps/web` — and, only once that build exits 0, writes the marker; throws a clear error if
+  the build itself fails, and the marker is never written in that case — "missing/invalid build"
+  failure mode).
 - **`scripts/launch/ProcessManagement.ps1`** — the core piece:
   - `Start-HallCoreProcess -RepoRoot $RepoRoot` — spawns `node apps/server/dist/server.js` with
     **zero arguments** (decision: reuse `tryLoadConfig()`'s own resolution, §2) via
@@ -129,10 +141,12 @@ plus the existing `scripts/install/HallConfigCli.ps1`:
     `Get-HallServerDistPath` from `scripts/install/Verification.ps1` — no duplication).
   - `Start-HallWebProcess -RepoRoot $RepoRoot -Port <hallWebPort> -HallCoreUrl <url>` — spawns the
     `next` binary directly (decision 1) with `["start", "--hostname", "127.0.0.1", "--port",
-    "<port>"]`, `cwd` = `apps/web`, `NEXT_PUBLIC_HALL_CORE_URL` set in its environment for
-    consistency with the marker (Next's production server does not re-read `NEXT_PUBLIC_*` at
-    runtime, but setting it costs nothing and matches the dev-mode harness precedent). Throws a
-    clear error if the `next` binary or `.next` build output is missing.
+    "<port>"]`, `cwd` = `apps/web`, `NEXT_PUBLIC_HALL_CORE_URL` set in its environment (matching
+    decision 3's env-only approach — Next's production server does not re-read `NEXT_PUBLIC_*` at
+    runtime since it's already inlined into the built client bundle, but setting it on `next start`
+    too costs nothing, keeps every spawned Hall Web process's environment consistent regardless of
+    phase, and matches the dev-mode harness precedent). Throws a clear error if the `next` binary or
+    `.next` build output is missing.
   - `Wait-HallCoreHealthy -Port <n> -TimeoutSeconds <t>` / `Wait-HallWebReady -Port <n>
     -TimeoutSeconds <t>` — polling loops (250ms interval) against `/api/v1/health` and Hall Web's
     root `/`, respectively (same endpoints the e2e harness already polls), throwing a clear timeout
@@ -181,10 +195,13 @@ config fields. No Phase 17.4 (this phase does not attempt anything beyond "start
 - **`scripts/launch/tests/*.Tests.ps1`** (fixture-based, fast, run via `scripts/launch/tests/run-tests.ps1`):
   - `PortCheck.Tests.ps1` — a real bound TCP listener makes `Test-HallPortFree` throw; an unbound
     port passes.
-  - `WebBuildEnv.Tests.ps1` — marker absent → rebuild triggered (fake `pnpm`-equivalent build
-    script writes a sentinel); marker present with matching URL → no rebuild; marker present with a
-    *different* URL (simulating a `hallCorePort` change since the last launch) → rebuild triggered;
-    a failing fake build → clear thrown error, marker not written.
+  - `WebBuildEnv.Tests.ps1` — marker absent → rebuild triggered (a fake build script, standing in
+    for `pnpm run build`, asserts it actually received `NEXT_PUBLIC_HALL_CORE_URL` in its own
+    process environment — not a file — before writing its sentinel, and confirms no `.env.local` is
+    ever created); marker present with matching URL → no rebuild (fake build never invoked); marker
+    present with a *different* URL (simulating a `hallCorePort` change since the last launch) →
+    rebuild triggered; a failing fake build (non-zero exit) → clear thrown error, marker not
+    written/not updated.
   - `ProcessManagement.Tests.ps1` — a fake Hall-Core-shaped Node fixture (opens a port, serves
     `/api/v1/health`, honors the `SHUTDOWN` stdin line) and a fake Hall-Web-shaped fixture (opens a
     port, serves `/`, ignores stdin — proving the `taskkill` fallback path is what actually stops
@@ -206,12 +223,19 @@ config fields. No Phase 17.4 (this phase does not attempt anything beyond "start
   build), writes a real, isolated persisted config (its own `HALL_CONFIG_DIR` temp override, never
   the real user profile — same isolation `Invoke-HallVerifyOnly` already uses), runs the launcher's
   own functions to start both processes on non-default ports, confirms both become ready, then
-  sends a **real Ctrl+C** via `GenerateConsoleCtrlEvent` and confirms clean, orphan-free shutdown —
-  run once under `pwsh` and once under `powershell.exe` (Windows PowerShell 5.1), matching
-  `install`'s own dual-host precedent exactly. Also covers a non-default-port launch end to end
-  (satisfying "real persisted-config launch smoke" together with the isolated-config setup) and one
-  failure-injection case: Hall Web's port pre-occupied by a dummy listener, confirming Hall Core
-  (already started and healthy at that point) is torn down rather than left running alone.
+  sends a **real console signal** (`CREATE_NEW_PROCESS_GROUP` + targeted `CTRL_BREAK_EVENT`,
+  decision 4) and confirms clean, orphan-free shutdown — run once under `pwsh` and once under
+  `powershell.exe` (Windows PowerShell 5.1), matching `install`'s own dual-host precedent exactly.
+  Also covers a non-default-port launch end to end (satisfying "real persisted-config launch smoke"
+  together with the isolated-config setup) and one failure-injection case for the "one child fails,
+  clean up the other" requirement: port precheck happens before *any* process is spawned, so a
+  pre-occupied port can never reach the "Core already healthy, Web then fails" path — instead, Hall
+  Web is started pointed at the real, already-healthy Hall Core, then made to exit immediately with
+  a non-zero code right after spawn (a wrapper around the real `next` invocation that forces this
+  for the test, independent of port occupancy), simulating a genuine startup crash. The test asserts
+  `Wait-HallWebReady` surfaces that failure and that the already-running, already-healthy Hall Core
+  process is subsequently stopped (via the same `Stop-HallLauncherProcess` path, confirmed exited)
+  rather than left running alone.
 
 ## 7. Documentation
 
