@@ -42,6 +42,9 @@ try {
     Assert-Equal $false $status.exists "fake CLI status should report exists:false"
     Assert-Equal $configPath $status.path "status should echo back the --path argument exactly"
 
+    $statusNoPath = Invoke-HallConfigStatus -RepoRoot $fixtureRoot
+    Assert-True ($null -eq $statusNoPath.path) "status without -ConfigPath must omit --path, letting the CLI resolve its own canonical path (the fake CLI echoes back `$null when --path is absent)"
+
     $validCandidate = @{ schemaVersion = 1; workspaceRoot = "D:\HallOfWisdom" }
     $validateResult = Invoke-HallConfigValidate -RepoRoot $fixtureRoot -ConfigPath $configPath -Candidate $validCandidate
     Assert-Equal 0 $validateResult.ExitCode "a valid candidate should exit 0"
