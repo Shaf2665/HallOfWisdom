@@ -1,27 +1,108 @@
 # Hall of Wisdom
 
-Hall of Wisdom is a local, cross-platform Agent OS for coordinating coding agents against a user's own projects while keeping provider credentials on the user's machine.
+Hall of Wisdom is a local, cross-platform Agent OS for coordinating coding agents (Claude Code,
+Codex, and others) against your own projects — while keeping your provider credentials on your own
+machine. Hall never collects passwords, API keys, or subscription auth files; each agent runs
+through your own already-authenticated local CLI.
 
-## Installation / Quick Start
+This README's **Getting Started** section is the normal path for a Windows user: clone, install,
+start, connect a provider, run a task. Everything past that — manual CLI flags, architecture docs,
+package internals, security details — is for contributors and is clearly marked **For Developers**
+below.
 
-Requirements:
+## Getting Started
 
-- Node.js `>=24.11.0 <25`
-- pnpm `10.33.0`
-- Git — a version recent enough to support `git worktree list --porcelain -z` (confirmed against Git
-  2.54); Phase 16 isolated worktree execution fails closed with a bounded Git-failure code on a Git
-  too old to support it, never a silent permissive fallback
+### 1. Requirements
 
-**Recommended for most Windows users:** clone the repository, then run `.\install.ps1` from the
-repository root. It checks prerequisites, prompts for your workspace/data/agent-worktree
-locations, installs dependencies, builds Hall, saves your configuration, and verifies the
-installation — see
+- [Node.js](https://nodejs.org/) `>=24.11.0 <25`
+- [pnpm](https://pnpm.io/installation) `10.33.0`
+- [Git](https://git-scm.com/downloads) — recent enough to support `git worktree list --porcelain -z`
+  (confirmed against Git 2.54)
+- Windows 10/11 (the installer and launcher below are PowerShell scripts)
+
+### 2. Clone the repository
+
+```powershell
+git clone https://github.com/Shaf2665/HallOfWisdom.git
+cd HallOfWisdom
+```
+
+### 3. Install
+
+```powershell
+.\install.ps1
+```
+
+This checks your prerequisites, asks where you keep your projects (and, if you want, a data
+directory and an agent-worktree directory), asks whether to enable Codex trusted-local mode
+(default **No** — this is where that opt-in actually happens; see step 5 below for what it means),
+installs dependencies, builds Hall, and saves your answers so you never have to type them again. Run
+it again any time — it detects an existing configuration and offers to keep it (and re-verify the
+install) or reconfigure it. See
 [`docs/architecture/0017-persistent-hall-configuration.md`](docs/architecture/0017-persistent-hall-configuration.md).
-Once you've run it, Hall Core no longer needs any of the manual `--workspace-root` /
-`--data-dir` / `--agent-worktree-root` flags shown below.
 
-The manual steps below remain fully supported for development and are still how you'd start Hall
-Core with CLI flags that override your saved configuration for a single run.
+### 4. Start Hall
+
+```powershell
+.\start.ps1
+```
+
+This loads the configuration `install.ps1` saved, starts Hall Core and Hall Web, waits until both
+are ready, and opens Hall in your browser automatically. See
+[`docs/architecture/0019-one-command-hall-launcher.md`](docs/architecture/0019-one-command-hall-launcher.md).
+
+### 5. Connect a provider
+
+Open the **Providers** page from the navigation bar. It shows Claude Code and Codex, each as
+**Connected** or **Not connected**, with plain-language guidance and a **Connect** button that
+shows the provider's own official sign-in command — Hall never touches your password, API key, or
+login session:
+
+- **Claude Code** is the recommended default provider. Connect shows `claude auth login`; run that
+  command yourself in your own terminal.
+- **Codex** connects via `codex login`, shown and run the same way. **Codex trusted-local mode is
+  explicit opt-in and is not OS-sandboxed** — it bypasses Codex's own sandbox and approval
+  enforcement and runs with your own filesystem permissions. Only enable it (during `install.ps1`,
+  step 3 above) if you understand and accept that; it is never turned on automatically just because
+  Codex is authenticated.
+
+After running the command in your terminal, click **Recheck** on the Providers page to confirm the
+connection. See
+[`docs/architecture/0018-provider-connection-onboarding.md`](docs/architecture/0018-provider-connection-onboarding.md).
+
+### 6. Create and run your first task
+
+From the **Task Console**, fill in **Create Task** — Project, Title, and **Agent** (pick a connected
+provider, or **Mock Agent** for a dry run that needs nothing connected; unavailable agents are
+greyed out) — and submit. The task is created already assigned to that agent, and its live event
+stream appears in the detail panel on the right of the Task Console. Go to the **Kanban Board**,
+find the card in the **Assigned** column, and click **Start task** (it asks you to confirm) to begin
+the run.
+
+### 7. Stop Hall
+
+Go back to the terminal where you ran `.\start.ps1` and press **Ctrl+C**. Both Hall Core and Hall
+Web are stopped cleanly — no processes are left running in the background.
+
+### 8. Troubleshooting
+
+- **`.\install.ps1` says a prerequisite is missing** — install (or upgrade) the tool it names from
+  the links in step 1, then run `.\install.ps1` again.
+- **`.\start.ps1` says a port is already in use** — something else is already listening on your
+  configured Hall Core/Hall Web port. Close it. (`install.ps1` doesn't currently prompt for a custom
+  port — the default ports are 4310 for Hall Core and 3000 for Hall Web.)
+- **`.\start.ps1` says a build is missing** — run `.\install.ps1` again; it rebuilds Hall.
+- **A provider shows "Not connected" after you ran its login command** — click **Recheck** on the
+  Providers page; if it's still not connected, re-run the command shown and check your terminal for
+  errors from the provider's own CLI.
+- **You want to start over** — run `.\install.ps1` again and choose "Reconfigure Hall."
+
+## For Developers
+
+Everything below this point is for contributors working on Hall itself, or for anyone who needs to
+start Hall Core/Hall Web manually with specific flags instead of through `install.ps1`/`start.ps1`.
+
+### Manual setup and manual startup
 
 ```powershell
 git clone https://github.com/Shaf2665/HallOfWisdom.git
@@ -74,9 +155,12 @@ pnpm --filter @hall-of-wisdom/hall-core run dev -- `
   --web-origin "http://127.0.0.1:3000"
 ```
 
-Once `--agent-worktree-root` has been used with a given `--data-dir`, every later startup against that same data directory must keep supplying the exact same root — a different root, or omitting the flag entirely, fails startup closed (see "Security Limitations" below).
+Once `--agent-worktree-root` has been used with a given `--data-dir`, every later startup against
+that same data directory must keep supplying the exact same root — a different root, or omitting
+the flag entirely, fails startup closed (see "Security Limitations" below).
 
-Trusted-local Codex mode is dangerous and optional. It bypasses Codex's own sandbox and approval enforcement, and should not be used as the default:
+Trusted-local Codex mode is dangerous and optional. It bypasses Codex's own sandbox and approval
+enforcement, and should not be used as the default:
 
 ```powershell
 pnpm --filter @hall-of-wisdom/hall-core run dev -- `
@@ -87,71 +171,32 @@ pnpm --filter @hall-of-wisdom/hall-core run dev -- `
   --enable-codex-trusted-local
 ```
 
-## Current Development Phase
+For an already-built Hall Core binary:
 
-Current Development Status: **Current Phase 16 milestone is complete. Phase 17 has not started.**
+```powershell
+pnpm --filter @hall-of-wisdom/hall-core run build
+node apps/server/dist/server.js `
+  --workspace-root "D:\HallOfWisdom" `
+  --port 4310 `
+  --mock-scenario success
+```
 
-Last Completed and Merged Phase: **Phase 16.6 — Codex Trusted-Local Production Readiness and Git LFS Worktree Compatibility**
+`node apps/server/dist/server.js` with **no flags at all** also works if you've already run
+`.\install.ps1` — it loads your saved configuration the same way `.\start.ps1` does.
 
-Phase 16.6 is merged, closing the Phase 16 milestone. It replaced the originally planned strict Codex sandbox-attestation work with a narrower, practical correction: **Claude Code** is verified working end to end and remains the recommended default provider for non-technical users. **Codex trusted-local** — the supported, practical way to run Codex today — is verified working through Hall-owned worktrees, including on machines where Git for Windows registers a standard Git LFS checkout filter (`filter.lfs.*`) at system scope, which previously caused every Codex worktree to fail closed with `GIT_CHECKOUT_FILTER_UNSUPPORTED` before Codex was ever invoked. Hall recognizes exactly the standard Git LFS profile (narrow, value-checked, never by filter name alone) and never automatically downloads or materializes LFS objects while preparing an agent worktree (`GIT_LFS_SKIP_SMUDGE=1`, scoped to the one checkout invocation). A worktree-cleanup edge case found during that same verification — an empty residual directory `git worktree remove --force` sometimes leaves behind even after genuinely succeeding — is also fixed, with restart reconciliation now converging it automatically. **Strict, OS-sandboxed Codex isolation remains deferred as optional future hardening and stays fail-closed** — Phase 16.6 makes no strict-mode support claim, and trusted-local's explicit startup opt-in is unchanged: only `--enable-codex-trusted-local` at Hall Core process start can enable it, never a browser request, task input, or project file. The Hall-owned worktree Codex trusted-local uses is a primary-checkout safety mechanism (so a task can never mutate the repository the operator is actually working in) — it is not an operating-system sandbox, and trusted-local still runs with the Hall Core process user's own filesystem permissions once Codex starts. Phase 17 has not started.
+### Features
 
-## Current Project Status
+Hall Core is a localhost-only Fastify HTTP and WebSocket server. It can create tasks, assign
+adapters, stream normalized events, store durable state when SQLite mode is enabled, run
+deterministic Mock Agent tasks, route by capability and trust, compare agents in isolated comparison
+worktrees, and drive approved CEO plan execution. Hall Web is a local Next.js dashboard for task,
+board, communication, providers, system, comparison, and CEO workflows.
 
-Implemented through Phase 16.6:
+Real provider adapters use the operator's locally installed CLIs and local subscription
+authentication. Hall does not collect provider credentials, API keys, auth files, or raw provider
+output.
 
-- TypeScript pnpm monorepo
-- provider-neutral protocol and adapter SDK
-- Mock Agent
-- Claude Code adapter
-- Codex adapter
-- Hall Runner
-- Hall Core
-- Hall Web
-- task console
-- Kanban board
-- communication boards
-- capability and trust-based routing
-- multi-agent comparison
-- optional SQLite durability
-- restart recovery
-- CEO planning, approval, and delegation
-- autonomous CEO plan execution and retry handling
-- Hall-owned isolated Git worktrees
-- immutable bounded execution artifacts
-- Phase 16.3 isolated orchestration
-- run-specific retry and cancellation fencing
-- Phase 16.4 strict isolated Codex compatibility infrastructure (still fail-closed; strict Codex isolation is now deferred as optional future hardening, not a near-term goal)
-- Phase 16.5 restart-safe worktree reconciliation and cleanup, including post-merge hardening of the configuration fingerprint and Git registration parsing (below)
-- Phase 16.6 Codex trusted-local production readiness: narrow, value-checked recognition of the standard Git LFS checkout-filter profile, skip-smudge scoped to the one checkout invocation, empty residual-worktree-directory cleanup hardening, and a verified real Codex trusted-local task through a Hall-owned worktree
-
-**Phase 16 final provider state:**
-
-- Claude Code is verified working end to end and remains the recommended default provider.
-- Codex trusted-local is verified working end to end and remains explicitly opt-in.
-- Codex trusted-local uses Hall-owned worktrees for primary-checkout safety — not an operating-system sandbox.
-- Standard Git LFS checkout filters are narrowly supported (by key and value, never by name alone).
-- Automatic Git LFS smudge/object materialization is disabled during Hall worktree checkout.
-- Durable execution artifacts and restart-safe worktree cleanup are implemented.
-- Empty residual worktree-directory cleanup is hardened, including restart convergence.
-- Strict, OS-sandboxed Codex execution remains unsupported and fail-closed.
-- Strict Codex isolation is deferred as optional future hardening, not required for normal application functionality.
-- Phase 17 has not started.
-
-Phase 16.5 makes isolated worktree lifecycle management restart-safe. After an isolated run reaches an authoritative terminal outcome (completed, failed, or cancelled), Hall Core persists (or idempotently confirms) the immutable execution artifact first and only then requests worktree cleanup — cleanup failure is fail-soft: it never changes the task's outcome, never touches the artifact, never blocks a governed retry, and leaves the worktree recoverable on the next restart. On every durable startup, after task/event reconciliation, Hall Core also reconciles every persisted agent worktree: an interrupted `creating` worktree is marked with a stable code and safely cleaned; `creation_failed`/`cleanup_pending` worktrees resume cleanup; `cleanup_failed` worktrees get one retry per boot; a `ready` worktree whose run already reached a terminal event gets its execution artifact reconstructed (only from exact durable evidence — immutable adapter/agent identity captured at worktree creation, never a newer retry's mutable assignment) and is then cleaned; a worktree lacking that immutable identity (a legacy row) is retained and reported blocked, never guessed at; a `cleaned` worktree whose path or Git registration unexpectedly reappears is reported, never deleted, pruned, or transitioned backward; and unrecognized directories or Git registrations under the owned root are counted as orphans and left untouched. Cleanup only ever removes an exact, safety-validated `wt_<id>` worktree through `git worktree remove --force` — never a recursive filesystem delete, never `git clean`/`git worktree prune`, never an unknown directory or registration.
-
-The durable configuration fingerprint that already scoped a `--data-dir` to its `--workspace-root`/`--comparison-root` now also scopes it to `--agent-worktree-root`: the first valid root supplied is recorded, a later startup with a different root (or no root at all, once one was recorded) fails closed, and a database with existing worktree rows but no recorded root first proves every one of those rows' reconstructed paths belongs to the newly supplied root before ever bootstrapping it — including when the root is omitted entirely: a database that already holds `agent_worktrees` rows but never got as far as recording a root now fails closed on an omitted root too, rather than silently composing no agent-worktree manager and leaving those rows permanently unreconciled. Every fingerprint write for one startup call (`workspaceRoot`/`comparisonRoot`/`agentWorktreeRoot` together) happens inside a single outer transaction, so a failure partway through can never leave one key durably recorded while another silently isn't. Restart reconciliation also inspects Git's own worktree registrations (through the same bounded Git runner, never a second ad hoc invocation, and through one strict parser shared by every registration-checking call site) alongside the filesystem, so a registration Git still remembers but Hall has no record of — or a `cleaned` worktree's registration reappearing — is detected and reported exactly like its filesystem counterpart, never silently missed. That parser reads Git's NUL-delimited `git worktree list --porcelain -z` output rather than the plain newline-oriented form, and fails closed (a bounded `GIT_WORKTREE_LIST_MALFORMED` code) on any output that does not exactly match Git's own byte structure — including an `exitCode: 0` response that looks superficially like success — rather than ever silently returning an empty or partial registration list. A dedicated real-process test (`pnpm verify:process-recovery`) proves the core recovery flow end to end through the actual built binary: a real completed task, a real Git worktree with no execution artifact yet, a real restart that recovers the artifact and safely removes the worktree, a second real restart that changes nothing further, and confirmation that neither the primary checkout nor an unrelated orphan directory was ever touched. A second real-process test proves the legacy-root-omission rejection itself: a database seeded with a real `agent_worktrees` row but no recorded root refuses to start when the root is omitted (no health response, no boot record, the row untouched) and remains recoverable once the exact proven root is supplied on a later boot. Strict isolated Codex execution remains fail-closed and is now deferred as optional future hardening, separate from Phase 16.6's Codex trusted-local production-readiness work (below).
-
-Phase 16.6 replaces the previously planned strict Codex sandbox-attestation phase with a narrower, practical correction to Codex trusted-local's use of Hall-owned worktrees. `AgentWorktreeManager` previously rejected any configured Git checkout filter (`filter.<name>.clean`/`.smudge`/`.process`) purely by key-name suffix, regardless of which filter it was — including the entirely standard Git LFS profile Git for Windows registers at system scope by default (`filter.lfs.clean`/`.smudge`/`.process`/`.required`), which made every Codex worktree fail closed with `GIT_CHECKOUT_FILTER_UNSUPPORTED` before Codex was ever invoked on any machine with Git LFS installed. Hall now inspects both the filter's key _and_ its value (`git config --null --get-regexp`, a machine-safe NUL-delimited format) and recognizes exactly one thing: the standard Git LFS profile, matched against Git LFS's own documented output as a small fixed allowlist of exact command strings — never a pattern, glob, or "looks like LFS" heuristic. Every other filter — any other name, any modified or ambiguous LFS command, a duplicated or conflicting key, an unrecognized `filter.lfs.*` subkey, or malformed/truncated configuration output — is still rejected exactly as before. When the recognized profile is present, Hall never lets Git LFS automatically download or materialize LFS objects while preparing an agent worktree: `GIT_LFS_SKIP_SMUDGE=1` is applied narrowly to the single checkout invocation that needs it (a small, closed-shape environment-override extension to `GitCommandRunner`, not a general environment-passthrough mechanism), so an LFS-tracked file in a Hall-owned worktree remains a pointer, never a downloaded object, while every ordinary file checks out normally. This is a filesystem-scoping and content-classification fix, not a change to Codex trusted-local's own security posture: trusted-local still bypasses Codex's sandbox and approval enforcement exactly as documented, its explicit `--enable-codex-trusted-local` startup opt-in is unchanged, and strict, OS-sandboxed Codex isolation remains deferred, fail-closed, and unclaimed. A real, end-to-end Codex trusted-local task — through the real adapter, a real Hall-owned worktree, and the operator's real ChatGPT-authenticated Codex CLI — was verified against a disposable fixture repository outside this repository as part of this phase; see `docs/architecture/0016-codex-worktree-execution.md` for the mechanism and `docs/architecture/0009-codex-adapter.md`/`0010-paperclip-compatible-codex-mode.md` for how it composes with the adapter's existing strict/trusted-local profiles.
-
-That same verification surfaced a real worktree-cleanup edge case, now fixed: `git worktree remove --force` does not always delete the top-level directory it created, even after genuinely succeeding — the observed sequence was a completed Codex task, a successful Git-level removal, and an empty directory left behind at the exact Hall-owned worktree path, which a naive unconditional cleanup retry then failed a second time with "not a working tree" (Git no longer considered the deregistered path a working tree at all), leaving the record `cleanup_failed` and the empty directory orphaned indefinitely. Git remains the primary and preferred removal mechanism in every case where it still has a registration to act on. Only once Git no longer registers a path at all may Hall remove what remains — and only when every one of the following is proven fresh, immediately before the one non-recursive `fs.rmdirSync` call: the worktree ID is a safe token, the reconstructed `wt_<id>` path matches the durable record exactly, the path is inside the configured Hall-owned root, `lstat` reports an ordinary directory (never a symlink or junction), its canonicalized real path matches the expected path exactly, and it contains exactly zero entries. A non-empty directory, a symlink/junction, a canonicalization mismatch, or a directory that cannot be listed at all is left untouched and fails cleanup closed with one of three bounded codes (`AGENT_WORKTREE_RESIDUAL_DIRECTORY_NOT_EMPTY`/`_UNSAFE`/`_REMOVE_FAILED`) — never a recursive delete, never `fs.rm`, never `git worktree prune`, never `git clean`. Restart reconciliation now converges a `cleanup_failed` record left in exactly this state to `cleaned` automatically, using the identical safety checks — proven through the real built binary, not only in-process unit tests.
-
-## Features
-
-Hall Core is a localhost-only Fastify HTTP and WebSocket server. It can create tasks, assign adapters, stream normalized events, store durable state when SQLite mode is enabled, run deterministic Mock Agent tasks, route by capability and trust, compare agents in isolated comparison worktrees, and drive approved CEO plan execution. Hall Web is a local Next.js dashboard for task, board, communication, system, comparison, and CEO workflows.
-
-Real provider adapters use the operator's locally installed CLIs and local subscription authentication. Hall does not collect provider credentials, API keys, auth files, or raw provider output.
-
-## Architecture
+### Architecture
 
 Key architecture documents:
 
@@ -188,21 +233,7 @@ Restart:
     -> server starts
 ```
 
-## Usage
-
-Normal development uses Mock Agent by default. Create tasks in Hall Web, move them through the Kanban workflow, assign an adapter, and explicitly start a run. CEO plan execution can start delegated child tasks only after an operator configures and starts an autonomous execution run.
-
-For an already-built Hall Core binary:
-
-```powershell
-pnpm --filter @hall-of-wisdom/hall-core run build
-node apps/server/dist/server.js `
-  --workspace-root "D:\HallOfWisdom" `
-  --port 4310 `
-  --mock-scenario success
-```
-
-## Packages
+### Packages
 
 | Package                               | Purpose                                                                        |
 | ------------------------------------- | ------------------------------------------------------------------------------ |
@@ -211,12 +242,13 @@ node apps/server/dist/server.js `
 | `@hall-of-wisdom/mock-agent`          | Deterministic local adapter for tests and development.                         |
 | `@hall-of-wisdom/claude-code-adapter` | Local Claude Code CLI adapter.                                                 |
 | `@hall-of-wisdom/codex-adapter`       | Local Codex CLI adapter with strict and trusted-local profiles.                |
+| `@hall-of-wisdom/hall-config`         | Persisted, schema-validated Hall configuration (Phase 17.1).                   |
 | `@hall-of-wisdom/hall-runner`         | Local task runner and adapter registry.                                        |
 | `@hall-of-wisdom/hall-core`           | Local Fastify server, stores, orchestration, recovery, and Phase 16 internals. |
 | `@hall-of-wisdom/web`                 | Next.js browser dashboard.                                                     |
 | `@hall-of-wisdom/e2e`                 | Playwright E2E fixtures, not included in ordinary `pnpm test`.                 |
 
-## Development and Validation
+### Development and Validation
 
 ```powershell
 pnpm typecheck
@@ -235,22 +267,81 @@ pnpm --filter @hall-of-wisdom/codex-adapter run test
 pnpm --filter @hall-of-wisdom/hall-core run test -- src/agent-worktrees src/agent-execution src/execution-artifacts src/recovery src/tasks src/composition
 ```
 
-## Security Limitations
+PowerShell installer/launcher test suites (both `pwsh` and Windows PowerShell 5.1 are expected to
+pass identically):
 
-Hall binds locally to `127.0.0.1` and is still a prototype. It has no production authentication layer. SQLite durability is optional. Phase 16 worktrees are now cleaned up automatically — after artifact persistence at runtime, and via restart reconciliation for anything a crash interrupted — but cleanup is deliberately conservative: Git remains the primary removal mechanism whenever it still has a registration to act on (`git worktree remove --force`, never a recursive filesystem delete); only once Git no longer registers a path at all may Hall remove what remains of it itself, and only an exact, freshly-revalidated, provably empty top-level directory — never a recursive delete, never `fs.rm`, never `git worktree prune`/`git clean`. A non-empty residual directory, a symlink/junction, or any path whose identity cannot be proven fresh is retained, not deleted, and cleanup fails closed with a bounded code; restart reconciliation converges a `cleanup_failed` record left in exactly this state to `cleaned` using the identical checks. A `--data-dir` durably remembers the `--agent-worktree-root` it was first started with, the same way it already remembers `--workspace-root`; reusing that data directory against a different (or omitted) worktree root fails startup closed rather than silently reconciling — or failing to reconcile — the wrong set of worktrees, and this now also covers a database that already holds worktree rows but never got as far as recording a root at all — including the case where no fingerprint field of any kind, not even `--workspace-root`, was ever recorded. Git worktree registration inspection uses one strict, NUL-delimited parser everywhere a registration list is read, validating a record's complete documented attribute set (not only its path) and rejecting genuinely empty exit-zero output the same way, so malformed, incomplete, or unexpectedly structured Git output is never silently treated as "no registrations." Strict Codex remains unsupported and unclaimed; exact equivalence for the real `codex exec --sandbox workspace-write` policy against the zero-model helper probe was never proven, and that work is now deferred as optional future hardening rather than near-term scope — the zero-model helper probe alone was, and remains, necessary evidence but not sufficient. Codex worktree preparation now recognizes exactly the standard Git LFS checkout-filter profile (by key and value, never by name alone) and disables automatic LFS smudge/download for agent worktrees (`GIT_LFS_SKIP_SMUDGE=1`, scoped to the one checkout invocation); every other checkout filter is still rejected, and Hall never installs, configures, or invokes Git LFS itself.
+```powershell
+pwsh -NoProfile -File scripts/install/tests/run-tests.ps1
+pwsh -NoProfile -File scripts/launch/tests/run-tests.ps1
+powershell -NoProfile -File scripts/install/tests/run-tests.ps1
+powershell -NoProfile -File scripts/launch/tests/run-tests.ps1
+```
 
-Trusted-local Codex mode is separate and explicitly opt-in. It bypasses Codex's sandbox and approval enforcement and runs with the Hall Core process user's filesystem permissions. Do not confuse it with strict isolated mode.
+### Security Limitations
 
-Hall does not claim generic secret detection. It prevents unsafe storage categories such as raw stdout, raw stderr, raw command lines, environment maps, arbitrary provider payloads, and provider authentication files.
+Hall binds locally to `127.0.0.1` and is still a prototype. It has no production authentication
+layer. SQLite durability is optional. Phase 16 worktrees are cleaned up automatically — after
+artifact persistence at runtime, and via restart reconciliation for anything a crash interrupted —
+but cleanup is deliberately conservative: Git remains the primary removal mechanism whenever it
+still has a registration to act on (`git worktree remove --force`, never a recursive filesystem
+delete); only once Git no longer registers a path at all may Hall remove what remains of it itself,
+and only an exact, freshly-revalidated, provably empty top-level directory — never a recursive
+delete, never `fs.rm`, never `git worktree prune`/`git clean`. A non-empty residual directory, a
+symlink/junction, or any path whose identity cannot be proven fresh is retained, not deleted, and
+cleanup fails closed with a bounded code; restart reconciliation converges a `cleanup_failed` record
+left in exactly this state to `cleaned` using the identical checks. A `--data-dir` durably remembers
+the `--agent-worktree-root` it was first started with, the same way it already remembers
+`--workspace-root`; reusing that data directory against a different (or omitted) worktree root fails
+startup closed rather than silently reconciling — or failing to reconcile — the wrong set of
+worktrees. Git worktree registration inspection uses one strict, NUL-delimited parser everywhere a
+registration list is read, so malformed, incomplete, or unexpectedly structured Git output is never
+silently treated as "no registrations."
 
-## Phase Roadmap
+**Strict, OS-sandboxed Codex isolation remains deferred as optional future hardening and stays
+fail-closed.** Exact equivalence for the real `codex exec --sandbox workspace-write` policy against
+Hall's zero-model helper probe was never proven, and strict mode is not a near-term goal — it is not
+required for normal application functionality. Trusted-local Codex mode is separate and explicitly
+opt-in: it bypasses Codex's sandbox and approval enforcement and runs with the Hall Core process
+user's filesystem permissions. Do not confuse trusted-local with strict isolated mode. Codex worktree
+preparation recognizes exactly the standard Git LFS checkout-filter profile (by key and value, never
+by name alone) and disables automatic LFS smudge/download for agent worktrees; every other checkout
+filter is still rejected, and Hall never installs, configures, or invokes Git LFS itself.
 
-Completed major phases include the monorepo foundation, adapter SDK, Mock Agent, Hall Runner, Hall Core, Hall Web, Claude Code and Codex adapters, routing, comparison worktrees, durable SQLite recovery, CEO planning, autonomous CEO plan execution, Hall-owned agent worktrees, bounded execution artifacts, isolated orchestration, strict isolated Codex compatibility infrastructure, restart-safe worktree reconciliation and cleanup (Phase 16.5, including its post-merge hardening), and Codex trusted-local production readiness with Git LFS worktree compatibility and worktree-cleanup hardening (Phase 16.6). The Phase 16 milestone is complete.
+Hall does not claim generic secret detection. It prevents unsafe storage categories such as raw
+stdout, raw stderr, raw command lines, environment maps, arbitrary provider payloads, and provider
+authentication files.
+
+### Phase Roadmap
+
+Completed major phases include the monorepo foundation, adapter SDK, Mock Agent, Hall Runner, Hall
+Core, Hall Web, Claude Code and Codex adapters, routing, comparison worktrees, durable SQLite
+recovery, CEO planning, autonomous CEO plan execution, Hall-owned agent worktrees, bounded execution
+artifacts, isolated orchestration, strict isolated Codex compatibility infrastructure, restart-safe
+worktree reconciliation and cleanup (Phase 16.5), Codex trusted-local production readiness with Git
+LFS worktree compatibility (Phase 16.6), and Phase 17's onboarding milestone (below). The Phase 16
+milestone is complete.
+
+**Phase 17 — Windows Onboarding (complete):**
+
+- **17.1 — Persistent Hall Configuration & Interactive Installer.** `.\install.ps1` and
+  `@hall-of-wisdom/hall-config` (see
+  [`0017-persistent-hall-configuration.md`](docs/architecture/0017-persistent-hall-configuration.md)).
+- **17.2 — Provider Connection & Authentication UX.** The Providers page, guide-only Connect (see
+  [`0018-provider-connection-onboarding.md`](docs/architecture/0018-provider-connection-onboarding.md)).
+- **17.3 — One-Command Hall Launcher.** `.\start.ps1` (see
+  [`0019-one-command-hall-launcher.md`](docs/architecture/0019-one-command-hall-launcher.md)).
+- **17.4 — User Documentation & Phase 17 Release Verification.** This README, plus an end-to-end
+  release verification of install → persisted config → launcher → browser-accessible Hall →
+  Providers page → clean shutdown, run against disposable configuration. The installer and launcher
+  unit test suites (`scripts/install/tests/`, `scripts/launch/tests/`) pass on both `pwsh` and
+  Windows PowerShell 5.1, as they already did before this phase; the new chained release-verification
+  smoke test itself runs under `pwsh` only.
 
 Last Completed and Merged Phase:
 
-- Phase 16.6 — Codex Trusted-Local Production Readiness and Git LFS Worktree Compatibility
+- Phase 17.4 — User Documentation & Phase 17 Release Verification (closes the Phase 17 milestone)
 
-Current: Phase 17 has not started.
-
-Deferred future work includes strict, OS-sandboxed Codex isolation (optional future hardening, fail-closed and unclaimed unless a future phase proves exact policy equivalence — not required for normal application functionality), additional coding-agent adapters, production authentication, richer policy controls, public artifact routes/UI, merge workflows, and deployment integrations.
+Deferred future work includes strict, OS-sandboxed Codex isolation (optional future hardening,
+fail-closed and unclaimed unless a future phase proves exact policy equivalence — not required for
+normal application functionality), additional coding-agent adapters, production authentication,
+richer policy controls, public artifact routes/UI, merge workflows, and deployment integrations.
