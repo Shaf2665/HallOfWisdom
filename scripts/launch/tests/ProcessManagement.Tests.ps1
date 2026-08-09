@@ -105,6 +105,35 @@ process.exit(1);
         if (-not $webFixture.HasExited) { $webFixture.Kill() }
     }
 
+    # --- Stop-HallLauncherProcess: verifies the process actually exited after forced termination, throws clearly if it did not ---
+    # Fakes `taskkill` itself as a no-op (via PATH prepending, matching
+    # WebBuildEnv.Tests.ps1's fake-pnpm.cmd technique) so the real fixture
+    # process is genuinely never terminated - proving this check reads
+    # reality rather than trusting that taskkill succeeded.
+    $fakeTaskkillDir = Join-Path $fixtureRoot "fake-taskkill-bin"
+    New-Item -ItemType Directory -Path $fakeTaskkillDir -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $fakeTaskkillDir "taskkill.cmd") -Value "@echo off`r`nexit /b 0`r`n" -Encoding ascii
+
+    $unkillablePort = New-HallTestPort
+    $unkillableFixture = Start-HallTestFixture -ScriptPath $fakeWebPath -Port $unkillablePort
+    $previousPath = $env:PATH
+    try {
+        Wait-HallServiceReady -Url "http://127.0.0.1:$unkillablePort/" -ServiceName "Unkillable Fixture" -Process $unkillableFixture -TimeoutSeconds 10
+        $env:PATH = "$fakeTaskkillDir;$previousPath"
+        $stopError = $null
+        try {
+            Stop-HallLauncherProcess -Process $unkillableFixture -ServiceName "Unkillable Fixture" -GracefulTimeoutSeconds 1 -ForcedWaitMilliseconds 500
+        } catch {
+            $stopError = $_
+        }
+        Assert-True ($null -ne $stopError) "Stop-HallLauncherProcess must throw when the process is still alive after forced termination"
+        Assert-True ($stopError.Exception.Message -like "*Unkillable Fixture*") "the failure message should name the service"
+        Assert-False $unkillableFixture.HasExited "the fixture must genuinely still be running (the fake taskkill never touched it) - proving the check reads real process state"
+    } finally {
+        $env:PATH = $previousPath
+        if (-not $unkillableFixture.HasExited) { $unkillableFixture.Kill() }
+    }
+
     # --- Stop-HallLauncherProcess: idempotent on an already-exited process ---
     Stop-HallLauncherProcess -Process $webFixture -ServiceName "Fake Web"
     Write-Host "  (calling Stop-HallLauncherProcess twice on an exited process did not throw)" -ForegroundColor DarkGray

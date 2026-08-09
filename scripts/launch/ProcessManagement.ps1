@@ -123,7 +123,8 @@ function Stop-HallLauncherProcess {
     param(
         [Parameter(Mandatory)][System.Diagnostics.Process]$Process,
         [Parameter(Mandatory)][string]$ServiceName,
-        [int]$GracefulTimeoutSeconds = 5
+        [int]$GracefulTimeoutSeconds = 5,
+        [int]$ForcedWaitMilliseconds = 5000
     )
     if ($Process.HasExited) { return }
 
@@ -144,7 +145,11 @@ function Stop-HallLauncherProcess {
     if (-not $Process.HasExited) {
         Write-Host "  $ServiceName did not stop gracefully - forcing termination..."
         & taskkill /PID $Process.Id /T /F | Out-Null
-        $Process.WaitForExit(5000) | Out-Null
+        $Process.WaitForExit($ForcedWaitMilliseconds) | Out-Null
+    }
+
+    if (-not $Process.HasExited) {
+        throw "$ServiceName (PID $($Process.Id)) could not be stopped even after forced termination."
     }
 }
 
