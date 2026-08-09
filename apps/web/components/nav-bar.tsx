@@ -4,7 +4,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const LINKS = [
-  { href: "/", label: "Task Console" },
+  { href: "/", label: "Wisdom Gateway" },
+  { href: "/tasks", label: "Task Console" },
   { href: "/board", label: "Kanban Board" },
   { href: "/boards", label: "Communication Boards" },
   { href: "/agents", label: "Agents" },
@@ -15,8 +16,8 @@ const LINKS = [
 ] as const;
 
 /**
- * Plain `next/link` navigation — no full page reload between `/` and
- * `/board`. The only reason this is a Client Component (unlike
+ * Plain `next/link` navigation — no full page reload between routes. The
+ * only reason this is a Client Component (unlike
  * `ApplicationShell`, which stays server-rendered): `usePathname()` is
  * needed to mark the current page for both sighted users (visual
  * emphasis) and assistive technology (`aria-current="page"`), and that

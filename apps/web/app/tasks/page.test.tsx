@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import HomePage from "./page";
-import * as apiClient from "../lib/api-client";
-import type { AdapterSummary, CreateTaskResponse } from "../lib/api-schemas";
+import TaskConsolePage from "./page";
+import * as apiClient from "../../lib/api-client";
+import type { AdapterSummary, CreateTaskResponse } from "../../lib/api-schemas";
 
-vi.mock("../lib/api-client", async () => {
-  const actual = await vi.importActual<typeof import("../lib/api-client")>("../lib/api-client");
+vi.mock("../../lib/api-client", async () => {
+  const actual = await vi.importActual<typeof import("../../lib/api-client")>(
+    "../../lib/api-client",
+  );
   return {
     ...actual,
     getHealth: vi.fn(),
@@ -21,7 +23,7 @@ vi.mock("../lib/api-client", async () => {
 const mockRouter = { push: vi.fn(), replace: vi.fn() };
 vi.mock("next/navigation", () => ({
   useRouter: () => mockRouter,
-  usePathname: () => "/",
+  usePathname: () => "/tasks",
 }));
 
 class InertWebSocket {
@@ -97,7 +99,7 @@ function makeCreated(): CreateTaskResponse {
   };
 }
 
-describe("HomePage (dashboard)", () => {
+describe("TaskConsolePage", () => {
   beforeEach(() => {
     vi.stubGlobal("WebSocket", InertWebSocket);
     vi.mocked(apiClient.getHealth).mockResolvedValue({
@@ -116,7 +118,7 @@ describe("HomePage (dashboard)", () => {
   });
 
   it("renders the dashboard with its main sections", async () => {
-    render(<HomePage />);
+    render(<TaskConsolePage />);
     expect(screen.getByRole("heading", { level: 1, name: "Hall of Wisdom" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Create Task" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Recent Tasks" })).toBeInTheDocument();
@@ -128,7 +130,7 @@ describe("HomePage (dashboard)", () => {
   it("selects the newly created task after a successful submission", async () => {
     vi.mocked(apiClient.createTask).mockResolvedValue(makeCreated());
     const user = userEvent.setup();
-    render(<HomePage />);
+    render(<TaskConsolePage />);
     await waitFor(() => screen.getByRole("option", { name: "Mock Agent" }));
 
     await user.type(screen.getByLabelText("Project"), "project-1");

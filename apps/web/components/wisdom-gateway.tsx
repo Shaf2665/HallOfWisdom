@@ -1,0 +1,332 @@
+"use client";
+
+import { useEffect, useId, useRef, useState } from "react";
+import type { SubmitEvent } from "react";
+import { createCeoPlan, createDeferredTask, listTasks } from "../lib/api-client";
+
+const NEW_PROJECT = "__hall_new_project__";
+const MAX_PROJECT_LENGTH = 128;
+const MAX_REQUEST_LENGTH = 20_000;
+const MAX_TITLE_LENGTH = 200;
+
+type MessageStatus = "sending" | "planning_started" | "request_failed" | "planning_failed";
+
+interface ConversationEntry {
+  readonly id: number;
+  readonly projectName: string;
+  readonly request: string;
+  readonly status: MessageStatus;
+  readonly parentTaskId?: string;
+}
+
+function requestTitle(request: string): string {
+  const firstLine = request.trim().split(/\r?\n/, 1)[0] ?? request.trim();
+  if (firstLine.length <= MAX_TITLE_LENGTH) return firstLine;
+  return `${firstLine.slice(0, MAX_TITLE_LENGTH - 1).trimEnd()}…`;
+}
+
+function statusCopy(status: MessageStatus): string {
+  switch (status) {
+    case "sending":
+      return "I’ve received your request. I’m saving it and starting the plan now…";
+    case "planning_started":
+      return "Thanks — your request is safely with Hall, and the CEO has started planning.";
+    case "request_failed":
+      return "I couldn’t send that request to Hall. Check that Hall is online, then try again.";
+    case "planning_failed":
+      return "Your request is safely saved, but planning couldn’t start. You can try planning again without resending it.";
+  }
+}
+
+export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
+  const formId = useId();
+  const nextMessageId = useRef(1);
+  const [projects, setProjects] = useState<readonly string[]>([]);
+  const [projectsState, setProjectsState] = useState<"loading" | "ready" | "error">("loading");
+  const [selectedProject, setSelectedProject] = useState(NEW_PROJECT);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [request, setRequest] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const [busyMessageId, setBusyMessageId] = useState<number | null>(null);
+  const [conversation, setConversation] = useState<readonly ConversationEntry[]>([]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    listTasks(baseUrl, { signal: controller.signal })
+      .then(({ tasks }) => {
+        if (controller.signal.aborted) return;
+        const discoveredProjects = [
+          ...new Set(tasks.map((record) => record.task.projectId)),
+        ].sort((left, right) => left.localeCompare(right));
+        setProjects(discoveredProjects);
+        setSelectedProject(discoveredProjects[0] ?? NEW_PROJECT);
+        setProjectsState("ready");
+      })
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        setSelectedProject(NEW_PROJECT);
+        setProjectsState("error");
+      });
+    return () => {
+      controller.abort();
+    };
+  }, [baseUrl]);
+
+  function updateMessage(
+    messageId: number,
+    update: (entry: ConversationEntry) => ConversationEntry,
+  ): void {
+    setConversation((current) =>
+      current.map((entry) => (entry.id === messageId ? update(entry) : entry)),
+    );
+  }
+
+  async function startPlanning(messageId: number, parentTaskId: string): Promise<void> {
+    setBusyMessageId(messageId);
+    updateMessage(messageId, (entry) => ({ ...entry, status: "sending", parentTaskId }));
+    try {
+      await createCeoPlan(baseUrl, parentTaskId);
+      updateMessage(messageId, (entry) => ({ ...entry, status: "planning_started" }));
+    } catch {
+      updateMessage(messageId, (entry) => ({ ...entry, status: "planning_failed" }));
+    } finally {
+      setBusyMessageId(null);
+    }
+  }
+
+  async function handleSubmit(event: SubmitEvent<HTMLFormElement>): Promise<void> {
+    event.preventDefault();
+    if (busyMessageId !== null) return;
+
+    const trimmedRequest = request.trim();
+    const projectName =
+      selectedProject === NEW_PROJECT ? newProjectName.trim() : selectedProject.trim();
+
+    if (projectsState === "loading") {
+      setFormError("Please wait while Hall loads your projects.");
+      return;
+    }
+    if (projectName.length === 0) {
+      setFormError("Choose a project or give your new project a name.");
+      return;
+    }
+    if (projectName.length > MAX_PROJECT_LENGTH) {
+      setFormError(`Project names can be up to ${String(MAX_PROJECT_LENGTH)} characters.`);
+      return;
+    }
+    if (trimmedRequest.length === 0) {
+      setFormError("Tell Hall what you would like to accomplish.");
+      return;
+    }
+
+    const messageId = nextMessageId.current;
+    nextMessageId.current += 1;
+    setFormError(null);
+    setBusyMessageId(messageId);
+    setConversation((current) => [
+      ...current,
+      { id: messageId, projectName, request: trimmedRequest, status: "sending" },
+    ]);
+
+    try {
+      const parentTask = await createDeferredTask(baseUrl, {
+        projectId: projectName,
+        title: requestTitle(trimmedRequest),
+        description: trimmedRequest,
+      });
+      updateMessage(messageId, (entry) => ({
+        ...entry,
+        parentTaskId: parentTask.task.taskId,
+      }));
+
+      try {
+        await createCeoPlan(baseUrl, parentTask.task.taskId);
+        updateMessage(messageId, (entry) => ({ ...entry, status: "planning_started" }));
+        setRequest("");
+        if (selectedProject === NEW_PROJECT && !projects.includes(projectName)) {
+          setProjects((current) =>
+            [...current, projectName].sort((left, right) => left.localeCompare(right)),
+          );
+          setSelectedProject(projectName);
+          setNewProjectName("");
+        }
+      } catch {
+        updateMessage(messageId, (entry) => ({ ...entry, status: "planning_failed" }));
+      }
+    } catch {
+      updateMessage(messageId, (entry) => ({ ...entry, status: "request_failed" }));
+    } finally {
+      setBusyMessageId(null);
+    }
+  }
+
+  const isBusy = busyMessageId !== null;
+
+  return (
+    <section className="mx-auto flex max-w-3xl flex-col gap-8 py-6 sm:py-12">
+      <div className="space-y-3 text-center">
+        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-amber-700 dark:text-amber-400">
+          Wisdom Gateway
+        </p>
+        <h2 className="text-3xl font-semibold tracking-tight sm:text-5xl">
+          What would you like Hall to accomplish?
+        </h2>
+        <p className="mx-auto max-w-2xl text-base leading-7 text-stone-600 dark:text-stone-300">
+          Describe the outcome in your own words. Hall’s CEO will turn it into a plan for you.
+        </p>
+      </div>
+
+      {conversation.length > 0 ? (
+        <div aria-live="polite" aria-label="Conversation" className="flex flex-col gap-5">
+          {conversation.map((entry) => {
+            const isError = entry.status === "request_failed" || entry.status === "planning_failed";
+            return (
+              <article key={entry.id} className="flex flex-col gap-3">
+                <div className="ml-auto max-w-[88%] rounded-2xl rounded-br-sm bg-amber-700 px-5 py-4 text-white shadow-sm">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-amber-100">
+                    You · {entry.projectName}
+                  </p>
+                  <p className="whitespace-pre-wrap text-sm leading-6 sm:text-base">
+                    {entry.request}
+                  </p>
+                </div>
+                <div
+                  role={isError ? "alert" : "status"}
+                  className={`mr-auto max-w-[88%] rounded-2xl rounded-bl-sm border px-5 py-4 shadow-sm ${
+                    isError
+                      ? "border-red-300 bg-red-50 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100"
+                      : "border-stone-200 bg-white text-stone-800 dark:border-stone-800 dark:bg-stone-900 dark:text-stone-100"
+                  }`}
+                >
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                    Hall CEO
+                  </p>
+                  <p className="text-sm leading-6 sm:text-base">{statusCopy(entry.status)}</p>
+                  {entry.status === "planning_failed" && entry.parentTaskId ? (
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={() => {
+                        const parentTaskId = entry.parentTaskId;
+                        if (parentTaskId !== undefined) {
+                          void startPlanning(entry.id, parentTaskId);
+                        }
+                      }}
+                      className="mt-3 rounded-lg border border-red-300 px-3 py-2 text-sm font-semibold hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-800 dark:hover:bg-red-950"
+                    >
+                      {busyMessageId === entry.id ? "Trying again…" : "Try planning again"}
+                    </button>
+                  ) : null}
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : null}
+
+      <form
+        onSubmit={(event) => {
+          void handleSubmit(event);
+        }}
+        noValidate
+        aria-labelledby={`${formId}-heading`}
+        className="rounded-2xl border border-stone-200 bg-white p-5 shadow-xl shadow-stone-950/5 sm:p-7 dark:border-stone-800 dark:bg-stone-900 dark:shadow-black/20"
+      >
+        <h3 id={`${formId}-heading`} className="sr-only">
+          Send a request to the CEO
+        </h3>
+        <div className="flex flex-col gap-5">
+          <div className="flex flex-col gap-2">
+            <label htmlFor={`${formId}-project`} className="text-sm font-semibold">
+              Project
+            </label>
+            <select
+              id={`${formId}-project`}
+              value={selectedProject}
+              disabled={projectsState === "loading" || isBusy}
+              onChange={(event) => {
+                setSelectedProject(event.target.value);
+                setFormError(null);
+              }}
+              className="rounded-xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm disabled:cursor-not-allowed disabled:opacity-60 dark:border-stone-700 dark:bg-stone-950"
+            >
+              {projectsState === "loading" ? <option>Loading projects…</option> : null}
+              {projects.map((project) => (
+                <option key={project} value={project}>
+                  {project}
+                </option>
+              ))}
+              {projectsState !== "loading" ? (
+                <option value={NEW_PROJECT}>Start a new project…</option>
+              ) : null}
+            </select>
+            {projectsState === "error" ? (
+              <p className="text-sm text-amber-700 dark:text-amber-400">
+                Saved projects couldn’t be loaded. You can still start a new project.
+              </p>
+            ) : null}
+          </div>
+
+          {selectedProject === NEW_PROJECT && projectsState !== "loading" ? (
+            <div className="flex flex-col gap-2">
+              <label htmlFor={`${formId}-new-project`} className="text-sm font-semibold">
+                Project name
+              </label>
+              <input
+                id={`${formId}-new-project`}
+                type="text"
+                maxLength={MAX_PROJECT_LENGTH}
+                value={newProjectName}
+                disabled={isBusy}
+                onChange={(event) => {
+                  setNewProjectName(event.target.value);
+                  setFormError(null);
+                }}
+                placeholder="For example, Customer portal"
+                className="rounded-xl border border-stone-300 bg-stone-50 px-4 py-3 text-sm disabled:cursor-not-allowed disabled:opacity-60 dark:border-stone-700 dark:bg-stone-950"
+              />
+            </div>
+          ) : null}
+
+          <div className="flex flex-col gap-2">
+            <label htmlFor={`${formId}-request`} className="text-sm font-semibold">
+              Your request
+            </label>
+            <textarea
+              id={`${formId}-request`}
+              value={request}
+              disabled={isBusy}
+              maxLength={MAX_REQUEST_LENGTH}
+              rows={7}
+              onChange={(event) => {
+                setRequest(event.target.value);
+                setFormError(null);
+              }}
+              placeholder="Tell Hall what success looks like. Add any context or constraints that matter."
+              className="min-h-44 resize-y rounded-xl border border-stone-300 bg-stone-50 px-4 py-4 text-base leading-7 placeholder:text-stone-400 disabled:cursor-not-allowed disabled:opacity-60 dark:border-stone-700 dark:bg-stone-950 dark:placeholder:text-stone-600"
+            />
+            <p className="text-right text-xs text-stone-500 dark:text-stone-400">
+              {request.length.toLocaleString()} / {MAX_REQUEST_LENGTH.toLocaleString()}
+            </p>
+          </div>
+
+          {formError ? (
+            <p role="alert" className="text-sm font-medium text-red-700 dark:text-red-400">
+              {formError}
+            </p>
+          ) : null}
+
+          <div className="flex justify-end">
+            <button
+              type="submit"
+              disabled={isBusy || projectsState === "loading"}
+              className="rounded-xl bg-amber-700 px-6 py-3 text-sm font-semibold text-white shadow-sm hover:bg-amber-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-amber-600 dark:hover:bg-amber-500"
+            >
+              {isBusy ? "Sending…" : "Send to CEO"}
+            </button>
+          </div>
+        </div>
+      </form>
+    </section>
+  );
+}
