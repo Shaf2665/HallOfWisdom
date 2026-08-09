@@ -28,6 +28,13 @@ export interface HermesExecutionCompletion {
   readonly signal: null;
 }
 
+export interface HermesExecutionTransportRun {
+  readonly events: AsyncIterable<HermesRawEvent>;
+  readonly completion: Promise<HermesExecutionCompletion>;
+  readonly currentState: HermesExecutionProcessState;
+  cancel(): void;
+}
+
 export interface HermesExecutionTransportOptions {
   readonly pythonExecutable: string;
   readonly runnerPath: string;
@@ -149,7 +156,7 @@ function safeTimer(callback: () => void, milliseconds: number): NodeJS.Timeout {
 }
 
 /** A raw Hermes process run. It deliberately does not implement Hall's AgentRunHandle. */
-export class HermesExecutionRun {
+export class HermesExecutionRun implements HermesExecutionTransportRun {
   readonly events: AsyncIterable<HermesRawEvent>;
   readonly completion: Promise<HermesExecutionCompletion>;
 
@@ -170,6 +177,7 @@ export class HermesExecutionRun {
   #cleanupTimer: NodeJS.Timeout | undefined;
   #forceTimer: NodeJS.Timeout | undefined;
   #drainTimer: NodeJS.Timeout | undefined;
+  #cancellationRequested = false;
 
   readonly #onStdoutData = (chunk: unknown): void => {
     const bytes = asBuffer(chunk);
@@ -250,6 +258,47 @@ export class HermesExecutionRun {
 
   get currentState(): HermesExecutionProcessState {
     return this.#state;
+  }
+
+  cancel(): void {
+    if (this.#settled || this.#cancellationRequested || this.#parser.terminalEvent !== undefined) {
+      return;
+    }
+    this.#cancellationRequested = true;
+    const child = this.#process;
+    if (child === undefined || this.#exit !== undefined) return;
+
+    this.#state = "terminating";
+    try {
+      child.terminate();
+    } catch {
+      // The bounded force phase below remains authoritative.
+    }
+    this.#cleanupTimer = safeTimer(
+      () => {
+        try {
+          child.forceTerminate();
+        } catch {
+          // Completion remains bounded if the process already exited.
+        }
+        this.#forceTimer = safeTimer(
+          () => {
+            if (this.#settled) return;
+            this.#failure = new HermesTransportError(
+              "HERMES_TRANSPORT_PROCESS_EXITED",
+              "Hermes execution did not stop cleanly.",
+            );
+            this.#queue.close();
+            this.#settleFailure();
+          },
+          boundedDuration(
+            this.#options.forceTerminationTimeoutMs,
+            DEFAULT_HERMES_FORCE_TERMINATION_TIMEOUT_MS,
+          ),
+        );
+      },
+      boundedDuration(this.#options.cleanupGraceMs, DEFAULT_HERMES_CLEANUP_GRACE_MS),
+    );
   }
 
   #start(): void {
@@ -390,6 +439,7 @@ export class HermesExecutionRun {
     }
 
     this.#state = "terminating";
+    if (this.#cleanupTimer !== undefined) return;
     try {
       child.terminate();
     } catch {

@@ -9,7 +9,7 @@ export interface RegisterHermesRouterAdapterOptions {
   readonly adapterConfig?: HermesRouterAdapterConfig | undefined;
 }
 
-/** Registers Hermes detection metadata without enabling task execution. */
+/** Registers Hermes while detection keeps it non-assignable to Hall routing. */
 export function registerHermesRouterAdapter(
   registry: AgentRegistry,
   options: RegisterHermesRouterAdapterOptions = {},

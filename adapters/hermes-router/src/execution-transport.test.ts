@@ -472,6 +472,51 @@ describe("Hermes protocol rejection", () => {
 });
 
 describe("Hermes transport lifecycle failures", () => {
+  it("cancels idempotently while allowing a raw run.cancelled terminal", async () => {
+    const child = new FakeProcess();
+    const run = startHermesExecutionTransport(options(child));
+    const eventsPromise = collect(run.events);
+    child.stdout.write(jsonl(rawEvent(0, "run.started")));
+
+    run.cancel();
+    run.cancel();
+    expect(child.terminateCount).toBe(1);
+    child.stdout.end(
+      jsonl(
+        rawEvent(1, "run.cancelled", {
+          cancelled_by: "orchestrator",
+          reason: "Hall requested cancellation",
+        }),
+      ),
+    );
+    child.emitExit(0);
+
+    expect((await eventsPromise).map((event) => event.type)).toEqual([
+      "run.started",
+      "run.cancelled",
+    ]);
+    await expect(run.completion).resolves.toMatchObject({
+      terminalEvent: { type: "run.cancelled" },
+    });
+  });
+
+  it("force-terminates and settles when cancellation produces no terminal", async () => {
+    vi.useFakeTimers();
+    const child = new FakeProcess();
+    const run = startHermesExecutionTransport(
+      options(child, { cleanupGraceMs: 100, forceTerminationTimeoutMs: 100 }),
+    );
+
+    run.cancel();
+    expect(child.terminateCount).toBe(1);
+    await vi.advanceTimersByTimeAsync(101);
+    expect(child.forceTerminateCount).toBe(1);
+    child.emitExit(null, "SIGKILL");
+    child.stdout.end();
+
+    await expect(run.completion).rejects.toBeInstanceOf(HermesTransportError);
+  });
+
   it("reports a synchronous spawn failure without exposing the raw error", async () => {
     const spawner: HermesProcessSpawner = {
       spawn() {
