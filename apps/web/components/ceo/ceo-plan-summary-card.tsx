@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { CeoDelegationLink, CeoPlan, CeoPlanVersion } from "../../lib/api-schemas";
 import { CeoGatewayAgentChoices } from "./ceo-gateway-agent-choices";
+import { CeoGatewayExecutionPanel } from "./ceo-gateway-execution-panel";
 import { CeoPlanStatusBadge } from "./ceo-plan-status-badge";
 
 type PlanAction = "continuing" | "approving" | "saving_agent_choices" | "preparing";
@@ -30,6 +31,7 @@ function planStatusCopy(plan: CeoPlan, links: readonly CeoDelegationLink[]): str
 
 export function CeoPlanSummaryCard({
   baseUrl,
+  wsBaseUrl,
   plan,
   version,
   links,
@@ -49,6 +51,7 @@ export function CeoPlanSummaryCard({
   onSaveAgentChoices,
 }: {
   readonly baseUrl: string;
+  readonly wsBaseUrl: string;
   readonly plan: CeoPlan;
   readonly version?: CeoPlanVersion;
   readonly links: readonly CeoDelegationLink[];
@@ -196,6 +199,26 @@ export function CeoPlanSummaryCard({
         </div>
       ) : null}
 
+      {plan.status === "delegated" && version ? (
+        <div className="mt-4 space-y-4">
+          <CeoGatewayExecutionPanel
+            baseUrl={baseUrl}
+            wsBaseUrl={wsBaseUrl}
+            planId={plan.id}
+            version={version}
+            links={links}
+          />
+          <div>
+            <Link
+              href={`/ceo/${encodeURIComponent(plan.id)}`}
+              className="inline-flex rounded-lg border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:text-amber-100 dark:hover:bg-amber-950/60"
+            >
+              Review full plan
+            </Link>
+          </div>
+        </div>
+      ) : null}
+
       {(plan.status === "draft" && !canContinue) ||
       (plan.status === "awaiting_approval" && !canApprove) ||
       (plan.status === "approved" && !canPrepare) ? (
@@ -206,7 +229,8 @@ export function CeoPlanSummaryCard({
 
       {plan.status !== "draft" &&
       plan.status !== "awaiting_approval" &&
-      (plan.status !== "approved" || version === undefined) ? (
+      (plan.status !== "approved" || version === undefined) &&
+      (plan.status !== "delegated" || version === undefined) ? (
         <Link
           href={`/ceo/${encodeURIComponent(plan.id)}`}
           className="mt-4 inline-flex rounded-lg border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:text-amber-100 dark:hover:bg-amber-950/60"

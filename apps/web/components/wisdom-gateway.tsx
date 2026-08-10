@@ -139,7 +139,13 @@ function stepsWithAgentChoices(
   });
 }
 
-export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
+export function WisdomGateway({
+  baseUrl,
+  wsBaseUrl,
+}: {
+  readonly baseUrl: string;
+  readonly wsBaseUrl: string;
+}) {
   const formId = useId();
   const nextMessageId = useRef(1);
   const [projects, setProjects] = useState<readonly string[]>([]);
@@ -673,6 +679,7 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
                   {entry.plan ? (
                     <CeoPlanSummaryCard
                       baseUrl={baseUrl}
+                      wsBaseUrl={wsBaseUrl}
                       plan={entry.plan}
                       {...(entry.version !== undefined ? { version: entry.version } : {})}
                       links={entry.links}
