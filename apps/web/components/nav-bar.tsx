@@ -7,18 +7,31 @@ import { resolveHallCoreUrl } from "../lib/hall-core-url";
 
 const { httpUrl: BASE_URL } = resolveHallCoreUrl();
 
-const LINKS = [
-  { href: "/", label: "Wisdom Gateway" },
-  { href: "/tasks", label: "Task Console" },
-  { href: "/board", label: "Kanban Board" },
-  { href: "/boards", label: "Communication Boards" },
-  { href: "/agents", label: "Agents" },
-  { href: "/providers", label: "Providers" },
-  { href: "/comparisons", label: "Comparisons" },
-  { href: "/ceo", label: "CEO Plans" },
-  { href: "/attention", label: "Attention" },
-  { href: "/system", label: "System" },
+/**
+ * Feature 8 — the simplified primary nav. Every route this used to link
+ * directly (`/board`, `/tasks`, `/ceo`, `/boards`, `/comparisons`,
+ * `/agents`, `/providers`, `/system`) still exists and is still directly
+ * reachable — by URL, and from within the Work/Team/Settings hub pages
+ * these five entries lead to — nothing was deleted, only regrouped.
+ * `isCurrent` matches by prefix (not exact) so, e.g., landing on `/board`
+ * or `/ceo/abc` still highlights "Work" as the active section.
+ */
+const PRIMARY_LINKS = [
+  { href: "/", label: "Home", prefixes: ["/"] },
+  {
+    href: "/work",
+    label: "Work",
+    prefixes: ["/work", "/board", "/tasks", "/ceo", "/boards", "/comparisons"],
+  },
+  { href: "/attention", label: "Attention", prefixes: ["/attention"] },
+  { href: "/team", label: "Team", prefixes: ["/team", "/agents"] },
+  { href: "/settings", label: "Settings", prefixes: ["/settings", "/providers", "/system"] },
 ] as const;
+
+function isCurrentPath(pathname: string, link: (typeof PRIMARY_LINKS)[number]): boolean {
+  if (link.href === "/") return pathname === "/";
+  return link.prefixes.some((prefix) => pathname.startsWith(prefix));
+}
 
 /**
  * Plain `next/link` navigation — no full page reload between routes. The
@@ -34,8 +47,8 @@ export function NavBar() {
 
   return (
     <nav aria-label="Main" className="flex flex-wrap gap-1">
-      {LINKS.map((link) => {
-        const isCurrent = pathname === link.href;
+      {PRIMARY_LINKS.map((link) => {
+        const isCurrent = isCurrentPath(pathname, link);
         return (
           <Link
             key={link.href}
