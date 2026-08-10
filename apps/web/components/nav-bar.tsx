@@ -2,6 +2,10 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useAttentionItems } from "../hooks/use-attention-items";
+import { resolveHallCoreUrl } from "../lib/hall-core-url";
+
+const { httpUrl: BASE_URL } = resolveHallCoreUrl();
 
 const LINKS = [
   { href: "/", label: "Wisdom Gateway" },
@@ -12,6 +16,7 @@ const LINKS = [
   { href: "/providers", label: "Providers" },
   { href: "/comparisons", label: "Comparisons" },
   { href: "/ceo", label: "CEO Plans" },
+  { href: "/attention", label: "Attention" },
   { href: "/system", label: "System" },
 ] as const;
 
@@ -25,6 +30,7 @@ const LINKS = [
  */
 export function NavBar() {
   const pathname = usePathname();
+  const attentionItems = useAttentionItems(BASE_URL);
 
   return (
     <nav aria-label="Main" className="flex flex-wrap gap-1">
@@ -42,6 +48,11 @@ export function NavBar() {
             }`}
           >
             {link.label}
+            {link.href === "/attention" && attentionItems.length > 0 ? (
+              <span className="ml-1.5 inline-flex min-w-[1.25rem] items-center justify-center rounded-full bg-amber-700 px-1.5 py-0.5 text-xs font-semibold text-white dark:bg-amber-600">
+                {attentionItems.length}
+              </span>
+            ) : null}
           </Link>
         );
       })}
