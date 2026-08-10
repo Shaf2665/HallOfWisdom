@@ -215,6 +215,10 @@ export function CeoGatewayExecutionPanel({
             {startError}
           </p>
         ) : null}
+        <p className="text-xs text-stone-500 dark:text-stone-400">
+          Hall will run one step at a time, try each step once, and pause for your review if a
+          step fails.
+        </p>
         <label className="flex items-start gap-2 text-sm leading-5 text-stone-700 dark:text-stone-200">
           <input
             type="checkbox"
