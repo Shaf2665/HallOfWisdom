@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import {
   ApiClientError,
   configureCeoPlanRunExecution,
@@ -16,6 +17,7 @@ import {
   type CeoPlanVersion,
 } from "../../lib/api-schemas";
 import { useCeoPlanRunEvents } from "../../hooks/use-ceo-plan-run-events";
+import { DiscussButton } from "./discuss-button";
 
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const STEP_ACTIVE_STATUSES = new Set(["claimed", "starting", "running", "retry_wait"]);
@@ -96,12 +98,14 @@ export function CeoGatewayExecutionPanel({
   baseUrl,
   wsBaseUrl,
   planId,
+  parentTaskId,
   version,
   links,
 }: {
   readonly baseUrl: string;
   readonly wsBaseUrl: string;
   readonly planId: string;
+  readonly parentTaskId: string;
   readonly version: CeoPlanVersion;
   readonly links: readonly CeoDelegationLink[];
 }) {
@@ -113,6 +117,7 @@ export function CeoGatewayExecutionPanel({
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [showTechnicalDetails, setShowTechnicalDetails] = useState(false);
 
   const refreshGenerationRef = useRef(0);
 
@@ -246,9 +251,76 @@ export function CeoGatewayExecutionPanel({
 
   if (!run) return null;
 
+  const stepsById = new Map(version.steps.map((s) => [s.id, s]));
   const totalSteps = version.steps.length;
   const completedSteps = stepExecutions.filter((step) => step.status === "completed").length;
   const friendly = friendlyRunStatus(run.status);
+
+  if (TERMINAL_RUN_STATUSES.has(run.status)) {
+    const failedSteps = stepExecutions.filter((step) => step.status === "failed");
+    const resultHeading =
+      run.status === "completed"
+        ? "✓ Work completed"
+        : run.status === "failed"
+          ? "✕ Work failed"
+          : "Work cancelled";
+
+    return (
+      <div className="space-y-3 rounded-lg border border-amber-300 bg-amber-100/60 p-3 dark:border-amber-800 dark:bg-amber-950/40">
+        <h5 className="text-sm font-semibold">{resultHeading}</h5>
+        <p className="text-sm text-stone-700 dark:text-stone-200">
+          {completedSteps} of {totalSteps} step{totalSteps === 1 ? "" : "s"} completed
+        </p>
+        {failedSteps.length > 0 ? (
+          <div className="space-y-1">
+            <p className="text-sm font-medium text-stone-700 dark:text-stone-200">Failures</p>
+            <ul className="list-disc space-y-0.5 pl-5 text-sm text-stone-700 dark:text-stone-200">
+              {failedSteps.map((step) => (
+                <li key={step.planStepId}>
+                  {stepsById.get(step.planStepId)?.title ?? step.planStepId}
+                  {step.lastFailureCode ? ` — ${step.lastFailureCode}` : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+        <div className="flex flex-wrap items-start gap-2">
+          <Link
+            href={`/ceo/${encodeURIComponent(planId)}`}
+            className="rounded-lg bg-amber-700 px-3 py-2 text-sm font-semibold text-white hover:bg-amber-800 dark:bg-amber-600 dark:hover:bg-amber-500"
+          >
+            View result
+          </Link>
+          <DiscussButton baseUrl={baseUrl} taskId={parentTaskId} />
+          <button
+            type="button"
+            onClick={() => {
+              setShowTechnicalDetails((value) => !value);
+            }}
+            className="rounded-lg border border-stone-300 px-3 py-2 text-sm font-semibold text-stone-700 hover:bg-stone-100 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+          >
+            Technical details
+          </button>
+        </div>
+        {showTechnicalDetails ? (
+          <dl className="grid grid-cols-1 gap-x-4 gap-y-2 rounded border border-stone-200 p-2 text-xs text-stone-600 dark:border-stone-800 dark:text-stone-300 sm:grid-cols-2">
+            {stepExecutions.map((step) => (
+              <div key={step.planStepId} className="space-y-0.5">
+                <dt className="font-semibold">
+                  {stepsById.get(step.planStepId)?.title ?? step.planStepId}
+                </dt>
+                <dd>Status: {step.status}</dd>
+                <dd>Attempts: {step.attemptCount}</dd>
+                <dd>Child task: {step.childTaskId}</dd>
+                {step.lastFailureCode ? <dd>Failure code: {step.lastFailureCode}</dd> : null}
+              </div>
+            ))}
+          </dl>
+        ) : null}
+      </div>
+    );
+  }
+
   const current = findCurrentStep(version, stepExecutions);
 
   return (
@@ -269,6 +341,7 @@ export function CeoGatewayExecutionPanel({
           Current step: {current.title}
         </p>
       ) : null}
+      <DiscussButton baseUrl={baseUrl} taskId={parentTaskId} />
     </div>
   );
 }

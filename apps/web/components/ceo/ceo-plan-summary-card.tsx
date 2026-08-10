@@ -3,6 +3,7 @@ import type { CeoDelegationLink, CeoPlan, CeoPlanVersion } from "../../lib/api-s
 import { CeoGatewayAgentChoices } from "./ceo-gateway-agent-choices";
 import { CeoGatewayExecutionPanel } from "./ceo-gateway-execution-panel";
 import { CeoPlanStatusBadge } from "./ceo-plan-status-badge";
+import { DiscussButton } from "./discuss-button";
 
 type PlanAction = "continuing" | "approving" | "saving_agent_choices" | "preparing";
 
@@ -90,6 +91,13 @@ export function CeoPlanSummaryCard({
       <p className="mt-2 text-sm leading-6 text-stone-700 dark:text-stone-200">
         {planStatusCopy(plan, links)}
       </p>
+
+      {/* `delegated` gets its own Discuss action from `CeoGatewayExecutionPanel` below, scoped to the active run/result — avoid showing it twice. */}
+      {plan.status !== "delegated" ? (
+        <div className="mt-2">
+          <DiscussButton baseUrl={baseUrl} taskId={plan.parentTaskId} />
+        </div>
+      ) : null}
 
       {version ? (
         <div className="mt-3 space-y-3">
@@ -205,6 +213,7 @@ export function CeoPlanSummaryCard({
             baseUrl={baseUrl}
             wsBaseUrl={wsBaseUrl}
             planId={plan.id}
+            parentTaskId={plan.parentTaskId}
             version={version}
             links={links}
           />
