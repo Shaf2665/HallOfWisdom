@@ -217,6 +217,89 @@ export function resolveDragOutcome(from: TaskStatus, to: TaskStatus): DragOutcom
   return { kind: "move", targetStatus: to };
 }
 
+export type SimpleColumnKind = "to_do" | "working" | "needs_you" | "done";
+
+export interface SimpleColumnDefinition {
+  readonly kind: SimpleColumnKind;
+  readonly label: string;
+  readonly description: string;
+}
+
+/** Display order for the Feature 7 "Simple View" — four columns, every backend status maps into exactly one. */
+export const SIMPLE_COLUMNS: readonly SimpleColumnDefinition[] = [
+  { kind: "to_do", label: "To Do", description: "Not started yet." },
+  { kind: "working", label: "Working", description: "An agent is actively working." },
+  { kind: "needs_you", label: "Needs You", description: "Needs your review or a decision." },
+  { kind: "done", label: "Done", description: "Finished." },
+];
+
+/**
+ * Purely visual grouping of the same backend statuses — no new lifecycle
+ * state. `blocked` and `failed` land in "Needs You" alongside the
+ * not-yet-automated `reviewing`/`waiting_for_approval` placeholders,
+ * matching `lib/attention.ts`'s own "blocked/failed needs a look" rule so
+ * the two features never disagree.
+ */
+export function simpleColumnForStatus(status: TaskStatus): SimpleColumnKind {
+  switch (status) {
+    case "backlog":
+    case "ready":
+    case "assigned":
+      return "to_do";
+    case "running":
+      return "working";
+    case "reviewing":
+    case "waiting_for_approval":
+    case "blocked":
+    case "failed":
+      return "needs_you";
+    case "completed":
+    case "cancelled":
+      return "done";
+    default:
+      return assertNeverStatus(status);
+  }
+}
+
+export function groupTasksBySimpleColumn(
+  tasks: readonly TaskRecord[],
+): Readonly<Record<SimpleColumnKind, readonly TaskRecord[]>> {
+  const grouped: Record<SimpleColumnKind, TaskRecord[]> = {
+    to_do: [],
+    working: [],
+    needs_you: [],
+    done: [],
+  };
+  for (const record of tasks) {
+    grouped[simpleColumnForStatus(record.task.status)].push(record);
+  }
+  return grouped;
+}
+
+/**
+ * Resolves a Simple View drag to the one underlying status transition it
+ * unambiguously means, or `null` when the grouped column hides more than
+ * one legal destination (e.g. dropping a `blocked` card on "To Do" could
+ * mean `backlog` or `ready` — genuinely ambiguous) or the drop targets the
+ * card's own current simple column (a visual no-op). `null` means "use the
+ * existing per-card action menu instead" — this never invents a transition
+ * `manualDestinationsFor`/`isValidDragTarget` wouldn't already allow.
+ */
+export function resolveSimpleDragTarget(
+  from: TaskStatus,
+  toKind: SimpleColumnKind,
+): TaskStatus | null {
+  if (simpleColumnForStatus(from) === toKind) return null;
+  const candidates = [
+    ...new Set(
+      manualDestinationsFor(from).filter(
+        (status) => simpleColumnForStatus(status) === toKind && isValidDragTarget(from, status),
+      ),
+    ),
+  ];
+  return candidates.length === 1 ? (candidates[0] ?? null) : null;
+}
+
 export type CardAction =
   | { readonly kind: "move"; readonly targetStatus: TaskStatus; readonly label: string }
   | { readonly kind: "assign"; readonly label: string }

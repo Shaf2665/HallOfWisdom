@@ -29,9 +29,13 @@ import {
   DEFAULT_KANBAN_FILTERS,
   filterTasks,
   groupTasksByColumn,
+  groupTasksBySimpleColumn,
   isValidDragTarget,
   resolveDragOutcome,
+  resolveSimpleDragTarget,
+  SIMPLE_COLUMNS,
   type KanbanFilters,
+  type SimpleColumnKind,
 } from "../../lib/kanban";
 import { AssignDialog } from "./assign-dialog";
 import { BacklogTaskForm } from "./backlog-task-form";
@@ -42,6 +46,16 @@ import { RoutingDialog } from "./routing-dialog";
 
 function safeMessage(error: unknown): string {
   return error instanceof ApiClientError ? error.message : "The action could not be completed.";
+}
+
+type KanbanViewMode = "simple" | "detailed";
+const KANBAN_VIEW_STORAGE_KEY = "hall-kanban-view-mode";
+
+function readStoredViewMode(): KanbanViewMode {
+  if (typeof window === "undefined") return "simple";
+  return window.localStorage.getItem(KANBAN_VIEW_STORAGE_KEY) === "detailed"
+    ? "detailed"
+    : "simple";
 }
 
 function usePrefersReducedMotion(): boolean {
@@ -76,6 +90,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
   const { tasks, state, warning, refresh } = useKanbanTasks(baseUrl);
   const executionBadges = useCeoPlanRunBadges(baseUrl);
   const [filters, setFilters] = useState<KanbanFilters>(DEFAULT_KANBAN_FILTERS);
+  const [viewMode, setViewMode] = useState<KanbanViewMode>(() => readStoredViewMode());
   const [pendingTaskIds, setPendingTaskIds] = useState<ReadonlySet<string>>(new Set());
   const [assigningRecord, setAssigningRecord] = useState<TaskRecord | null>(null);
   const [findingAgentRecord, setFindingAgentRecord] = useState<TaskRecord | null>(null);
@@ -93,6 +108,13 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
   }, []);
   const reducedMotion = usePrefersReducedMotion();
 
+  const handleViewModeChange = useCallback((next: KanbanViewMode) => {
+    setViewMode(next);
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(KANBAN_VIEW_STORAGE_KEY, next);
+    }
+  }, []);
+
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 4 } }),
     useSensor(KeyboardSensor),
@@ -100,6 +122,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
 
   const filteredTasks = useMemo(() => filterTasks(tasks, filters), [tasks, filters]);
   const grouped = useMemo(() => groupTasksByColumn(filteredTasks), [filteredTasks]);
+  const simpleGrouped = useMemo(() => groupTasksBySimpleColumn(filteredTasks), [filteredTasks]);
   const activeRecord = activeTaskId
     ? (tasks.find((record) => record.task.taskId === activeTaskId) ?? null)
     : null;
@@ -285,6 +308,19 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
     setActiveTaskId(null);
     const record = tasks.find((r) => r.task.taskId === taskId);
     if (!record || !event.over) return;
+
+    if (viewMode === "simple") {
+      // Ambiguous grouped drops resolve to `null` — the existing per-card
+      // action menu is the answer there, never a guessed transition.
+      const targetStatus = resolveSimpleDragTarget(
+        record.task.status,
+        event.over.id as SimpleColumnKind,
+      );
+      if (targetStatus === null) return;
+      void handleMove(taskId, targetStatus);
+      return;
+    }
+
     const targetStatus = event.over.id as TaskStatus;
     const outcome = resolveDragOutcome(record.task.status, targetStatus);
     if (outcome.kind === "invalid") return;
@@ -293,6 +329,13 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
       return;
     }
     void handleMove(taskId, outcome.targetStatus);
+  }
+
+  function columnLabelForOverId(overId: string): string {
+    if (viewMode === "simple") {
+      return SIMPLE_COLUMNS.find((c) => c.kind === overId)?.label ?? overId;
+    }
+    return COLUMN_DEFINITIONS.find((c) => c.status === overId)?.label ?? overId;
   }
 
   function handleDragCancel(): void {
@@ -306,9 +349,7 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
     },
     onDragOver({ active, over }) {
       const title = tasks.find((r) => r.task.taskId === String(active.id))?.task.title ?? "task";
-      const columnLabel = over
-        ? (COLUMN_DEFINITIONS.find((c) => c.status === over.id)?.label ?? String(over.id))
-        : null;
+      const columnLabel = over ? columnLabelForOverId(String(over.id)) : null;
       return columnLabel
         ? `${title} is over the ${columnLabel} column.`
         : `${title} is no longer over a column.`;
@@ -317,11 +358,13 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
       const title = tasks.find((r) => r.task.taskId === String(active.id))?.task.title ?? "task";
       if (!over) return `${title} was not moved.`;
       const record = tasks.find((r) => r.task.taskId === String(active.id));
-      const columnLabel =
-        COLUMN_DEFINITIONS.find((c) => c.status === over.id)?.label ?? String(over.id);
-      if (record && !isValidDragTarget(record.task.status, over.id as TaskStatus)) {
-        return `${title} cannot be moved to ${columnLabel}.`;
-      }
+      const columnLabel = columnLabelForOverId(String(over.id));
+      const isValid = record
+        ? viewMode === "simple"
+          ? resolveSimpleDragTarget(record.task.status, over.id as SimpleColumnKind) !== null
+          : isValidDragTarget(record.task.status, over.id as TaskStatus)
+        : false;
+      if (!isValid) return `${title} cannot be moved to ${columnLabel}.`;
       return `${title} moved to ${columnLabel}.`;
     },
     onDragCancel({ active }) {
@@ -347,15 +390,40 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
 
       <div className="flex flex-wrap items-center justify-between gap-3">
         <BacklogTaskForm baseUrl={baseUrl} onCreated={handleCreated} />
-        <button
-          type="button"
-          onClick={() => {
-            void refresh();
-          }}
-          className="rounded border border-stone-300 px-3 py-1.5 text-sm font-medium text-stone-700 hover:bg-stone-100 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
-        >
-          Refresh
-        </button>
+        <div className="flex items-center gap-2">
+          <div
+            role="group"
+            aria-label="Kanban view"
+            className="flex rounded border border-stone-300 dark:border-stone-700"
+          >
+            {(["simple", "detailed"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                aria-pressed={viewMode === mode}
+                onClick={() => {
+                  handleViewModeChange(mode);
+                }}
+                className={`px-3 py-1.5 text-sm font-medium first:rounded-l last:rounded-r ${
+                  viewMode === mode
+                    ? "bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200"
+                    : "text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-800"
+                }`}
+              >
+                {mode === "simple" ? "Simple view" : "Detailed view"}
+              </button>
+            ))}
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              void refresh();
+            }}
+            className="rounded border border-stone-300 px-3 py-1.5 text-sm font-medium text-stone-700 hover:bg-stone-100 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+          >
+            Refresh
+          </button>
+        </div>
       </div>
 
       <KanbanFiltersBar tasks={tasks} filters={filters} onChange={setFilters} />
@@ -381,30 +449,60 @@ export function KanbanBoard({ baseUrl }: { readonly baseUrl: string }) {
             aria-label="Kanban workflow columns, scrollable horizontally"
             className="relative flex gap-4 overflow-x-auto pb-2"
           >
-            {COLUMN_DEFINITIONS.map((column) => (
-              <KanbanColumn
-                key={column.status}
-                column={column}
-                tasks={grouped[column.status]}
-                isDragActive={activeTaskId !== null}
-                isValidDropTarget={
-                  activeRecord !== null &&
-                  isValidDragTarget(activeRecord.task.status, column.status)
-                }
-                isPending={isPending}
-                lastActedOnTaskId={lastActedOnTaskId}
-                executionBadges={executionBadges}
-                onFocusHandled={handleFocusHandled}
-                onMove={handleMove}
-                onOpenAssign={setAssigningRecord}
-                onOpenFindAgent={setFindingAgentRecord}
-                onOpenCompare={setComparingRecord}
-                onOpenCeoPlans={handleOpenCeoPlans}
-                onStart={handleStart}
-                onCancel={handleCancel}
-                onOpenDiscussion={handleOpenDiscussion}
-              />
-            ))}
+            {viewMode === "simple"
+              ? SIMPLE_COLUMNS.map((column) => (
+                  <KanbanColumn
+                    key={column.kind}
+                    columnId={column.kind}
+                    label={column.label}
+                    description={column.description}
+                    tasks={simpleGrouped[column.kind]}
+                    isDragActive={activeTaskId !== null}
+                    isValidDropTarget={
+                      activeRecord !== null &&
+                      resolveSimpleDragTarget(activeRecord.task.status, column.kind) !== null
+                    }
+                    isPending={isPending}
+                    lastActedOnTaskId={lastActedOnTaskId}
+                    executionBadges={executionBadges}
+                    onFocusHandled={handleFocusHandled}
+                    onMove={handleMove}
+                    onOpenAssign={setAssigningRecord}
+                    onOpenFindAgent={setFindingAgentRecord}
+                    onOpenCompare={setComparingRecord}
+                    onOpenCeoPlans={handleOpenCeoPlans}
+                    onStart={handleStart}
+                    onCancel={handleCancel}
+                    onOpenDiscussion={handleOpenDiscussion}
+                  />
+                ))
+              : COLUMN_DEFINITIONS.map((column) => (
+                  <KanbanColumn
+                    key={column.status}
+                    columnId={column.status}
+                    label={column.label}
+                    description={column.description}
+                    showFutureNote={column.kind === "future"}
+                    tasks={grouped[column.status]}
+                    isDragActive={activeTaskId !== null}
+                    isValidDropTarget={
+                      activeRecord !== null &&
+                      isValidDragTarget(activeRecord.task.status, column.status)
+                    }
+                    isPending={isPending}
+                    lastActedOnTaskId={lastActedOnTaskId}
+                    executionBadges={executionBadges}
+                    onFocusHandled={handleFocusHandled}
+                    onMove={handleMove}
+                    onOpenAssign={setAssigningRecord}
+                    onOpenFindAgent={setFindingAgentRecord}
+                    onOpenCompare={setComparingRecord}
+                    onOpenCeoPlans={handleOpenCeoPlans}
+                    onStart={handleStart}
+                    onCancel={handleCancel}
+                    onOpenDiscussion={handleOpenDiscussion}
+                  />
+                ))}
           </div>
           <DragOverlay dropAnimation={reducedMotion ? null : undefined}>
             {activeRecord ? (

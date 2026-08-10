@@ -3,12 +3,21 @@
 import type { TaskStatus } from "@hall-of-wisdom/protocol";
 import { useDroppable } from "@dnd-kit/core";
 import type { TaskRecord } from "../../lib/api-schemas";
-import type { ColumnDefinition } from "../../lib/kanban";
 import type { CeoPlanRunBadgeMap } from "../../hooks/use-ceo-plan-run-badges";
 import { KanbanCard } from "./kanban-card";
 
+/**
+ * Generic over the column identity (a real `TaskStatus` for Detailed View,
+ * a `SimpleColumnKind` for Simple View — see Feature 7) so both views
+ * share one column shell and one `KanbanCard` rendering path. `columnId`
+ * only needs to be a stable, unique droppable id; it is never interpreted
+ * as a `TaskStatus` here.
+ */
 export function KanbanColumn({
-  column,
+  columnId,
+  label,
+  description,
+  showFutureNote = false,
   tasks,
   isValidDropTarget,
   isDragActive,
@@ -25,7 +34,10 @@ export function KanbanColumn({
   onCancel,
   onOpenDiscussion,
 }: {
-  readonly column: ColumnDefinition;
+  readonly columnId: string;
+  readonly label: string;
+  readonly description: string;
+  readonly showFutureNote?: boolean;
   readonly tasks: readonly TaskRecord[];
   /** Whether the currently-dragged card could legally drop here — only meaningful while a drag is active. */
   readonly isValidDropTarget: boolean;
@@ -43,14 +55,14 @@ export function KanbanColumn({
   readonly onCancel: (record: TaskRecord) => Promise<void>;
   readonly onOpenDiscussion: (taskId: string) => Promise<void>;
 }) {
-  const { setNodeRef, isOver } = useDroppable({ id: column.status });
+  const { setNodeRef, isOver } = useDroppable({ id: columnId });
 
   const highlight = isDragActive && isValidDropTarget;
   const rejectHighlight = isDragActive && !isValidDropTarget && isOver;
 
   return (
     <section
-      aria-labelledby={`column-${column.status}-heading`}
+      aria-labelledby={`column-${columnId}-heading`}
       className={`flex w-72 shrink-0 flex-col gap-2 rounded-lg border p-3 transition-colors ${
         rejectHighlight
           ? "border-red-400 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20"
@@ -61,8 +73,8 @@ export function KanbanColumn({
     >
       <header>
         <div className="flex items-center justify-between gap-2">
-          <h2 id={`column-${column.status}-heading`} className="text-sm font-semibold">
-            {column.label}
+          <h2 id={`column-${columnId}-heading`} className="text-sm font-semibold">
+            {label}
           </h2>
           <span
             className="rounded-full bg-stone-200 px-2 py-0.5 text-xs font-medium text-stone-700 dark:bg-stone-800 dark:text-stone-300"
@@ -71,8 +83,8 @@ export function KanbanColumn({
             {tasks.length}
           </span>
         </div>
-        <p className="text-xs text-stone-500 dark:text-stone-400">{column.description}</p>
-        {column.kind === "future" ? (
+        <p className="text-xs text-stone-500 dark:text-stone-400">{description}</p>
+        {showFutureNote ? (
           <p className="mt-1 text-xs italic text-stone-400 dark:text-stone-500">
             Not automated yet — a later phase.
           </p>
