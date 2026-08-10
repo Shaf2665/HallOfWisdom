@@ -11,6 +11,17 @@ const CEO_PLAN_STATUS_LABELS: Record<CeoPlanStatus, string> = {
   cancelled: "Cancelled",
 };
 
+const FRIENDLY_CEO_PLAN_STATUS_LABELS: Record<CeoPlanStatus, string> = {
+  draft: "Draft",
+  awaiting_approval: "Ready for approval",
+  approved: "Approved",
+  rejected: "Changes needed",
+  delegated: "Prepared",
+  completed: "Completed",
+  failed: "Needs attention",
+  cancelled: "Cancelled",
+};
+
 const CEO_PLAN_STATUS_CLASSES: Record<CeoPlanStatus, string> = {
   draft: "bg-stone-200 text-stone-700 dark:bg-stone-800 dark:text-stone-300",
   awaiting_approval: "bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300",
@@ -22,12 +33,18 @@ const CEO_PLAN_STATUS_CLASSES: Record<CeoPlanStatus, string> = {
   cancelled: "bg-stone-300 text-stone-800 dark:bg-stone-700 dark:text-stone-200",
 };
 
-export function CeoPlanStatusBadge({ status }: { readonly status: CeoPlanStatus }) {
+export function CeoPlanStatusBadge({
+  status,
+  friendly = false,
+}: {
+  readonly status: CeoPlanStatus;
+  readonly friendly?: boolean;
+}) {
   return (
     <span
       className={`inline-block rounded-full px-2 py-0.5 text-xs font-medium ${CEO_PLAN_STATUS_CLASSES[status]}`}
     >
-      {CEO_PLAN_STATUS_LABELS[status]}
+      {(friendly ? FRIENDLY_CEO_PLAN_STATUS_LABELS : CEO_PLAN_STATUS_LABELS)[status]}
     </span>
   );
 }

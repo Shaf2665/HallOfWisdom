@@ -5,14 +5,17 @@ import type { SubmitEvent } from "react";
 import {
   approveCeoPlan,
   createCeoPlan,
+  createCeoPlanVersion,
   createDeferredTask,
+  delegateCeoPlan,
   getCeoPlan,
   getCeoPlanVersion,
   listCeoPlans,
   listTasks,
   submitCeoPlan,
 } from "../lib/api-client";
-import type { CeoPlan, CeoPlanVersion } from "../lib/api-schemas";
+import type { CeoPlanStepEditInput } from "../lib/api-client";
+import type { CeoDelegationLink, CeoPlan, CeoPlanVersion } from "../lib/api-schemas";
 import { CeoPlanSummaryCard } from "./ceo/ceo-plan-summary-card";
 
 const NEW_PROJECT = "__hall_new_project__";
@@ -22,7 +25,7 @@ const MAX_TITLE_LENGTH = 200;
 const MAX_RECENT_REQUESTS = 10;
 
 type MessageStatus = "sending" | "planning_started" | "request_failed" | "planning_failed";
-type PlanAction = "continuing" | "approving";
+type PlanAction = "continuing" | "approving" | "saving_agent_choices" | "preparing";
 
 interface ConversationEntry {
   readonly id: string;
@@ -33,15 +36,18 @@ interface ConversationEntry {
   readonly plan?: CeoPlan;
   readonly version?: CeoPlanVersion | undefined;
   readonly mutationToken?: string | undefined;
+  readonly links: readonly CeoDelegationLink[];
   readonly planAction: PlanAction | null;
   readonly planActionError: string | null;
   readonly approvalConfirmed: boolean;
+  readonly prepareConfirmed: boolean;
 }
 
 interface PlanResult {
   readonly plan: CeoPlan;
   readonly version?: CeoPlanVersion | undefined;
   readonly mutationToken?: string | undefined;
+  readonly links: readonly CeoDelegationLink[];
 }
 
 interface CurrentPlanResult extends PlanResult {
@@ -75,10 +81,12 @@ async function loadPlanResult(
 ): Promise<PlanResult> {
   let plan = knownPlan;
   let mutationToken: string | undefined;
+  let links: readonly CeoDelegationLink[] = [];
   try {
     const detail = await getCeoPlan(baseUrl, knownPlan.id, { signal });
     plan = detail.plan;
     mutationToken = detail.mutationToken;
+    links = detail.links;
   } catch {
     // The list/create response is already a validated plan snapshot. Keep
     // it so navigation remains available even if this refresh fails.
@@ -86,9 +94,9 @@ async function loadPlanResult(
 
   try {
     const version = await getCeoPlanVersion(baseUrl, plan.id, plan.activeVersion, { signal });
-    return { plan, version, mutationToken };
+    return { plan, version, mutationToken, links };
   } catch {
-    return { plan, mutationToken };
+    return { plan, mutationToken, links };
   }
 }
 
@@ -98,12 +106,37 @@ async function loadCurrentPlanResult(baseUrl: string, planId: string): Promise<C
   if (version.version !== detail.plan.activeVersion) {
     throw new Error("The active CEO plan version changed while it was being loaded.");
   }
-  return { plan: detail.plan, version, mutationToken: detail.mutationToken };
+  return {
+    plan: detail.plan,
+    version,
+    mutationToken: detail.mutationToken,
+    links: detail.links,
+  };
 }
 
 function hasUsableActionContext(result: PlanResult): boolean {
   if (result.mutationToken === undefined) return false;
   return result.version?.version === result.plan.activeVersion;
+}
+
+function stepsWithAgentChoices(
+  version: CeoPlanVersion,
+  selections: Readonly<Record<string, string>>,
+): readonly CeoPlanStepEditInput[] {
+  return version.steps.map((step) => {
+    const selectedAdapterId = selections[step.id] ?? step.selectedAdapterId;
+    return {
+      id: step.id,
+      position: step.position,
+      title: step.title,
+      objective: step.objective,
+      boundedInstructions: step.boundedInstructions,
+      acceptanceCriteria: step.acceptanceCriteria,
+      dependencies: step.dependencies,
+      ...(step.requirements !== undefined ? { requirements: step.requirements } : {}),
+      ...(selectedAdapterId !== undefined ? { selectedAdapterId } : {}),
+    };
+  });
 }
 
 export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
@@ -166,9 +199,11 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
                 request: record.task.description,
                 status: "planning_failed",
                 parentTaskId: record.task.taskId,
+                links: [],
                 planAction: null,
                 planActionError: null,
                 approvalConfirmed: false,
+                prepareConfirmed: false,
               };
             }
 
@@ -184,9 +219,11 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
               ...(result.mutationToken !== undefined
                 ? { mutationToken: result.mutationToken }
                 : {}),
+              links: result.links,
               planAction: null,
               planActionError: null,
               approvalConfirmed: false,
+              prepareConfirmed: false,
             };
           }),
         );
@@ -231,8 +268,10 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
           result.version ??
           (created.version.version === result.plan.activeVersion ? created.version : undefined),
         mutationToken: result.mutationToken,
+        links: result.links,
         planActionError: null,
         approvalConfirmed: false,
+        prepareConfirmed: false,
       }));
     } catch {
       updateMessage(messageId, (entry) => ({ ...entry, status: "planning_failed" }));
@@ -267,8 +306,10 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
       plan: refreshed.plan,
       version: refreshed.version,
       mutationToken: refreshed.mutationToken,
+      links: refreshed.links,
       planActionError: actionError,
       approvalConfirmed: false,
+      prepareConfirmed: false,
     }));
   }
 
@@ -276,6 +317,7 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
     messageId: string,
     mutatedPlan: CeoPlan,
     reviewedVersion: CeoPlanVersion,
+    knownLinks: readonly CeoDelegationLink[] = [],
   ): Promise<void> {
     try {
       const refreshed = await loadCurrentPlanResult(baseUrl, mutatedPlan.id);
@@ -285,8 +327,10 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
         plan: refreshed.plan,
         version: refreshed.version,
         mutationToken: refreshed.mutationToken,
+        links: refreshed.links,
         planActionError: null,
         approvalConfirmed: false,
+        prepareConfirmed: false,
       }));
     } catch {
       updateMessage(messageId, (entry) => ({
@@ -296,9 +340,11 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
         version:
           reviewedVersion.version === mutatedPlan.activeVersion ? reviewedVersion : undefined,
         mutationToken: undefined,
+        links: knownLinks,
         planActionError:
           "The plan moved forward, but Hall couldn’t refresh its latest status. Reload this page to continue.",
         approvalConfirmed: false,
+        prepareConfirmed: false,
       }));
     }
   }
@@ -316,6 +362,7 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
       planAction: "continuing",
       planActionError: null,
       approvalConfirmed: false,
+      prepareConfirmed: false,
     }));
 
     try {
@@ -348,6 +395,7 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
       planAction: "approving",
       planActionError: null,
       approvalConfirmed: false,
+      prepareConfirmed: false,
     }));
 
     try {
@@ -364,6 +412,110 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
         "awaiting_approval",
         "approved",
         "Hall couldn’t approve the plan. Please try again.",
+      );
+    } finally {
+      updateMessage(messageId, (entry) => ({ ...entry, planAction: null }));
+      setBusyMessageId(null);
+    }
+  }
+
+  async function saveAgentChoices(
+    messageId: string,
+    knownPlan: CeoPlan,
+    reviewedVersion: CeoPlanVersion,
+    mutationToken: string,
+    selections: Readonly<Record<string, string>>,
+  ): Promise<void> {
+    if (busyMessageId !== null) return;
+    const missingChoice = reviewedVersion.steps.some(
+      (step) =>
+        step.selectedAdapterId === undefined &&
+        step.recommendedAdapterId === undefined &&
+        selections[step.id] === undefined,
+    );
+    if (
+      knownPlan.status !== "approved" ||
+      reviewedVersion.version !== knownPlan.activeVersion ||
+      missingChoice
+    ) {
+      return;
+    }
+
+    setBusyMessageId(messageId);
+    updateMessage(messageId, (entry) => ({
+      ...entry,
+      planAction: "saving_agent_choices",
+      planActionError: null,
+      approvalConfirmed: false,
+      prepareConfirmed: false,
+    }));
+
+    try {
+      const created = await createCeoPlanVersion(baseUrl, knownPlan.id, {
+        expectedMutationToken: mutationToken,
+        objective: reviewedVersion.objective,
+        summary: reviewedVersion.summary,
+        assumptions: reviewedVersion.assumptions,
+        constraints: reviewedVersion.constraints,
+        steps: stepsWithAgentChoices(reviewedVersion, selections),
+      });
+      await refreshAfterMutationSuccess(messageId, created.plan, created.version);
+    } catch {
+      await refreshAfterMutationFailure(
+        messageId,
+        knownPlan,
+        "approved",
+        "draft",
+        "Hall couldn’t save those agent choices. Please try again, or review the full plan.",
+      );
+    } finally {
+      updateMessage(messageId, (entry) => ({ ...entry, planAction: null }));
+      setBusyMessageId(null);
+    }
+  }
+
+  async function prepareWork(
+    messageId: string,
+    knownPlan: CeoPlan,
+    reviewedVersion: CeoPlanVersion,
+    mutationToken: string,
+  ): Promise<void> {
+    if (busyMessageId !== null) return;
+    const missingAgent = reviewedVersion.steps.some(
+      (step) => step.selectedAdapterId === undefined && step.recommendedAdapterId === undefined,
+    );
+    if (
+      knownPlan.status !== "approved" ||
+      reviewedVersion.version !== knownPlan.activeVersion ||
+      missingAgent
+    ) {
+      return;
+    }
+
+    setBusyMessageId(messageId);
+    updateMessage(messageId, (entry) => ({
+      ...entry,
+      planAction: "preparing",
+      planActionError: null,
+      approvalConfirmed: false,
+      prepareConfirmed: false,
+    }));
+
+    try {
+      const delegated = await delegateCeoPlan(baseUrl, knownPlan.id, mutationToken);
+      await refreshAfterMutationSuccess(
+        messageId,
+        delegated.plan,
+        reviewedVersion,
+        delegated.links,
+      );
+    } catch {
+      await refreshAfterMutationFailure(
+        messageId,
+        knownPlan,
+        "approved",
+        "delegated",
+        "Hall couldn’t prepare the work. An agent or the plan may need review.",
       );
     } finally {
       updateMessage(messageId, (entry) => ({ ...entry, planAction: null }));
@@ -407,9 +559,11 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
         projectName,
         request: trimmedRequest,
         status: "sending",
+        links: [],
         planAction: null,
         planActionError: null,
         approvalConfirmed: false,
+        prepareConfirmed: false,
       },
     ]);
 
@@ -436,8 +590,10 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
             result.version ??
             (created.version.version === result.plan.activeVersion ? created.version : undefined),
           mutationToken: result.mutationToken,
+          links: result.links,
           planActionError: null,
           approvalConfirmed: false,
+          prepareConfirmed: false,
         }));
         setRequest("");
         if (selectedProject === NEW_PROJECT && !projects.includes(projectName)) {
@@ -516,8 +672,10 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
                   ) : null}
                   {entry.plan ? (
                     <CeoPlanSummaryCard
+                      baseUrl={baseUrl}
                       plan={entry.plan}
                       {...(entry.version !== undefined ? { version: entry.version } : {})}
+                      links={entry.links}
                       activeAction={entry.planAction}
                       actionError={entry.planActionError}
                       actionsDisabled={isBusy}
@@ -530,6 +688,11 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
                         entry.version?.version === entry.plan.activeVersion
                       }
                       approvalConfirmed={entry.approvalConfirmed}
+                      canPrepare={
+                        entry.mutationToken !== undefined &&
+                        entry.version?.version === entry.plan.activeVersion
+                      }
+                      prepareConfirmed={entry.prepareConfirmed}
                       onContinue={() => {
                         const plan = entry.plan;
                         const version = entry.version;
@@ -546,6 +709,7 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
                         updateMessage(entry.id, (current) => ({
                           ...current,
                           approvalConfirmed: confirmed,
+                          prepareConfirmed: false,
                           planActionError: null,
                         }));
                       }}
@@ -560,6 +724,39 @@ export function WisdomGateway({ baseUrl }: { readonly baseUrl: string }) {
                           entry.approvalConfirmed
                         ) {
                           void approvePlan(entry.id, plan, version, mutationToken);
+                        }
+                      }}
+                      onPrepareConfirmedChange={(confirmed) => {
+                        updateMessage(entry.id, (current) => ({
+                          ...current,
+                          approvalConfirmed: false,
+                          prepareConfirmed: confirmed,
+                          planActionError: null,
+                        }));
+                      }}
+                      onPrepare={() => {
+                        const plan = entry.plan;
+                        const version = entry.version;
+                        const mutationToken = entry.mutationToken;
+                        if (
+                          plan !== undefined &&
+                          version?.version === plan.activeVersion &&
+                          mutationToken !== undefined &&
+                          entry.prepareConfirmed
+                        ) {
+                          void prepareWork(entry.id, plan, version, mutationToken);
+                        }
+                      }}
+                      onSaveAgentChoices={(selections) => {
+                        const plan = entry.plan;
+                        const version = entry.version;
+                        const mutationToken = entry.mutationToken;
+                        if (
+                          plan !== undefined &&
+                          version?.version === plan.activeVersion &&
+                          mutationToken !== undefined
+                        ) {
+                          void saveAgentChoices(entry.id, plan, version, mutationToken, selections);
                         }
                       }}
                     />

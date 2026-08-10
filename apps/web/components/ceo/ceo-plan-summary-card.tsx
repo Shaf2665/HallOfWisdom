@@ -1,21 +1,24 @@
 import Link from "next/link";
-import type { CeoPlan, CeoPlanVersion } from "../../lib/api-schemas";
+import type { CeoDelegationLink, CeoPlan, CeoPlanVersion } from "../../lib/api-schemas";
+import { CeoGatewayAgentChoices } from "./ceo-gateway-agent-choices";
 import { CeoPlanStatusBadge } from "./ceo-plan-status-badge";
 
-type PlanAction = "continuing" | "approving";
+type PlanAction = "continuing" | "approving" | "saving_agent_choices" | "preparing";
 
-function planStatusCopy(status: CeoPlan["status"]): string {
-  switch (status) {
+function planStatusCopy(plan: CeoPlan, links: readonly CeoDelegationLink[]): string {
+  switch (plan.status) {
     case "draft":
       return "Your plan is ready to review.";
     case "awaiting_approval":
       return "The plan is ready for your approval.";
     case "approved":
-      return "Plan approved. Hall is ready to delegate the work.";
+      return "Plan approved. Hall is ready to prepare the work.";
     case "rejected":
       return "The plan needs a few changes before it can continue.";
     case "delegated":
-      return "Hall has prepared the work from this plan.";
+      return links.length > 0
+        ? `Work prepared — ${String(links.length)} task${links.length === 1 ? "" : "s"} ready.`
+        : "Work is prepared. Reload this page to see the ready tasks.";
     case "completed":
       return "The work in this plan is complete.";
     case "failed":
@@ -26,45 +29,63 @@ function planStatusCopy(status: CeoPlan["status"]): string {
 }
 
 export function CeoPlanSummaryCard({
+  baseUrl,
   plan,
   version,
+  links,
   activeAction,
   actionError,
   actionsDisabled,
   canContinue,
   canApprove,
   approvalConfirmed,
+  canPrepare,
+  prepareConfirmed,
   onContinue,
   onApprovalConfirmedChange,
   onApprove,
+  onPrepareConfirmedChange,
+  onPrepare,
+  onSaveAgentChoices,
 }: {
+  readonly baseUrl: string;
   readonly plan: CeoPlan;
   readonly version?: CeoPlanVersion;
+  readonly links: readonly CeoDelegationLink[];
   readonly activeAction: PlanAction | null;
   readonly actionError: string | null;
   readonly actionsDisabled: boolean;
   readonly canContinue: boolean;
   readonly canApprove: boolean;
   readonly approvalConfirmed: boolean;
+  readonly canPrepare: boolean;
+  readonly prepareConfirmed: boolean;
   readonly onContinue: () => void;
   readonly onApprovalConfirmedChange: (confirmed: boolean) => void;
   readonly onApprove: () => void;
+  readonly onPrepareConfirmedChange: (confirmed: boolean) => void;
+  readonly onPrepare: () => void;
+  readonly onSaveAgentChoices: (selections: Readonly<Record<string, string>>) => void;
 }) {
   const orderedSteps = version
     ? [...version.steps].sort((left, right) => left.position - right.position)
     : [];
+  const cardTitle =
+    plan.status === "approved"
+      ? "Plan approved"
+      : plan.status === "delegated"
+        ? "Work prepared"
+        : "Plan ready";
 
   return (
     <div className="mt-4 rounded-xl border border-amber-200 bg-amber-50/70 p-4 text-stone-900 dark:border-amber-900/70 dark:bg-amber-950/20 dark:text-stone-100">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h4 className="font-semibold">
-          {plan.status === "approved" ? "Plan approved" : "Plan ready"}
-        </h4>
-        <CeoPlanStatusBadge status={plan.status} />
+        <h4 className="font-semibold">{cardTitle}</h4>
+        <CeoPlanStatusBadge status={plan.status} friendly />
       </div>
 
       <p className="mt-2 text-sm leading-6 text-stone-700 dark:text-stone-200">
-        {planStatusCopy(plan.status)}
+        {planStatusCopy(plan, links)}
       </p>
 
       {version ? (
@@ -148,8 +169,36 @@ export function CeoPlanSummaryCard({
         </div>
       ) : null}
 
+      {plan.status === "approved" && version ? (
+        <div className="mt-4 space-y-4">
+          <CeoGatewayAgentChoices
+            key={`${plan.id}:${String(version.version)}:${actionError ?? "ready"}`}
+            baseUrl={baseUrl}
+            parentTaskId={plan.parentTaskId}
+            steps={orderedSteps}
+            actionsDisabled={actionsDisabled}
+            canPrepare={canPrepare}
+            saving={activeAction === "saving_agent_choices"}
+            preparing={activeAction === "preparing"}
+            prepareConfirmed={prepareConfirmed}
+            onPrepareConfirmedChange={onPrepareConfirmedChange}
+            onPrepare={onPrepare}
+            onSave={onSaveAgentChoices}
+          />
+          <div>
+            <Link
+              href={`/ceo/${encodeURIComponent(plan.id)}`}
+              className="inline-flex rounded-lg border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:text-amber-100 dark:hover:bg-amber-950/60"
+            >
+              Review full plan
+            </Link>
+          </div>
+        </div>
+      ) : null}
+
       {(plan.status === "draft" && !canContinue) ||
-      (plan.status === "awaiting_approval" && !canApprove) ? (
+      (plan.status === "awaiting_approval" && !canApprove) ||
+      (plan.status === "approved" && !canPrepare) ? (
         <p className="mt-3 text-sm text-amber-800 dark:text-amber-300">
           Plan actions couldn’t be loaded. Reload this page, or review the full plan.
         </p>
@@ -157,7 +206,7 @@ export function CeoPlanSummaryCard({
 
       {plan.status !== "draft" &&
       plan.status !== "awaiting_approval" &&
-      plan.status !== "approved" ? (
+      (plan.status !== "approved" || version === undefined) ? (
         <Link
           href={`/ceo/${encodeURIComponent(plan.id)}`}
           className="mt-4 inline-flex rounded-lg border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-900 hover:bg-amber-100 dark:border-amber-800 dark:text-amber-100 dark:hover:bg-amber-950/60"
