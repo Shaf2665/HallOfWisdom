@@ -17,6 +17,7 @@ import {
 import type { CeoPlanStepEditInput } from "../lib/api-client";
 import type { CeoDelegationLink, CeoPlan, CeoPlanVersion } from "../lib/api-schemas";
 import { CeoPlanSummaryCard } from "./ceo/ceo-plan-summary-card";
+import { GatewayOverview } from "./gateway-overview";
 
 const NEW_PROJECT = "__hall_new_project__";
 const MAX_PROJECT_LENGTH = 128;
@@ -634,6 +635,8 @@ export function WisdomGateway({
           Describe the outcome in your own words. Hall’s CEO will turn it into a plan for you.
         </p>
       </div>
+
+      <GatewayOverview baseUrl={baseUrl} />
 
       {historyState === "loading" ? (
         <p role="status" className="text-center text-sm text-stone-500 dark:text-stone-400">
