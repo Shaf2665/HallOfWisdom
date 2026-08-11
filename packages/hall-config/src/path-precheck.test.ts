@@ -2,11 +2,12 @@ import path from "node:path";
 import os from "node:os";
 import { describe, expect, it } from "vitest";
 import { HallConfigPathPrecheckError, precheckHallOwnedPath } from "./path-precheck.js";
+import { TEST_DATA_DIR } from "./test-paths.js";
 
 describe("precheckHallOwnedPath", () => {
   it("accepts a plausible absolute path", () => {
     expect(() => {
-      precheckHallOwnedPath("D:\\HallOfWisdomData", "dataDir");
+      precheckHallOwnedPath(TEST_DATA_DIR, "dataDir");
     }).not.toThrow();
   });
 
@@ -42,7 +43,7 @@ describe("precheckHallOwnedPath", () => {
   });
 
   it("accepts a path built with path.join to prove platform-appropriate separators work", () => {
-    const candidate = path.join(os.platform() === "win32" ? "D:\\" : "/", "HallOfWisdomData");
+    const candidate = path.join(path.parse(TEST_DATA_DIR).root, "HallOfWisdomData");
     expect(() => {
       precheckHallOwnedPath(candidate, "dataDir");
     }).not.toThrow();

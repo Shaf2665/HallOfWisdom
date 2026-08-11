@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { HallConfigNotFoundError, loadConfig, saveConfig, tryLoadConfig } from "./config-store.js";
 import { HallConfigValidationError, UnsupportedHallConfigSchemaVersionError } from "./schema.js";
+import { TEST_WORKSPACE_ROOT } from "./test-paths.js";
 
 let tmpDir: string;
 let configPath: string;
@@ -19,7 +20,7 @@ afterEach(() => {
 
 const VALID_CONFIG = {
   schemaVersion: 1 as const,
-  workspaceRoot: "D:\\HallOfWisdom",
+  workspaceRoot: TEST_WORKSPACE_ROOT,
   comparisonRoot: null,
   dataDir: undefined,
   agentWorktreeRoot: undefined,
@@ -32,15 +33,16 @@ describe("saveConfig / loadConfig round-trip", () => {
   it("creates the directory and writes a readable config", () => {
     saveConfig(VALID_CONFIG, configPath);
     const loaded = loadConfig(configPath);
-    expect(loaded.config.workspaceRoot).toBe("D:\\HallOfWisdom");
+    expect(loaded.config.workspaceRoot).toBe(TEST_WORKSPACE_ROOT);
     expect(loaded.path).toBe(configPath);
   });
 
   it("overwrites an existing config atomically (no leftover temp files)", () => {
     saveConfig(VALID_CONFIG, configPath);
-    saveConfig({ ...VALID_CONFIG, workspaceRoot: "D:\\Other" }, configPath);
+    const otherWorkspaceRoot = path.join(path.dirname(TEST_WORKSPACE_ROOT), "Other");
+    saveConfig({ ...VALID_CONFIG, workspaceRoot: otherWorkspaceRoot }, configPath);
     const loaded = loadConfig(configPath);
-    expect(loaded.config.workspaceRoot).toBe("D:\\Other");
+    expect(loaded.config.workspaceRoot).toBe(otherWorkspaceRoot);
     const dirEntries = fs.readdirSync(path.dirname(configPath));
     expect(dirEntries).toEqual(["config.json"]);
   });
@@ -84,7 +86,7 @@ describe("tryLoadConfig", () => {
 
   it("returns the loaded config when the file exists", () => {
     saveConfig(VALID_CONFIG, configPath);
-    expect(tryLoadConfig(configPath)?.config.workspaceRoot).toBe("D:\\HallOfWisdom");
+    expect(tryLoadConfig(configPath)?.config.workspaceRoot).toBe(TEST_WORKSPACE_ROOT);
   });
 
   it("still throws on a malformed existing file (never masks corruption as absence)", () => {

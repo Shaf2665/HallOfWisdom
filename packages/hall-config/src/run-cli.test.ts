@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { runCli } from "./run-cli.js";
 import { saveConfig } from "./config-store.js";
+import { TEST_WORKSPACE_ROOT } from "./test-paths.js";
 
 let tmpDir: string;
 let configPath: string;
@@ -24,7 +25,7 @@ function captureStdout() {
 
 const VALID_CANDIDATE = {
   schemaVersion: 1,
-  workspaceRoot: "D:\\HallOfWisdom",
+  workspaceRoot: TEST_WORKSPACE_ROOT,
   comparisonRoot: null,
   hallCorePort: 4310,
   hallWebPort: 3000,
@@ -64,7 +65,7 @@ describe("runCli status", () => {
       throw new Error("Invalid config object");
     }
     const config = obj.config as { workspaceRoot?: unknown };
-    expect(config.workspaceRoot).toBe("D:\\HallOfWisdom");
+    expect(config.workspaceRoot).toBe(TEST_WORKSPACE_ROOT);
   });
 
   it("reports a non-null error (still exit 0) for a malformed existing file, never crashing install.ps1's status check", () => {

@@ -6,6 +6,7 @@ import {
   resolveHallConfigDir,
   resolveHallConfigFilePath,
 } from "./config-path.js";
+import { TEST_CONFIG_DIR } from "./test-paths.js";
 
 describe("resolveHallConfigDir", () => {
   it("uses %LOCALAPPDATA%\\HallOfWisdom on win32", () => {
@@ -34,9 +35,9 @@ describe("resolveHallConfigDir", () => {
   });
 
   it("HALL_CONFIG_DIR env override wins on every platform", () => {
-    const override = { [HALL_CONFIG_DIR_ENV_OVERRIDE]: "D:\\FakeHallConfigForTests" };
-    expect(resolveHallConfigDir(override, "win32")).toBe("D:\\FakeHallConfigForTests");
-    expect(resolveHallConfigDir(override, "linux")).toBe("D:\\FakeHallConfigForTests");
+    const override = { [HALL_CONFIG_DIR_ENV_OVERRIDE]: TEST_CONFIG_DIR };
+    expect(resolveHallConfigDir(override, "win32")).toBe(TEST_CONFIG_DIR);
+    expect(resolveHallConfigDir(override, "linux")).toBe(TEST_CONFIG_DIR);
   });
 
   it("ignores a blank HALL_CONFIG_DIR override", () => {

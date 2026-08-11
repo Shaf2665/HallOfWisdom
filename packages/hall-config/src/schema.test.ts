@@ -7,17 +7,23 @@ import {
   UnsupportedHallConfigSchemaVersionError,
   parseHallConfig,
 } from "./schema.js";
+import {
+  TEST_AGENT_WORKTREE_ROOT,
+  TEST_COMPARISON_ROOT,
+  TEST_DATA_DIR,
+  TEST_WORKSPACE_ROOT,
+} from "./test-paths.js";
 
 const BASE = {
   schemaVersion: 1,
-  workspaceRoot: "D:\\HallOfWisdom",
+  workspaceRoot: TEST_WORKSPACE_ROOT,
   comparisonRoot: null,
 };
 
 describe("parseHallConfig", () => {
   it("parses a minimal valid config, applying port/codex defaults", () => {
     const config = parseHallConfig(BASE);
-    expect(config.workspaceRoot).toBe("D:\\HallOfWisdom");
+    expect(config.workspaceRoot).toBe(TEST_WORKSPACE_ROOT);
     expect(config.hallCorePort).toBe(DEFAULT_HALL_CORE_PORT);
     expect(config.hallWebPort).toBe(DEFAULT_HALL_WEB_PORT);
     expect(config.codexTrustedLocal).toBe(false);
@@ -29,15 +35,15 @@ describe("parseHallConfig", () => {
   it("parses a fully populated config", () => {
     const config = parseHallConfig({
       ...BASE,
-      dataDir: "D:\\HallOfWisdomData",
-      agentWorktreeRoot: "D:\\HallOfWisdomAgentWorktrees",
-      comparisonRoot: "D:\\HallOfWisdomComparisons",
+      dataDir: TEST_DATA_DIR,
+      agentWorktreeRoot: TEST_AGENT_WORKTREE_ROOT,
+      comparisonRoot: TEST_COMPARISON_ROOT,
       hallCorePort: 5000,
       hallWebPort: 5001,
       codexTrustedLocal: true,
     });
-    expect(config.dataDir).toBe("D:\\HallOfWisdomData");
-    expect(config.comparisonRoot).toBe("D:\\HallOfWisdomComparisons");
+    expect(config.dataDir).toBe(TEST_DATA_DIR);
+    expect(config.comparisonRoot).toBe(TEST_COMPARISON_ROOT);
     expect(config.codexTrustedLocal).toBe(true);
   });
 
