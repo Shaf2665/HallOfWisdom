@@ -7,6 +7,7 @@ import {
   createCeoPlanVersion,
   getCeoPlan,
   getCeoPlanVersion,
+  getTask,
   listCeoApprovals,
   submitCeoPlan,
 } from "../../lib/api-client";
@@ -73,6 +74,7 @@ export function CeoPlanDetail({
   const [links, setLinks] = useState<readonly CeoDelegationLink[]>([]);
   const [mutationToken, setMutationToken] = useState("");
   const [activeVersion, setActiveVersion] = useState<CeoPlanVersion | null>(null);
+  const [parentTaskTitle, setParentTaskTitle] = useState<string | null>(null);
   const [approvals, setApprovals] = useState<readonly CeoApproval[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -107,8 +109,14 @@ export function CeoPlanDetail({
       setLinks(planResponse.links);
       setMutationToken(planResponse.mutationToken);
       setApprovals(approvalsResponse.approvals);
-      const version = await getCeoPlanVersion(baseUrl, planId, planResponse.plan.activeVersion);
+      const [version, taskTitle] = await Promise.all([
+        getCeoPlanVersion(baseUrl, planId, planResponse.plan.activeVersion),
+        getTask(baseUrl, planResponse.plan.parentTaskId)
+          .then((taskRecord) => taskRecord.task.title)
+          .catch(() => planResponse.plan.parentTaskId),
+      ]);
       setActiveVersion(version);
+      setParentTaskTitle(taskTitle);
       setState("ready");
     } catch (error) {
       setLoadError(safeMessage(error));
@@ -258,7 +266,9 @@ export function CeoPlanDetail({
 
       <section className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-2">
-          <h2 className="text-lg font-semibold">CEO plan for task {plan.parentTaskId}</h2>
+          <h2 className="text-lg font-semibold">
+            CEO Plan — {parentTaskTitle ?? plan.parentTaskId}
+          </h2>
           <CeoPlanStatusBadge status={plan.status} />
         </div>
         <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-stone-500 dark:text-stone-400 sm:grid-cols-4">

@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { ApiClientError, getTask, listCeoPlans } from "../../lib/api-client";
+import { ApiClientError, getTask, listCeoPlans, listTasks } from "../../lib/api-client";
 import type { CeoPlan, CreateCeoPlanResponse, TaskRecord } from "../../lib/api-schemas";
 import { CeoPlanStatusBadge } from "./ceo-plan-status-badge";
 import { CreateCeoPlanDialog } from "./create-ceo-plan-dialog";
@@ -32,6 +32,7 @@ export function CeoPlansList({
   const router = useRouter();
   const [plans, setPlans] = useState<readonly CeoPlan[]>([]);
   const [parentTask, setParentTask] = useState<TaskRecord | null>(null);
+  const [tasks, setTasks] = useState<readonly TaskRecord[]>([]);
   const [state, setState] = useState<"loading" | "ready" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -41,13 +42,19 @@ export function CeoPlansList({
     Promise.all([
       listCeoPlans(baseUrl, { signal: controller.signal }),
       parentTaskId
-        ? getTask(baseUrl, parentTaskId, { signal: controller.signal })
+        ? getTask(baseUrl, parentTaskId, { signal: controller.signal }).catch(() => null)
         : Promise.resolve(null),
+      parentTaskId
+        ? Promise.resolve([])
+        : listTasks(baseUrl, { signal: controller.signal })
+            .then((response) => response.tasks)
+            .catch(() => []),
     ])
-      .then(([plansResponse, taskRecord]) => {
+      .then(([plansResponse, taskRecord, taskRecords]) => {
         if (controller.signal.aborted) return;
         setPlans(plansResponse.plans);
         setParentTask(taskRecord);
+        setTasks(taskRecords);
         setState("ready");
       })
       .catch((error: unknown) => {
@@ -83,6 +90,7 @@ export function CeoPlansList({
 
   const visible = parentTaskId ? plans.filter((p) => p.parentTaskId === parentTaskId) : plans;
   const sorted = [...visible].sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  const taskTitleById = new Map(tasks.map((record) => [record.task.taskId, record.task.title]));
 
   return (
     <div className="flex flex-col gap-4">
@@ -132,7 +140,7 @@ export function CeoPlansList({
                 </Link>
                 {parentTaskId ? null : (
                   <p className="text-xs text-stone-500 dark:text-stone-400">
-                    Task {plan.parentTaskId}
+                    Task {taskTitleById.get(plan.parentTaskId) ?? plan.parentTaskId}
                   </p>
                 )}
               </div>

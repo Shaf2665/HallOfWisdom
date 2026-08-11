@@ -7,6 +7,7 @@ import type {
   CeoPlanVersion,
   GetCeoPlanResponse,
   RoutingAnalysisResponse,
+  TaskRecord,
 } from "../../lib/api-schemas";
 import { CeoPlanDetail } from "./ceo-plan-detail";
 
@@ -20,6 +21,7 @@ vi.mock("../../lib/api-client", async () => {
     listCeoApprovals: vi.fn(),
     submitCeoPlan: vi.fn(),
     createCeoPlanVersion: vi.fn(),
+    getTask: vi.fn(),
     getRoutingAnalysis: vi.fn(),
     listAdapters: vi.fn(),
   };
@@ -94,10 +96,34 @@ function makeGetPlanResponse(
   };
 }
 
+function makeTaskRecord(overrides: Partial<TaskRecord["task"]> = {}): TaskRecord {
+  return {
+    task: {
+      taskId: PARENT_TASK_ID,
+      projectId: "project-1",
+      title: "Add authentication system",
+      description: "",
+      priority: "normal",
+      status: "backlog",
+      dependencyTaskIds: [],
+      createdAt: "2026-07-15T12:00:00.000Z",
+      updatedAt: "2026-07-15T12:00:00.000Z",
+      ...overrides,
+    },
+    adapterId: undefined,
+    agentId: undefined,
+    runId: undefined,
+    eventCount: 0,
+    cancellationRequested: false,
+    createdAt: "2026-07-15T12:00:00.000Z",
+  };
+}
+
 describe("CeoPlanDetail", () => {
   beforeEach(() => {
     vi.mocked(apiClient.getRoutingAnalysis).mockReset();
     vi.mocked(apiClient.listAdapters).mockResolvedValue({ adapters: [] });
+    vi.mocked(apiClient.getTask).mockResolvedValue(makeTaskRecord());
   });
 
   afterEach(() => {
@@ -125,6 +151,10 @@ describe("CeoPlanDetail", () => {
 
     render(<CeoPlanDetail baseUrl={BASE_URL} wsBaseUrl={WS_BASE_URL} planId={PLAN_ID} />);
 
+    expect(
+      await screen.findByRole("heading", { name: "CEO Plan — Add authentication system" }),
+    ).toBeInTheDocument();
+    expect(apiClient.getTask).toHaveBeenCalledWith(BASE_URL, PARENT_TASK_ID);
     expect(await screen.findByRole("button", { name: "Edit plan…" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Submit for approval" })).not.toBeInTheDocument();
 
@@ -272,5 +302,20 @@ describe("CeoPlanDetail", () => {
       await screen.findByText("New plan version saved with updated agent choices."),
     ).toBeInTheDocument();
     expect(screen.getByText("Active version").parentElement).toHaveTextContent("2");
+  });
+
+  it("falls back to the parent task ID when its title cannot be loaded", async () => {
+    const plan = makePlan();
+    const version = makeVersion();
+    vi.mocked(apiClient.getCeoPlan).mockResolvedValue(makeGetPlanResponse({ plan }));
+    vi.mocked(apiClient.getCeoPlanVersion).mockResolvedValue(version);
+    vi.mocked(apiClient.listCeoApprovals).mockResolvedValue({ approvals: [] });
+    vi.mocked(apiClient.getTask).mockRejectedValue(new Error("Task unavailable"));
+
+    render(<CeoPlanDetail baseUrl={BASE_URL} wsBaseUrl={WS_BASE_URL} planId={PLAN_ID} />);
+
+    expect(
+      await screen.findByRole("heading", { name: `CEO Plan — ${PARENT_TASK_ID}` }),
+    ).toBeInTheDocument();
   });
 });
