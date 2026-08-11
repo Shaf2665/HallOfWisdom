@@ -1,8 +1,13 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import * as apiClient from "../../lib/api-client";
-import type { CeoPlan, CeoPlanVersion, GetCeoPlanResponse } from "../../lib/api-schemas";
+import type {
+  CeoPlan,
+  CeoPlanVersion,
+  GetCeoPlanResponse,
+  RoutingAnalysisResponse,
+} from "../../lib/api-schemas";
 import { CeoPlanDetail } from "./ceo-plan-detail";
 
 vi.mock("../../lib/api-client", async () => {
@@ -15,6 +20,8 @@ vi.mock("../../lib/api-client", async () => {
     listCeoApprovals: vi.fn(),
     submitCeoPlan: vi.fn(),
     createCeoPlanVersion: vi.fn(),
+    getRoutingAnalysis: vi.fn(),
+    listAdapters: vi.fn(),
   };
 });
 
@@ -88,6 +95,11 @@ function makeGetPlanResponse(
 }
 
 describe("CeoPlanDetail", () => {
+  beforeEach(() => {
+    vi.mocked(apiClient.getRoutingAnalysis).mockReset();
+    vi.mocked(apiClient.listAdapters).mockResolvedValue({ adapters: [] });
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -135,5 +147,130 @@ describe("CeoPlanDetail", () => {
     await waitFor(() => {
       expect(apiClient.submitCeoPlan).toHaveBeenCalledWith(BASE_URL, PLAN_ID, "tok-2");
     });
+  });
+
+  it("saves inline agent choices as a new version with every other step field preserved", async () => {
+    const draftPlan = makePlan({ status: "draft", activeVersion: 1 });
+    const revisedPlan = makePlan({ status: "draft", activeVersion: 2 });
+    const baseStep = makeVersion().steps[0];
+    if (baseStep === undefined) throw new Error("Expected the fixture to include one step.");
+    const version1 = makeVersion({
+      steps: [
+        {
+          ...baseStep,
+          requirements: {
+            requiredCapabilities: ["project.read"],
+            allowedExecutionTrust: ["isolated"],
+          },
+          recommendedAdapterId: "hall.claude-code",
+        },
+      ],
+    });
+    const version2 = makeVersion({ version: 2, steps: version1.steps });
+    const analysis: RoutingAnalysisResponse = {
+      taskId: PARENT_TASK_ID,
+      requiredCapabilities: ["project.read"],
+      allowedExecutionTrust: ["isolated"],
+      candidates: [
+        {
+          adapterId: "hall.claude-code",
+          displayName: "Claude Code",
+          availability: "available",
+          assignable: true,
+          executionTrust: "isolated",
+          verifiedCapabilities: ["project.read"],
+          missingCapabilities: [],
+          restrictedCapabilities: [],
+          trustAllowed: true,
+          safeReason: "Available.",
+          rank: 1,
+        },
+        {
+          adapterId: "hall.mock-agent",
+          displayName: "Mock Agent",
+          availability: "available",
+          assignable: true,
+          executionTrust: "isolated",
+          verifiedCapabilities: ["project.read"],
+          missingCapabilities: [],
+          restrictedCapabilities: [],
+          trustAllowed: true,
+          safeReason: "Available.",
+          rank: 2,
+        },
+        {
+          adapterId: "hall.unavailable-agent",
+          displayName: "Unavailable Agent",
+          availability: "unavailable",
+          assignable: false,
+          executionTrust: "unavailable",
+          verifiedCapabilities: [],
+          missingCapabilities: ["project.read"],
+          restrictedCapabilities: [],
+          trustAllowed: false,
+          safeReason: "Unavailable.",
+        },
+      ],
+      recommendedAdapterId: "hall.claude-code",
+      explanation: "Claude Code is recommended.",
+      generatedAt: "2026-07-15T12:00:00.000Z",
+    };
+
+    vi.mocked(apiClient.getCeoPlan)
+      .mockResolvedValueOnce(makeGetPlanResponse({ plan: draftPlan, mutationToken: "tok-1" }))
+      .mockResolvedValue(makeGetPlanResponse({ plan: revisedPlan, mutationToken: "tok-2" }));
+    vi.mocked(apiClient.getCeoPlanVersion).mockImplementation((_baseUrl, _planId, version) =>
+      Promise.resolve(version === 1 ? version1 : version2),
+    );
+    vi.mocked(apiClient.listCeoApprovals).mockResolvedValue({ approvals: [] });
+    vi.mocked(apiClient.getRoutingAnalysis).mockResolvedValue(analysis);
+    vi.mocked(apiClient.createCeoPlanVersion).mockResolvedValue({
+      plan: revisedPlan,
+      version: version2,
+    });
+
+    render(<CeoPlanDetail baseUrl={BASE_URL} wsBaseUrl={WS_BASE_URL} planId={PLAN_ID} />);
+
+    const selector = await screen.findByRole("combobox", { name: "Agent for Investigate" });
+    expect(
+      screen.getByRole("option", { name: "Claude Code (hall.claude-code)" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "Unavailable Agent (hall.unavailable-agent)" }),
+    ).toBeNull();
+
+    await userEvent.selectOptions(selector, "hall.mock-agent");
+    await userEvent.click(screen.getByRole("button", { name: "Save agent choices" }));
+
+    await waitFor(() => {
+      expect(apiClient.createCeoPlanVersion).toHaveBeenCalledWith(BASE_URL, PLAN_ID, {
+        expectedMutationToken: "tok-1",
+        objective: version1.objective,
+        summary: version1.summary,
+        assumptions: version1.assumptions,
+        constraints: version1.constraints,
+        steps: [
+          {
+            id: "step-1",
+            position: 0,
+            title: "Investigate",
+            objective: "Understand the current behavior.",
+            boundedInstructions: "Read the relevant files.",
+            acceptanceCriteria: ["A summary of findings is written."],
+            dependencies: [],
+            requirements: {
+              requiredCapabilities: ["project.read"],
+              allowedExecutionTrust: ["isolated"],
+            },
+            selectedAdapterId: "hall.mock-agent",
+          },
+        ],
+      });
+    });
+
+    expect(
+      await screen.findByText("New plan version saved with updated agent choices."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Active version").parentElement).toHaveTextContent("2");
   });
 });

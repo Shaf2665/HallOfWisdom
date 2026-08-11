@@ -14,9 +14,9 @@ import {
   listTasks,
   submitCeoPlan,
 } from "../lib/api-client";
-import type { CeoPlanStepEditInput } from "../lib/api-client";
 import type { CeoDelegationLink, CeoPlan, CeoPlanVersion } from "../lib/api-schemas";
 import { CeoPlanSummaryCard } from "./ceo/ceo-plan-summary-card";
+import { stepsWithAgentChoices, type AgentSelections } from "./ceo/ceo-plan-versioning";
 import { GatewayOverview } from "./gateway-overview";
 
 const NEW_PROJECT = "__hall_new_project__";
@@ -118,26 +118,6 @@ async function loadCurrentPlanResult(baseUrl: string, planId: string): Promise<C
 function hasUsableActionContext(result: PlanResult): boolean {
   if (result.mutationToken === undefined) return false;
   return result.version?.version === result.plan.activeVersion;
-}
-
-function stepsWithAgentChoices(
-  version: CeoPlanVersion,
-  selections: Readonly<Record<string, string>>,
-): readonly CeoPlanStepEditInput[] {
-  return version.steps.map((step) => {
-    const selectedAdapterId = selections[step.id] ?? step.selectedAdapterId;
-    return {
-      id: step.id,
-      position: step.position,
-      title: step.title,
-      objective: step.objective,
-      boundedInstructions: step.boundedInstructions,
-      acceptanceCriteria: step.acceptanceCriteria,
-      dependencies: step.dependencies,
-      ...(step.requirements !== undefined ? { requirements: step.requirements } : {}),
-      ...(selectedAdapterId !== undefined ? { selectedAdapterId } : {}),
-    };
-  });
 }
 
 export function WisdomGateway({
@@ -431,7 +411,7 @@ export function WisdomGateway({
     knownPlan: CeoPlan,
     reviewedVersion: CeoPlanVersion,
     mutationToken: string,
-    selections: Readonly<Record<string, string>>,
+    selections: AgentSelections,
   ): Promise<void> {
     if (busyMessageId !== null) return;
     const missingChoice = reviewedVersion.steps.some(

@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { CeoDelegationLink, CeoPlan, CeoPlanVersion } from "../../lib/api-schemas";
 import { CeoGatewayAgentChoices } from "./ceo-gateway-agent-choices";
 import { CeoGatewayExecutionPanel } from "./ceo-gateway-execution-panel";
+import type { AgentSelections } from "./ceo-plan-versioning";
 import { CeoPlanStatusBadge } from "./ceo-plan-status-badge";
 import { DiscussButton } from "./discuss-button";
 
@@ -69,7 +70,7 @@ export function CeoPlanSummaryCard({
   readonly onApprove: () => void;
   readonly onPrepareConfirmedChange: (confirmed: boolean) => void;
   readonly onPrepare: () => void;
-  readonly onSaveAgentChoices: (selections: Readonly<Record<string, string>>) => void;
+  readonly onSaveAgentChoices: (selections: AgentSelections) => void;
 }) {
   const orderedSteps = version
     ? [...version.steps].sort((left, right) => left.position - right.position)

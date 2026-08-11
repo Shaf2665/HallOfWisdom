@@ -4,6 +4,7 @@ import { useCallback, useEffect, useId, useState } from "react";
 import {
   ApiClientError,
   cancelCeoPlan,
+  createCeoPlanVersion,
   getCeoPlan,
   getCeoPlanVersion,
   listCeoApprovals,
@@ -25,9 +26,15 @@ import { CeoRejectDialog } from "./ceo-reject-dialog";
 import { CeoDelegateDialog } from "./ceo-delegate-dialog";
 import { CeoPlanEditForm } from "./ceo-plan-edit-form";
 import { CeoPlanExecutionSection } from "./ceo-plan-execution-section";
+import { stepsWithAgentChoices, type AgentSelections } from "./ceo-plan-versioning";
+import { useCeoStepAgentChoices } from "./use-ceo-step-agent-choices";
 
 function safeMessage(error: unknown): string {
   return error instanceof ApiClientError ? error.message : "The action could not be completed.";
+}
+
+function hasAgentSelection(selections: AgentSelections, stepId: string): boolean {
+  return Object.prototype.hasOwnProperty.call(selections, stepId);
 }
 
 const CANCELLABLE_STATUSES = new Set([
@@ -77,8 +84,17 @@ export function CeoPlanDetail({
   const [showReject, setShowReject] = useState(false);
   const [showDelegate, setShowDelegate] = useState(false);
   const [showEditForm, setShowEditForm] = useState(false);
+  const [agentSelections, setAgentSelections] = useState<{
+    readonly version: number;
+    readonly values: AgentSelections;
+  }>({ version: 0, values: {} });
 
   const { connectionState, events } = useCeoPlanEvents(planId, wsBaseUrl);
+  const { state: agentChoicesState, choices: agentChoices } = useCeoStepAgentChoices({
+    baseUrl,
+    parentTaskId: plan?.parentTaskId ?? "",
+    steps: activeVersion?.steps ?? [],
+  });
 
   const refresh = useCallback(async (): Promise<void> => {
     try {
@@ -180,7 +196,59 @@ export function CeoPlanDetail({
   const showDelegateAction = plan.status === "approved";
   const showCancel = CANCELLABLE_STATUSES.has(plan.status);
   const showEdit = EDITABLE_STATUSES.has(plan.status);
+  const currentVersion = activeVersion;
   const progressByStepId = new Map(progress.steps.map((s) => [s.stepId, s.status]));
+  const activeAgentSelections =
+    agentSelections.version === currentVersion.version ? agentSelections.values : {};
+  const hasAgentChoiceChanges = currentVersion.steps.some(
+    (step) =>
+      hasAgentSelection(activeAgentSelections, step.id) &&
+      activeAgentSelections[step.id] !== step.selectedAdapterId,
+  );
+
+  function chooseAgent(
+    stepId: string,
+    selectedAdapterId: string,
+    recommendedAdapterId: string | undefined,
+    currentSelectedAdapterId: string | undefined,
+  ): void {
+    const nextSelectedAdapterId =
+      selectedAdapterId === recommendedAdapterId ? undefined : selectedAdapterId;
+    setAgentSelections((current) => {
+      const values = current.version === currentVersion.version ? current.values : {};
+      if (nextSelectedAdapterId === currentSelectedAdapterId) {
+        const { [stepId]: _discarded, ...unchanged } = values;
+        return { version: currentVersion.version, values: unchanged };
+      }
+      return {
+        version: currentVersion.version,
+        values: { ...values, [stepId]: nextSelectedAdapterId },
+      };
+    });
+  }
+
+  async function saveAgentChoices(): Promise<void> {
+    if (busy || !hasAgentChoiceChanges) return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      const created = await createCeoPlanVersion(baseUrl, planId, {
+        expectedMutationToken: mutationToken,
+        objective: currentVersion.objective,
+        summary: currentVersion.summary,
+        assumptions: currentVersion.assumptions,
+        constraints: currentVersion.constraints,
+        steps: stepsWithAgentChoices(currentVersion, activeAgentSelections),
+      });
+      setAgentSelections({ version: created.version.version, values: {} });
+      setAnnouncement("New plan version saved with updated agent choices.");
+      await refresh();
+    } catch (error) {
+      setActionError(safeMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -336,7 +404,16 @@ export function CeoPlanDetail({
         <h3 className="text-sm font-semibold">Steps ({activeVersion.steps.length})</h3>
         {activeVersion.steps.map((step) => {
           const stepProgress = progressByStepId.get(step.id);
-          const adapterId = step.selectedAdapterId ?? step.recommendedAdapterId;
+          const stepChoices = agentChoices[step.id] ?? [];
+          const selectedAdapterId = hasAgentSelection(activeAgentSelections, step.id)
+            ? activeAgentSelections[step.id]
+            : step.selectedAdapterId;
+          const adapterId = selectedAdapterId ?? step.recommendedAdapterId;
+          const matchingChoice = stepChoices.find((choice) => choice.id === adapterId);
+          const effectiveSelection = selectedAdapterId ?? step.recommendedAdapterId;
+          const selectValue = stepChoices.some((choice) => choice.id === effectiveSelection)
+            ? effectiveSelection
+            : "";
           return (
             <div
               key={step.id}
@@ -356,8 +433,60 @@ export function CeoPlanDetail({
               <p className="text-xs text-stone-500 dark:text-stone-400">{step.routingSummary}</p>
               {adapterId ? (
                 <p className="text-xs text-stone-600 dark:text-stone-300">
-                  {step.selectedAdapterId ? "Selected agent" : "Recommended agent"}: {adapterId}
+                  {selectedAdapterId ? "Selected agent" : "Recommended agent"}:{" "}
+                  {matchingChoice ? `${matchingChoice.name} (${matchingChoice.id})` : adapterId}
                 </p>
+              ) : (
+                <p className="text-xs text-stone-500 dark:text-stone-400">
+                  No agent selected or recommended.
+                </p>
+              )}
+              {showEdit ? (
+                <div className="mt-1 flex flex-col gap-1">
+                  <label className="flex flex-wrap items-center gap-2 text-xs font-medium text-stone-700 dark:text-stone-200">
+                    Agent
+                    {agentChoicesState === "loading" ? (
+                      <span className="font-normal text-stone-500 dark:text-stone-400">
+                        Finding available agents…
+                      </span>
+                    ) : null}
+                    {agentChoicesState === "error" ? (
+                      <span className="font-normal text-red-600 dark:text-red-400">
+                        Could not load available agents.
+                      </span>
+                    ) : null}
+                    {agentChoicesState === "ready" && stepChoices.length === 0 ? (
+                      <span className="font-normal text-stone-500 dark:text-stone-400">
+                        No available agent for this step.
+                      </span>
+                    ) : null}
+                    {agentChoicesState === "ready" && stepChoices.length > 0 ? (
+                      <select
+                        aria-label={`Agent for ${step.title}`}
+                        value={selectValue}
+                        disabled={busy}
+                        onChange={(event) => {
+                          chooseAgent(
+                            step.id,
+                            event.target.value,
+                            step.recommendedAdapterId,
+                            step.selectedAdapterId,
+                          );
+                        }}
+                        className="rounded border border-stone-300 bg-white px-2 py-1 text-xs dark:border-stone-700 dark:bg-stone-900"
+                      >
+                        <option value="" disabled>
+                          Choose an agent
+                        </option>
+                        {stepChoices.map((choice) => (
+                          <option key={choice.id} value={choice.id}>
+                            {choice.name} ({choice.id})
+                          </option>
+                        ))}
+                      </select>
+                    ) : null}
+                  </label>
+                </div>
               ) : null}
               {step.dependencies.length > 0 ? (
                 <p className="text-xs text-stone-500 dark:text-stone-400">
@@ -368,6 +497,23 @@ export function CeoPlanDetail({
             </div>
           );
         })}
+        {showEdit ? (
+          <div className="flex flex-wrap items-center gap-3 rounded border border-stone-200 p-3 dark:border-stone-800">
+            <p className="text-xs text-stone-600 dark:text-stone-300">
+              Saving creates a new plan version; it does not start any work.
+            </p>
+            <button
+              type="button"
+              disabled={busy || !hasAgentChoiceChanges}
+              onClick={() => {
+                void saveAgentChoices();
+              }}
+              className="rounded border border-stone-300 px-3 py-1.5 text-sm font-medium text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+            >
+              {busy ? "Saving agent choices…" : "Save agent choices"}
+            </button>
+          </div>
+        ) : null}
       </section>
 
       {approvals.length > 0 ? (

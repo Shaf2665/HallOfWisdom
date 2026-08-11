@@ -1,20 +1,9 @@
 "use client";
 
-import { useEffect, useId, useState } from "react";
-import { getRoutingAnalysis, listAdapters } from "../../lib/api-client";
+import { useId, useState } from "react";
 import type { CeoPlanStep } from "../../lib/api-schemas";
-
-interface AgentChoice {
-  readonly id: string;
-  readonly name: string;
-}
-
-type ChoicesByStep = Readonly<Record<string, readonly AgentChoice[]>>;
-type SelectionsByStep = Readonly<Record<string, string>>;
-
-function sortedChoices(choices: readonly AgentChoice[]): readonly AgentChoice[] {
-  return [...choices].sort((left, right) => left.name.localeCompare(right.name));
-}
+import type { AgentSelections } from "./ceo-plan-versioning";
+import { useCeoStepAgentChoices } from "./use-ceo-step-agent-choices";
 
 export function CeoGatewayAgentChoices({
   baseUrl,
@@ -39,70 +28,11 @@ export function CeoGatewayAgentChoices({
   readonly prepareConfirmed: boolean;
   readonly onPrepareConfirmedChange: (confirmed: boolean) => void;
   readonly onPrepare: () => void;
-  readonly onSave: (selections: SelectionsByStep) => void;
+  readonly onSave: (selections: AgentSelections) => void;
 }) {
   const groupId = useId();
-  const [state, setState] = useState<"loading" | "ready" | "error">("loading");
-  const [choices, setChoices] = useState<ChoicesByStep>({});
-  const [selections, setSelections] = useState<SelectionsByStep>({});
-  const stepsKey = steps
-    .map(
-      (step) =>
-        `${step.id}:${step.selectedAdapterId ?? ""}:${step.recommendedAdapterId ?? ""}:${step.requirements?.requiredCapabilities.join(",") ?? ""}:${step.requirements?.allowedExecutionTrust.join(",") ?? ""}`,
-    )
-    .join("|");
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const needsUnscopedChoices = steps.some((step) => step.requirements === undefined);
-    const unscopedChoicesRequest = needsUnscopedChoices
-      ? listAdapters(baseUrl, { signal: controller.signal }).then(({ adapters }) =>
-          sortedChoices(
-            adapters
-              .filter((adapter) => adapter.assignable)
-              .map((adapter) => ({ id: adapter.adapterId, name: adapter.agentDisplayName })),
-          ),
-        )
-      : undefined;
-
-    Promise.all(
-      steps.map(async (step) => {
-        if (step.requirements === undefined) {
-          return [step.id, (await unscopedChoicesRequest) ?? []] as const;
-        }
-
-        const analysis = await getRoutingAnalysis(baseUrl, parentTaskId, step.requirements, {
-          signal: controller.signal,
-        });
-        return [
-          step.id,
-          sortedChoices(
-            analysis.candidates
-              .filter((candidate) => candidate.rank !== undefined)
-              .map((candidate) => ({ id: candidate.adapterId, name: candidate.displayName })),
-          ),
-        ] as const;
-      }),
-    )
-      .then((entries) => {
-        if (controller.signal.aborted) return;
-        const nextChoices: Record<string, readonly AgentChoice[]> = {};
-        for (const [stepId, stepChoices] of entries) nextChoices[stepId] = stepChoices;
-        setChoices(nextChoices);
-        setState("ready");
-      })
-      .catch(() => {
-        if (controller.signal.aborted) return;
-        setState("error");
-      });
-
-    return () => {
-      controller.abort();
-    };
-    // The immutable active plan version is the identity boundary. `stepsKey`
-    // captures the only step fields that affect these requests.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [baseUrl, parentTaskId, stepsKey]);
+  const [selections, setSelections] = useState<AgentSelections>({});
+  const { state, choices } = useCeoStepAgentChoices({ baseUrl, parentTaskId, steps });
 
   if (state === "loading") {
     return (
