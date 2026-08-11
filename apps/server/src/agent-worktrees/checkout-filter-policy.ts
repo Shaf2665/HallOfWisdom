@@ -83,11 +83,12 @@ export function parseCheckoutFilterConfig(
  * `required` present with exact recognized values, `process` — the modern single-process protocol
  * — present-and-recognized or entirely absent, since older-but-standard Git LFS installs configure
  * only `clean`/`smudge`/`required`). Every other shape is rejected: any filter name other than
- * exactly `lfs`, more than one distinct filter name, a duplicated key (present more than once —
- * Hall does not attempt to re-derive Git's own multi-scope precedence order from unordered
- * `--get-regexp` output, so an ambiguous duplicate fails closed rather than guessing which
- * occurrence is effective), an unrecognized subkey under `filter.lfs.*`, or any recognized subkey
- * whose value does not exactly match one of the fixed recognized forms above.
+ * exactly `lfs`, more than one distinct filter name, a duplicated key with conflicting values
+ * (Hall does not attempt to re-derive Git's own multi-scope precedence order from unordered
+ * `--get-regexp` output), an unrecognized subkey under `filter.lfs.*`, or any recognized subkey
+ * whose value does not exactly match one of the fixed recognized forms above. Byte-identical
+ * duplicates are accepted because common Git LFS installations write the same standard profile
+ * at both system and user scope, leaving no precedence ambiguity.
  */
 export function classifyCheckoutFilterEntries(
   entries: readonly ParsedFilterConfigEntry[],
@@ -111,7 +112,16 @@ export function classifyCheckoutFilterEntries(
     }
   }
   for (const group of bySubkey.values()) {
-    if (group.length > 1) return { kind: "rejected", code: "GIT_LFS_CONFIGURATION_UNSUPPORTED" };
+    const first = group[0];
+    if (
+      first === undefined ||
+      !group.every(
+        (entry) =>
+          entry.value === first.value && entry.isBooleanShorthand === first.isBooleanShorthand,
+      )
+    ) {
+      return { kind: "rejected", code: "GIT_LFS_CONFIGURATION_UNSUPPORTED" };
+    }
   }
   for (const subkey of bySubkey.keys()) {
     if (!RECOGNIZED_LFS_SUBKEYS.has(subkey)) {

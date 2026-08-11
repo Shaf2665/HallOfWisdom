@@ -321,7 +321,7 @@ describe("classifyCheckoutFilterEntries", () => {
     });
   });
 
-  it("rejects a duplicated key even when both occurrences carry the identical recognized value", () => {
+  it("accepts duplicated keys when every occurrence carries the identical recognized value", () => {
     const entries = parseCheckoutFilterConfig(
       nullRecords([
         ["filter.lfs.clean", "git-lfs clean -- %f"],
@@ -330,10 +330,7 @@ describe("classifyCheckoutFilterEntries", () => {
         ["filter.lfs.required", "true"],
       ]),
     );
-    expect(classifyCheckoutFilterEntries(entries ?? [])).toEqual({
-      kind: "rejected",
-      code: "GIT_LFS_CONFIGURATION_UNSUPPORTED",
-    });
+    expect(classifyCheckoutFilterEntries(entries ?? [])).toEqual({ kind: "recognized_lfs" });
   });
 
   it("rejects an absolute custom executable disguised as the lfs filter", () => {
