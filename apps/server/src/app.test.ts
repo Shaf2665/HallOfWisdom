@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION } from "@hall-of-wisdom/protocol";
 import { buildTestApp } from "./test-support.js";
 import { OwnershipLostError } from "./persistence/persistence-errors.js";
+import { createHallAuthentication } from "./auth/hall-auth.js";
 
 describe("createHallCoreApp", () => {
   let tempRoot: string;
@@ -231,14 +232,101 @@ describe("CORS", () => {
     await app.close();
   });
 
-  it("does not enable CORS credentials", async () => {
+  it("enables CORS credentials for the signed session cookie", async () => {
     const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: ALLOWED_ORIGIN });
     const response = await app.inject({
       method: "GET",
       url: "/api/v1/health",
       headers: { origin: ALLOWED_ORIGIN },
     });
-    expect(response.headers["access-control-allow-credentials"]).toBeUndefined();
+    expect(response.headers["access-control-allow-credentials"]).toBe("true");
+    await app.close();
+  });
+});
+
+describe("Hall authentication", () => {
+  let tempRoot: string;
+
+  beforeEach(() => {
+    tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "hall-core-auth-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  });
+
+  function authentication() {
+    return createHallAuthentication({
+      username: "admin",
+      password: "hallofwisdom",
+      sessionSecret: "test-session-secret",
+    });
+  }
+
+  it("keeps health and auth session public but protects Hall APIs", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: tempRoot,
+      authentication: authentication(),
+    });
+    expect((await app.inject({ method: "GET", url: "/api/v1/health" })).statusCode).toBe(200);
+    expect((await app.inject({ method: "GET", url: "/api/v1/auth/session" })).json()).toEqual({
+      authenticated: false,
+    });
+    const protectedResponse = await app.inject({ method: "GET", url: "/api/v1/tasks" });
+    expect(protectedResponse.statusCode).toBe(401);
+    expect(protectedResponse.json<{ error: { code: string } }>().error.code).toBe("AUTH_REQUIRED");
+    await app.close();
+  });
+
+  it("issues a signed session only for valid credentials and accepts it on later requests", async () => {
+    const { app } = await buildTestApp({
+      workspaceRoot: tempRoot,
+      authentication: authentication(),
+    });
+    const invalid = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      payload: { username: "admin", password: "wrong" },
+    });
+    expect(invalid.statusCode).toBe(401);
+    expect(invalid.json<{ error: { message: string } }>().error.message).toBe(
+      "Invalid username or password.",
+    );
+
+    const login = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      payload: { username: "admin", password: "hallofwisdom" },
+    });
+    expect(login.statusCode).toBe(200);
+    expect(login.body).not.toContain("hallofwisdom");
+    expect(login.body).not.toContain("test-session-secret");
+    const cookie = login.headers["set-cookie"];
+    expect(cookie).toContain("HttpOnly");
+    expect(cookie).toContain("SameSite=Lax");
+    expect(cookie).toContain("Path=/");
+    expect(cookie).toContain("Max-Age=604800");
+    const cookieHeader = Array.isArray(cookie) ? cookie[0] : cookie;
+    expect(cookieHeader).toBeDefined();
+    expect(authentication().hasSession(cookieHeader)).toBe(true);
+
+    const session = await app.inject({
+      method: "GET",
+      url: "/api/v1/auth/session",
+      headers: { cookie },
+    });
+    expect(session.json()).toEqual({ authenticated: true });
+    expect(
+      (await app.inject({ method: "GET", url: "/api/v1/tasks", headers: { cookie } })).statusCode,
+    ).toBe(200);
+
+    const logout = await app.inject({
+      method: "POST",
+      url: "/api/v1/auth/logout",
+      headers: { cookie },
+    });
+    expect(logout.json()).toEqual({ authenticated: false });
+    expect(logout.headers["set-cookie"]).toContain("Max-Age=0");
     await app.close();
   });
 });

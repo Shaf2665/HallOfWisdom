@@ -2,6 +2,7 @@ import type { z } from "zod";
 import type { TaskStatus } from "@hall-of-wisdom/protocol";
 import {
   adapterSummarySchema,
+  authSessionResponseSchema,
   agentComparisonRecordSchema,
   cancelComparisonCandidateResponseSchema,
   cancelTaskResponseSchema,
@@ -42,6 +43,7 @@ import {
   systemStorageResponseSchema,
   taskRecordSchema,
   type AgentComparisonRecord,
+  type AuthSessionResponse,
   type CancelComparisonCandidateResponse,
   type CancelTaskResponse,
   type CeoPlan,
@@ -202,7 +204,7 @@ async function request<S extends z.ZodTypeAny>(
         ? {}
         : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(init.body) }),
       signal,
-      credentials: "omit",
+      credentials: "include",
     });
   } catch {
     if (signal.aborted) {
@@ -262,6 +264,44 @@ async function request<S extends z.ZodTypeAny>(
 
 export function getHealth(baseUrl: string, options: RequestOptions = {}): Promise<HealthResponse> {
   return request(`${baseUrl}/api/v1/health`, { method: "GET" }, healthResponseSchema, options);
+}
+
+export function getAuthSession(
+  baseUrl: string,
+  options: RequestOptions = {},
+): Promise<AuthSessionResponse> {
+  return request(
+    `${baseUrl}/api/v1/auth/session`,
+    { method: "GET" },
+    authSessionResponseSchema,
+    options,
+  );
+}
+
+export function login(
+  baseUrl: string,
+  username: string,
+  password: string,
+  options: RequestOptions = {},
+): Promise<AuthSessionResponse> {
+  return request(
+    `${baseUrl}/api/v1/auth/login`,
+    { method: "POST", body: { username, password } },
+    authSessionResponseSchema,
+    options,
+  );
+}
+
+export function logout(
+  baseUrl: string,
+  options: RequestOptions = {},
+): Promise<AuthSessionResponse> {
+  return request(
+    `${baseUrl}/api/v1/auth/logout`,
+    { method: "POST" },
+    authSessionResponseSchema,
+    options,
+  );
 }
 
 export function getSystemStorage(

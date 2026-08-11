@@ -33,6 +33,24 @@ export class InvalidRequestError extends HallCoreError {
   }
 }
 
+export class AuthenticationRequiredError extends HallCoreError {
+  readonly code = "AUTH_REQUIRED";
+  readonly statusCode = 401;
+
+  constructor() {
+    super("Authentication is required.");
+  }
+}
+
+export class AuthenticationInvalidCredentialsError extends HallCoreError {
+  readonly code = "AUTH_INVALID_CREDENTIALS";
+  readonly statusCode = 401;
+
+  constructor() {
+    super("Invalid username or password.");
+  }
+}
+
 export class TaskNotFoundError extends HallCoreError {
   readonly code = "TASK_NOT_FOUND";
   readonly statusCode = 404;

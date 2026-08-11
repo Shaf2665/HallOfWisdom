@@ -35,6 +35,7 @@ import { canonicalizeHallOwnedRoot } from "./agent-worktrees/path-safety.js";
 import { AgentWorktreePathError } from "./agent-worktrees/agent-worktree-errors.js";
 import { runVerifyOnly } from "./verify-only/run-verify-only.js";
 import { createHermesEnvironmentProvider } from "./hermes-router/effective-environment.js";
+import { loadHallRootEnvironment } from "./auth/hall-auth.js";
 
 function formatError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -54,6 +55,12 @@ function formatError(error: unknown): string {
  * at the process boundary only.
  */
 export async function runServer(argv: readonly string[]): Promise<number> {
+  try {
+    loadHallRootEnvironment();
+  } catch {
+    console.error("Could not load Hall's root .env file.");
+    return EXIT_INVALID_INPUT;
+  }
   let overrides;
   try {
     overrides = parseServerCliArguments(argv);

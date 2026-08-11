@@ -393,7 +393,9 @@ async function main(): Promise<void> {
 
   const readiness = { ready: true };
 
-  const app = await createHallCoreApp({
+  const appOptions: Parameters<typeof createHallCoreApp>[0] & {
+    readonly authentication: false;
+  } = {
     orchestrator: stores.orchestrator,
     taskStore: stores.taskStore,
     eventStore: stores.eventStore,
@@ -410,7 +412,9 @@ async function main(): Promise<void> {
     storageMode: durable ? "durable" : "in-memory",
     readiness,
     recoverySummary,
-  });
+    authentication: false,
+  };
+  const app = await createHallCoreApp(appOptions);
 
   await app.listen({ port, host: LOCAL_ONLY_HOST });
   console.log(

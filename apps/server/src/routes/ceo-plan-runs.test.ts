@@ -946,6 +946,7 @@ describe("CEO plan-run execution REST routes", () => {
       ceoExecution: composition.ceoExecution,
       logger: false,
       storageMode: "durable",
+      authentication: false,
     });
 
     const planId = await delegatePlan(app);

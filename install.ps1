@@ -220,6 +220,24 @@ function Get-HallAnswers {
     [PSCustomObject]$answers
 }
 
+function Initialize-HallLoginEnvironment {
+    param([Parameter(Mandatory)][string]$RepoRoot)
+
+    $envPath = Join-Path $RepoRoot ".env"
+    $existingEnv = Get-Item -LiteralPath $envPath -Force -ErrorAction SilentlyContinue
+    if ($null -ne $existingEnv) {
+        Write-Host "  [OK] Existing Hall login configuration preserved ($envPath)" -ForegroundColor Green
+        return
+    }
+
+    $bytes = New-Object byte[] 32
+    [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+    $secret = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+    $content = "HALL_LOGIN_USERNAME=admin`nHALL_LOGIN_PASSWORD=hallofwisdom`nHALL_SESSION_SECRET=$secret`n"
+    [System.IO.File]::WriteAllText($envPath, $content, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "  [OK] Created local Hall login configuration ($envPath)" -ForegroundColor Green
+}
+
 # Split out of the former Install-HallDependenciesAndConfig so the "keep
 # current configuration" path can run the install/build half WITHOUT the
 # config-save half - see the "keep" branch of Invoke-HallInstaller. The
@@ -314,6 +332,7 @@ function Invoke-HallInstaller {
 
     Write-HallBanner
     Test-HallPrerequisitesOrExit -RepoRoot $RepoRoot
+    Initialize-HallLoginEnvironment -RepoRoot $RepoRoot
 
     $configPath = Get-HallInstallerConfigPath
     $existing = $null

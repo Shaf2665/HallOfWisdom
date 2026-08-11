@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAttentionItems } from "../hooks/use-attention-items";
 import { resolveHallCoreUrl } from "../lib/hall-core-url";
+import { useHallAuth } from "./hall-auth-gate";
 
 const { httpUrl: BASE_URL } = resolveHallCoreUrl();
 
@@ -44,6 +45,7 @@ function isCurrentPath(pathname: string, link: (typeof PRIMARY_LINKS)[number]): 
 export function NavBar() {
   const pathname = usePathname();
   const attentionItems = useAttentionItems(BASE_URL);
+  const { logout, loggingOut } = useHallAuth();
 
   return (
     <nav aria-label="Main" className="flex flex-wrap gap-1">
@@ -69,6 +71,16 @@ export function NavBar() {
           </Link>
         );
       })}
+      <button
+        type="button"
+        disabled={loggingOut}
+        onClick={() => {
+          void logout();
+        }}
+        className="rounded px-3 py-1.5 text-sm font-medium text-stone-600 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-stone-300 dark:hover:bg-stone-800"
+      >
+        {loggingOut ? "Signing out…" : "Logout"}
+      </button>
     </nav>
   );
 }

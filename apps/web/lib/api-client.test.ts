@@ -57,7 +57,7 @@ describe("api-client", () => {
     expect(result.status).toBe("ok");
     expect(fetchMock).toHaveBeenCalledWith(
       `${BASE_URL}/api/v1/health`,
-      expect.objectContaining({ method: "GET", credentials: "omit" }),
+      expect.objectContaining({ method: "GET", credentials: "include" }),
     );
   });
 
@@ -427,7 +427,7 @@ describe("api-client", () => {
     });
   });
 
-  it("does not include credentials on any request", async () => {
+  it("includes credentials on each request for the Hall session", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse({
         status: "ok",
@@ -438,7 +438,7 @@ describe("api-client", () => {
     );
     await getHealth(BASE_URL);
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(init.credentials).toBe("omit");
+    expect(init.credentials).toBe("include");
   });
 });
 
@@ -685,10 +685,10 @@ describe("api-client: boards", () => {
     );
   });
 
-  it("does not include credentials on a board request", async () => {
+  it("includes credentials on a board request", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ boards: [generalBoard] }));
     await listBoards(BASE_URL);
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(init.credentials).toBe("omit");
+    expect(init.credentials).toBe("include");
   });
 });

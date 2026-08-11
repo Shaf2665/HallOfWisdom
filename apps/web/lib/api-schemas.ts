@@ -255,6 +255,9 @@ export const healthResponseSchema = z
   .strict();
 export type HealthResponse = z.infer<typeof healthResponseSchema>;
 
+export const authSessionResponseSchema = z.object({ authenticated: z.boolean() }).strict();
+export type AuthSessionResponse = z.infer<typeof authSessionResponseSchema>;
+
 /**
  * Phase 13 — `GET /api/v1/system/storage`. Mirrors the server's own
  * bounded, path-free response shape (`routes/system.ts`): `schemaVersion`/

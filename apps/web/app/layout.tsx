@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import "./globals.css";
+import { HallAuthGate } from "../components/hall-auth-gate";
 
 export const metadata = {
   title: "Hall of Wisdom",
@@ -9,7 +10,9 @@ export const metadata = {
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <HallAuthGate>{children}</HallAuthGate>
+      </body>
     </html>
   );
 }

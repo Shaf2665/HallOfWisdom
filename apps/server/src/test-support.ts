@@ -30,6 +30,7 @@ import {
   createCeoPlanExecutionComposition,
   type CeoPlanExecutionComposition,
 } from "./ceo-execution/ceo-plan-execution-composition.js";
+import type { HallAuthentication } from "./auth/hall-auth.js";
 import { wrapTaskStoreWithMutationHook } from "./ceo-plans/task-mutation-hook.js";
 import { isTerminalTaskStatus } from "./tasks/task-status-transitions.js";
 import { AgentWorktreeManager } from "./agent-worktrees/agent-worktree-manager.js";
@@ -83,6 +84,7 @@ export interface TestHarnessOptions {
   readonly mockAgentConfig?: MockAgentConfigInput | undefined;
   readonly limits?: Partial<ServerLimits> | undefined;
   readonly logger?: boolean | undefined;
+  readonly authentication?: HallAuthentication | false | undefined;
   readonly onExecutionError?: ((taskId: string, error: unknown) => void) | undefined;
   readonly webOrigin?: string | undefined;
   /** Extra adapters registered alongside Mock Agent, e.g. a `ClaudeCodeAdapter` for coexistence tests. Defaults to none — existing callers are unaffected. */
@@ -304,6 +306,7 @@ export async function buildTestApp(options: TestHarnessOptions): Promise<{
     limits: harness.limits,
     logger: options.logger ?? false,
     readiness: options.readiness,
+    authentication: options.authentication ?? false,
   };
   const app = await createHallCoreApp(appOptions);
   return { app, harness };

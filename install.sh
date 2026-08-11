@@ -322,12 +322,26 @@ load_candidate_from_status() {
   hermes_router_json="$(json_fragment "$status_json" config.hermesRouter)"
 }
 
+initialize_hall_login_environment() {
+  local env_path="$repo_root/.env"
+  if [[ -e "$env_path" || -L "$env_path" ]]; then
+    printf '  [OK] Existing Hall login configuration preserved (%s)\n' "$env_path"
+    return
+  fi
+
+  local secret
+  secret="$(node -e 'process.stdout.write(require("node:crypto").randomBytes(32).toString("base64url"))')" || die "Could not generate Hall session secret."
+  (umask 077; printf 'HALL_LOGIN_USERNAME=admin\nHALL_LOGIN_PASSWORD=hallofwisdom\nHALL_SESSION_SECRET=%s\n' "$secret" > "$env_path")
+  printf '  [OK] Created local Hall login configuration (%s)\n' "$env_path"
+}
+
 printf '\nHall of Wisdom Setup\n'
 printf '%s\n\n' '----------------------------------------'
 
 check_platform
 cd "$repo_root"
 check_prerequisites
+initialize_hall_login_environment
 
 printf 'Installing Hall dependencies...\n'
 if ! pnpm install; then

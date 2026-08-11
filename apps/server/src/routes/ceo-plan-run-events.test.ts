@@ -683,6 +683,7 @@ describe("WebSocket /api/v1/ceo-plan-runs/:runId/events/live", () => {
       ceoExecution: composition.ceoExecution,
       logger: false,
       storageMode: "durable",
+      authentication: false,
     });
     const address = await startEphemeral(app);
     const wsBaseUrl = address.replace("http://", "ws://");

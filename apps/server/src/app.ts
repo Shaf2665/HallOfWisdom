@@ -3,6 +3,13 @@ import fastifyWebsocket from "@fastify/websocket";
 import fastifyCors from "@fastify/cors";
 import type { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import { installErrorHandler, installNotFoundHandler } from "./errors/error-handler.js";
+import { AuthenticationRequiredError } from "./errors/app-error.js";
+import {
+  createHallAuthentication,
+  resolveHallAuthCredentials,
+  type HallAuthentication,
+} from "./auth/hall-auth.js";
+import { registerAuthRoutes } from "./routes/auth.js";
 import { registerHealthRoute, type ReadinessRef } from "./routes/health.js";
 import { registerTaskRoutes } from "./routes/tasks.js";
 import { registerTaskEventsRoute } from "./routes/task-events.js";
@@ -60,6 +67,8 @@ export interface CreateHallCoreAppOptions {
   readonly recoverySummary?: RecoverySummary | undefined;
   /** Phase 13.2 — see `HealthRouteDeps.readiness`. `undefined` (the default) means `GET /api/v1/health` always reports ready. */
   readonly readiness?: ReadinessRef | undefined;
+  /** Test-only escape hatch for the existing in-process route fixtures; production startup never supplies `false`. */
+  readonly authentication?: HallAuthentication | false | undefined;
 }
 
 /** How long a browser may cache a successful CORS preflight response, in seconds. */
@@ -81,10 +90,15 @@ export async function createHallCoreApp(
   });
 
   const webOrigin = options.webOrigin ?? DEFAULT_WEB_ORIGIN;
+  const authentication =
+    options.authentication === false
+      ? undefined
+      : (options.authentication ?? createHallAuthentication(resolveHallAuthCredentials()));
 
   // Registered before any route: an exact-match allowlist of exactly one
-  // origin, never a wildcard, never a reflect-the-request-Origin function,
-  // and never with credentials enabled. See
+  // origin, never a wildcard, never a reflect-the-request-Origin function.
+  // Credentials are enabled so the browser can send Hall's HttpOnly session
+  // cookie. See
   // docs/architecture/0005-minimal-web-interface.md, "Exact-origin CORS
   // policy".
   await app.register(fastifyCors, {
@@ -96,7 +110,7 @@ export async function createHallCoreApp(
     // preflight) before it ever reaches this server.
     methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type"],
-    credentials: false,
+    credentials: true,
     maxAge: CORS_PREFLIGHT_MAX_AGE_SECONDS,
   });
 
@@ -108,6 +122,29 @@ export async function createHallCoreApp(
 
   installErrorHandler(app);
   installNotFoundHandler(app);
+
+  if (authentication !== undefined) {
+    registerAuthRoutes(app, { authentication });
+  }
+
+  app.addHook("onRequest", (request, _reply, done) => {
+    const requestPath = request.url.split("?", 1)[0];
+    if (
+      authentication === undefined ||
+      request.method === "OPTIONS" ||
+      requestPath === "/api/v1/health" ||
+      requestPath === "/api/v1/auth/login" ||
+      requestPath === "/api/v1/auth/session"
+    ) {
+      done();
+      return;
+    }
+    if (!authentication.hasSession(request.headers.cookie)) {
+      done(new AuthenticationRequiredError());
+      return;
+    }
+    done();
+  });
 
   const startedAt = options.startedAt ?? Date.now();
   registerHealthRoute(app, { startedAt, readiness: options.readiness });
