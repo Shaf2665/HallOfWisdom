@@ -7,7 +7,7 @@ task, routing, event, and recovery workflow.
 Claude Code and Codex use their locally installed CLIs and their own local authentication. Hermes
 uses a local Hermes Coding Runtime connected to a Hermes Router endpoint. Hall does not provide
 upstream OpenRouter or model-provider credentials to the router; Hermes uses a separate proxy/client
-key supplied through the environment that starts Hall Core.
+key saved locally by Hall or supplied through an advanced environment override.
 
 The normal path on Windows, Linux, and macOS is: clone, install, start, configure a provider, and run
 a task. Contributor commands and architecture details are under [For Developers](#for-developers).
@@ -113,34 +113,14 @@ Hermes is **Connected** only when both conditions are true:
 Otherwise Hermes remains **Not connected** and the card displays the server-provided reason. Hermes
 cannot run from Hall's ephemeral mode or directly against the source checkout.
 
-Configure these variables in the environment that starts Hall Core:
+Open **Settings → Hermes Router**, click **Set up Hermes**, and enter the runtime folder, router base
+URL, and Hermes proxy/client key. Python is optional under **Advanced**. Hall saves non-secret values
+in its normal local configuration and keeps the client key in a separate user-local secret file;
+the UI never displays a saved key. Never enter an upstream OpenRouter or provider key.
 
-| Variable                  | Requirement | Meaning                                          |
-| ------------------------- | ----------- | ------------------------------------------------ |
-| `HALL_HERMES_ROUTER_ROOT` | Required    | Path to the local Hermes-router runtime checkout |
-| `HERMES_ROUTER_BASE_URL`  | Required    | Hermes Router `/v1` endpoint                     |
-| `HERMES_ROUTER_API_KEY`   | Required    | Hermes proxy/client key                          |
-| `HALL_HERMES_PYTHON`      | Optional    | Python executable override                       |
-
-PowerShell placeholder example:
-
-```powershell
-$env:HALL_HERMES_ROUTER_ROOT="C:\path\to\Hermes-router"
-$env:HERMES_ROUTER_BASE_URL="https://your-router.example/v1"
-$env:HERMES_ROUTER_API_KEY="<hermes-proxy-key>"
-```
-
-Bash placeholder example:
-
-```bash
-export HALL_HERMES_ROUTER_ROOT="/path/to/Hermes-router"
-export HERMES_ROUTER_BASE_URL="https://your-router.example/v1"
-export HERMES_ROUTER_API_KEY="<hermes-proxy-key>"
-```
-
-Use the Hermes proxy/client key—never put an upstream OpenRouter or provider key into Hall. These
-variables must exist in the terminal environment that launches `start.ps1` or `start.sh`. After
-changing them, restart Hall and click **Recheck** on the Providers page.
+Existing `HALL_HERMES_ROUTER_ROOT`, `HERMES_ROUTER_BASE_URL`, `HERMES_ROUTER_API_KEY`, and
+`HALL_HERMES_PYTHON` values remain supported as advanced overrides. They take precedence over saved
+settings when Hall Core starts with them.
 
 ### 6. Create and run your first task
 
@@ -170,8 +150,8 @@ cleanly.
 - **Claude Code or Codex is Not connected** — run the card's CLI login command, then click
   **Recheck**.
 - **Hermes is Not connected** — read the card's server-provided guidance. Confirm the runtime root,
-  router endpoint, proxy key, durable data directory, and agent-worktree directory, then restart
-  Hall and click **Recheck**.
+  router endpoint, proxy key, durable data directory, and agent-worktree directory in **Settings →
+  Hermes Router**, then click **Recheck**.
 - **You want to reconfigure Hall** — rerun your platform's installer and choose **Reconfigure
   Hall**.
 
@@ -230,7 +210,7 @@ Real Hermes routing requires all of the following:
 
 - durable SQLite mode through `--data-dir`;
 - a Hall-owned `--agent-worktree-root`; and
-- the Hermes environment configuration documented above.
+- Hermes setup saved from Settings (or the advanced environment overrides documented above).
 
 Hermes deliberately remains unavailable in ephemeral mode. Once an agent-worktree root has been
 used with a data directory, later startup against that data directory must supply the same root.
@@ -321,8 +301,10 @@ Restart reconciliation resumes interrupted artifact and worktree cleanup using t
 
 Strict OS-sandboxed Codex compatibility remains deferred. Trusted-local Codex is an explicit opt-in
 that bypasses Codex's sandbox and approval enforcement. Hall prevents unsafe persistence categories
-such as raw stdout/stderr, environment maps, arbitrary provider payloads, and provider auth files,
-but does not claim generic secret detection.
+such as raw stdout/stderr, environment maps, arbitrary provider payloads, and upstream provider
+auth files. The Hermes proxy/client key is the narrow exception: it is stored separately in Hall's
+user-local configuration directory and never returned by the API or displayed in Settings. Hall
+does not claim generic secret detection.
 
 ## Current Project Status
 

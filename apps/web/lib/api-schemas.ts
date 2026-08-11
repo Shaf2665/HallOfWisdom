@@ -423,6 +423,22 @@ export const listAdaptersResponseSchema = z
 
 export const getAdapterResponseSchema = z.object({ adapter: adapterSummarySchema }).strict();
 
+export const hermesSettingsResponseSchema = z
+  .object({
+    configured: z.boolean(),
+    ready: z.boolean(),
+    apiKeyConfigured: z.boolean(),
+    environmentOverrideActive: z.boolean(),
+    runtimeRoot: z.string().optional(),
+    routerBaseUrl: z.string().optional(),
+    pythonPath: z.string().optional(),
+    message: z.string(),
+    detectedVersion: z.string().optional(),
+    technicalMessage: z.string().optional(),
+  })
+  .strict();
+export type HermesSettingsResponse = z.infer<typeof hermesSettingsResponseSchema>;
+
 /**
  * Phase 11 — routing routes' response shapes. Mirrors
  * `apps/server/src/routing/routing-policy.ts`'s `RoutingCandidate`/

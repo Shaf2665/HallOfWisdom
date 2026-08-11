@@ -141,6 +141,13 @@ json_value() {
   ' "$1" "$2"
 }
 
+json_fragment() {
+  node -e '
+    const value = process.argv[2].split(".").reduce((current, key) => current?.[key], JSON.parse(process.argv[1]));
+    process.stdout.write(value === undefined ? "__HALL_UNDEFINED__" : JSON.stringify(value));
+  ' "$1" "$2"
+}
+
 json_errors() {
   node -e '
     const payload = JSON.parse(process.argv[1]);
@@ -193,10 +200,11 @@ make_candidate() {
       hallCorePort: Number(process.argv[5]),
       hallWebPort: Number(process.argv[6]),
       codexTrustedLocal: process.argv[7] === "true",
+      ...(process.argv[8] === "__HALL_UNDEFINED__" ? {} : { hermesRouter: JSON.parse(process.argv[8]) }),
     };
     process.stdout.write(JSON.stringify(candidate));
   ' "$workspace_root" "$data_dir" "$agent_worktree_root" "$comparison_root" \
-    "$hall_core_port" "$hall_web_port" "$codex_trusted_local"
+    "$hall_core_port" "$hall_web_port" "$codex_trusted_local" "$hermes_router_json"
 }
 
 validate_candidate() {
@@ -279,6 +287,7 @@ load_candidate_from_status() {
   hall_core_port="$(json_value "$status_json" config.hallCorePort)"
   hall_web_port="$(json_value "$status_json" config.hallWebPort)"
   codex_trusted_local="$(json_value "$status_json" config.codexTrustedLocal)"
+  hermes_router_json="$(json_fragment "$status_json" config.hermesRouter)"
 }
 
 printf '\nHall of Wisdom Setup\n'
@@ -303,6 +312,7 @@ config_path="$(json_value "$status_json" path)"
 config_exists="$(json_value "$status_json" exists)"
 config_state="$(json_value "$status_json" config)"
 mode="install"
+hermes_router_json="__HALL_UNDEFINED__"
 
 if [[ "$config_exists" == "true" ]]; then
   if [[ "$config_state" == "__HALL_NULL__" ]]; then

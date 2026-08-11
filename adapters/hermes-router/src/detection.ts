@@ -20,6 +20,7 @@ export const HERMES_EXECUTION_DISABLED_MESSAGE =
   "Hermes task execution requires Hall durable isolated-worktree execution.";
 
 const ROOT_NOT_CONFIGURED_MESSAGE = "Hermes Router runtime root is not configured.";
+const ROOT_NOT_FOUND_MESSAGE = "The Hermes Router runtime folder was not found.";
 const RUNNER_NOT_FOUND_MESSAGE = "Hermes coding runtime runner was not found.";
 const PROCESS_START_FAILED_MESSAGE = "Hermes coding runtime could not be started.";
 const DETECTION_FAILED_MESSAGE = "Hermes coding runtime detection could not be verified.";
@@ -67,12 +68,20 @@ const detectDocumentSchema = z.discriminatedUnion("available", [
 
 export interface FileSystemProbe {
   isFile(filePath: string): boolean;
+  isDirectory?(directoryPath: string): boolean;
 }
 
 export const realFileSystemProbe: FileSystemProbe = {
   isFile(filePath) {
     try {
       return statSync(filePath).isFile();
+    } catch {
+      return false;
+    }
+  },
+  isDirectory(directoryPath) {
+    try {
+      return statSync(directoryPath).isDirectory();
     } catch {
       return false;
     }
@@ -93,7 +102,10 @@ export type HermesRuntimeConfigurationResolution =
       readonly pythonExecutable: string;
       readonly runnerPath: string;
     }
-  | { readonly ok: false; readonly reason: "root_not_configured" | "runner_not_found" };
+  | {
+      readonly ok: false;
+      readonly reason: "root_not_configured" | "root_not_found" | "runner_not_found";
+    };
 
 export function resolveHermesRuntimeConfiguration(
   options: Pick<HermesDetectionOptions, "platform" | "parentEnv" | "fs">,
@@ -106,6 +118,9 @@ export function resolveHermesRuntimeConfiguration(
     !pathApi.isAbsolute(configuredRoot)
   ) {
     return { ok: false, reason: "root_not_configured" };
+  }
+  if (options.fs.isDirectory !== undefined && !options.fs.isDirectory(configuredRoot)) {
+    return { ok: false, reason: "root_not_found" };
   }
 
   const runnerPath = pathApi.resolve(configuredRoot, HERMES_RUNNER_FILENAME);
@@ -195,11 +210,13 @@ export async function detectHermesRouter(
 ): Promise<AgentDetectionResult> {
   const configuration = resolveHermesRuntimeConfiguration(options);
   if (!configuration.ok) {
-    return unavailable(
+    const diagnosticMessage =
       configuration.reason === "root_not_configured"
         ? ROOT_NOT_CONFIGURED_MESSAGE
-        : RUNNER_NOT_FOUND_MESSAGE,
-    );
+        : configuration.reason === "root_not_found"
+          ? ROOT_NOT_FOUND_MESSAGE
+          : RUNNER_NOT_FOUND_MESSAGE;
+    return unavailable(diagnosticMessage);
   }
   const processResult = await options.processRunner.run({
     executablePath: configuration.pythonExecutable,

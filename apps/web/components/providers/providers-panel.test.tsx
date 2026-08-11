@@ -73,11 +73,9 @@ describe("ProvidersPanel", () => {
     expect(screen.queryByText("Mock Agent")).not.toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(3);
     expect(
-      screen.getByText(
-        /Hermes Router uses configuration from the environment that starts Hall Core/i,
-      ),
+      screen.getByText(/Hermes Router setup is saved locally from Settings/i),
     ).toBeInTheDocument();
-    expect(screen.getByText(/never asks for or stores your credentials/i)).toBeInTheDocument();
+    expect(screen.getByText(/never asks for upstream provider keys/i)).toBeInTheDocument();
   });
 
   it("shows a loading state, then an accessible error state on failure", async () => {

@@ -8,6 +8,30 @@ export const DEFAULT_HALL_WEB_PORT = 3000;
 
 const portSchema = z.number().int().min(1).max(65535);
 
+const hermesRouterBaseUrlSchema = boundedNonBlankString(2048).superRefine((value, context) => {
+  try {
+    const parsed = new URL(value.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "must use http or https" });
+    }
+    if (parsed.username.length > 0 || parsed.password.length > 0) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "must not include credentials" });
+    }
+  } catch {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "must be a valid URL" });
+  }
+});
+
+export const HermesRouterConfigSchema = z
+  .object({
+    runtimeRoot: boundedNonBlankString(4096),
+    routerBaseUrl: hermesRouterBaseUrlSchema,
+    pythonPath: boundedNonBlankString(4096).optional(),
+  })
+  .strict();
+
+export type HermesRouterConfig = z.infer<typeof HermesRouterConfigSchema>;
+
 export const HallConfigSchema = z
   .object({
     schemaVersion: z.literal(HALL_CONFIG_SCHEMA_VERSION),
@@ -22,6 +46,7 @@ export const HallConfigSchema = z
     hallCorePort: portSchema.default(DEFAULT_HALL_CORE_PORT),
     hallWebPort: portSchema.default(DEFAULT_HALL_WEB_PORT),
     codexTrustedLocal: z.boolean().default(false),
+    hermesRouter: HermesRouterConfigSchema.optional(),
   })
   .strict();
 

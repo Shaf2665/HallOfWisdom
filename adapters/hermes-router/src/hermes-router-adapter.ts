@@ -22,6 +22,7 @@ import type { DetectionProcessRunner } from "./process-runner.js";
 export interface HermesRouterAdapterConfig {
   readonly platform?: NodeJS.Platform;
   readonly parentEnv?: Readonly<NodeJS.ProcessEnv>;
+  readonly environmentProvider?: (() => Readonly<NodeJS.ProcessEnv>) | undefined;
   readonly fs?: FileSystemProbe;
   readonly processRunner?: DetectionProcessRunner;
   readonly startTransport?: HermesExecutionTransportStarter;
@@ -34,15 +35,21 @@ export class HermesRouterAdapter implements AgentAdapter {
   readonly #detectionOptions: ReturnType<typeof createDefaultHermesDetectionOptions>;
   readonly #startTransport: HermesExecutionTransportStarter;
   readonly #isolatedExecutionEnabled: boolean;
+  readonly #environmentProvider: () => Readonly<NodeJS.ProcessEnv>;
 
   constructor(config: HermesRouterAdapterConfig = {}) {
     this.#detectionOptions = createDefaultHermesDetectionOptions(config);
+    this.#environmentProvider =
+      config.environmentProvider ?? (() => this.#detectionOptions.parentEnv);
     this.#startTransport = config.startTransport ?? startHermesExecutionTransport;
     this.#isolatedExecutionEnabled = config.isolatedExecutionEnabled ?? false;
   }
 
   detect(): Promise<AgentDetectionResult> {
-    return detectHermesRouter(this.#detectionOptions);
+    return detectHermesRouter({
+      ...this.#detectionOptions,
+      parentEnv: this.#environmentProvider(),
+    });
   }
 
   startTask(input: AgentTaskInput, options?: AgentExecutionOptions): Promise<AgentRunHandle> {
@@ -58,7 +65,11 @@ export class HermesRouterAdapter implements AgentAdapter {
       );
     }
 
-    const configuration = resolveHermesRuntimeConfiguration(this.#detectionOptions);
+    const parentEnv = this.#environmentProvider();
+    const configuration = resolveHermesRuntimeConfiguration({
+      ...this.#detectionOptions,
+      parentEnv,
+    });
     const prompt = buildHermesTaskPrompt({
       title: parsedInput.hallTask.title,
       description: parsedInput.hallTask.description,
@@ -69,7 +80,7 @@ export class HermesRouterAdapter implements AgentAdapter {
         pythonExecutable: configuration.ok ? configuration.pythonExecutable : "",
         runnerPath: configuration.ok ? configuration.runnerPath : "",
         workingDirectory: parsedInput.workingDirectory,
-        env: this.#detectionOptions.parentEnv,
+        env: parentEnv,
         prompt,
         runId: parsedInput.runId,
         platform: this.#detectionOptions.platform,

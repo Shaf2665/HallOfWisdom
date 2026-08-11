@@ -17,11 +17,12 @@ onboarding path, which requires a durable place to store the answers a user give
 A new workspace package, `@hall-of-wisdom/hall-config`, owns a versioned, schema-validated
 configuration file (`HallConfigSchema`, `schemaVersion: 1`) stored at a machine-local,
 user-specific location (`%LOCALAPPDATA%\HallOfWisdom\config.json` on Windows — deliberately
-*Local*, not *Roaming*, since the file stores machine-specific absolute paths that must never
-sync across machines via a roaming profile; macOS/Linux equivalents are defined now for a future
-non-Windows frontend). Writes are atomic (temp file + rename). The schema explicitly excludes any
-provider credential, token, or secret — it stores only filesystem roots, ports, and a boolean
-Codex trusted-local opt-in.
+_Local_, not _Roaming_, since the file stores machine-specific absolute paths that must never
+sync across machines via a roaming profile; macOS/Linux use their standard user-local configuration
+directories). Writes are atomic (temp file + rename). The schema explicitly excludes any provider
+credential, token, or secret — it stores filesystem roots, local runtime settings, ports, and a
+boolean Codex trusted-local opt-in. Hermes Router's proxy/client key is stored in a separate,
+permission-restricted user-local file and is never part of `config.json`.
 
 `apps/server`'s CLI parsing splits into two layers: `ServerCliOverrides` (every field optional,
 including `workspaceRoot`) and a `ResolvedServerConfig` (workspaceRoot required) produced by

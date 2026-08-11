@@ -7,6 +7,7 @@ import { registerHealthRoute, type ReadinessRef } from "./routes/health.js";
 import { registerTaskRoutes } from "./routes/tasks.js";
 import { registerTaskEventsRoute } from "./routes/task-events.js";
 import { registerAdapterRoutes } from "./routes/adapters.js";
+import { registerHermesSettingsRoutes } from "./routes/hermes-settings.js";
 import { registerRoutingRoutes } from "./routes/routing.js";
 import { registerBoardRoutes } from "./routes/boards.js";
 import { registerBoardMessagesRoute } from "./routes/board-messages.js";
@@ -117,6 +118,7 @@ export async function createHallCoreApp(
   });
   registerTaskRoutes(app, { orchestrator: options.orchestrator, taskStore: options.taskStore });
   registerAdapterRoutes(app, { registry: options.registry });
+  registerHermesSettingsRoutes(app, { registry: options.registry });
   registerRoutingRoutes(app, { orchestrator: options.orchestrator });
   registerTaskEventsRoute(app, {
     taskStore: options.taskStore,

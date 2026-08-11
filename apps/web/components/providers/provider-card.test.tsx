@@ -177,7 +177,7 @@ describe("ProviderCard", () => {
     },
   );
 
-  it("shows Hermes Setup with placeholder-only environment guidance and no credential fields or storage", async () => {
+  it("sends Hermes setup to Settings and keeps advanced environment overrides technical", async () => {
     const browserStorageSet = vi.spyOn(Storage.prototype, "setItem");
     const user = userEvent.setup();
     render(
@@ -197,34 +197,17 @@ describe("ProviderCard", () => {
     expect(screen.queryByRole("button", { name: "Connect" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Setup" }));
     const guide = screen.getByRole("region", { name: "Hermes Router setup guide" });
+    expect(guide).toHaveTextContent("save and verify your local Hermes Router setup");
+    expect(screen.getByRole("link", { name: "Open Hermes settings" })).toHaveAttribute(
+      "href",
+      "/settings",
+    );
     expect(guide).toHaveTextContent("HALL_HERMES_ROUTER_ROOT");
     expect(guide).toHaveTextContent("HERMES_ROUTER_BASE_URL");
     expect(guide).toHaveTextContent("HERMES_ROUTER_API_KEY");
     expect(guide).toHaveTextContent("HALL_HERMES_PYTHON");
-    expect(guide).toHaveTextContent("Hermes proxy key");
-    expect(guide).toHaveTextContent("never an upstream OpenRouter or provider key");
-    expect(guide).toHaveTextContent("environment that starts Hall Core");
-    expect(guide).toHaveTextContent("Restart Hall");
-    expect(guide).toHaveTextContent("durable isolated-worktree execution");
-
-    const examples = Array.from(guide.querySelectorAll("pre code")).map(
-      (element) => element.textContent,
-    );
-    expect(examples).toEqual([
-      '$env:HALL_HERMES_ROUTER_ROOT="C:\\path\\to\\Hermes-router"\n' +
-        '$env:HERMES_ROUTER_BASE_URL="https://your-router.example/v1"\n' +
-        '$env:HERMES_ROUTER_API_KEY="<hermes-proxy-key>"',
-      'export HALL_HERMES_ROUTER_ROOT="/path/to/Hermes-router"\n' +
-        'export HERMES_ROUTER_BASE_URL="https://your-router.example/v1"\n' +
-        'export HERMES_ROUTER_API_KEY="<hermes-proxy-key>"',
-    ]);
     expect(guide.querySelector("input, textarea, select")).toBeNull();
     expect(browserStorageSet).not.toHaveBeenCalled();
-
-    await user.click(screen.getByRole("button", { name: "Copy Windows PowerShell setup example" }));
-    expect(
-      screen.getByRole("button", { name: "Copy Windows PowerShell setup example" }),
-    ).toHaveTextContent("Copied");
   });
 
   it("Recheck calls getAdapter for this adapter's id and reports the refreshed summary via onUpdated", async () => {

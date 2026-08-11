@@ -83,6 +83,8 @@ export interface ServerCompositionOptions {
   readonly agentWorktreeRoot?: string | undefined;
   readonly isolatedAgentAdapterIds?: readonly string[] | undefined;
   readonly allowInMemoryAgentIsolation?: boolean | undefined;
+  /** Supplies the effective Hermes environment for each detect/start so saved Settings apply without a Core restart. */
+  readonly hermesEnvironmentProvider?: (() => Readonly<NodeJS.ProcessEnv>) | undefined;
 }
 
 export interface ServerComposition {

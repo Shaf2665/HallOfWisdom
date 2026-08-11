@@ -3,6 +3,7 @@ import path from "node:path";
 
 export const HALL_CONFIG_DIR_ENV_OVERRIDE = "HALL_CONFIG_DIR";
 export const HALL_CONFIG_FILE_NAME = "config.json";
+export const HERMES_ROUTER_SECRET_FILE_NAME = "hermes-router-secret.json";
 
 /**
  * Resolves Hall's persisted-configuration directory. Deliberately
@@ -43,4 +44,11 @@ export function resolveHallConfigFilePath(
   platform: NodeJS.Platform = process.platform,
 ): string {
   return path.join(resolveHallConfigDir(env, platform), HALL_CONFIG_FILE_NAME);
+}
+
+export function resolveHermesRouterSecretFilePath(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return path.join(resolveHallConfigDir(env, platform), HERMES_ROUTER_SECRET_FILE_NAME);
 }

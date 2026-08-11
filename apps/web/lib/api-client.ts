@@ -18,6 +18,7 @@ import {
   ensureBoardResponseSchema,
   errorResponseSchema,
   getAdapterResponseSchema,
+  hermesSettingsResponseSchema,
   getCeoPlanResponseSchema,
   getCeoPlanRunResponseSchema,
   healthResponseSchema,
@@ -57,6 +58,7 @@ import {
   type GetCeoPlanResponse,
   type GetCeoPlanRunResponse,
   type HealthResponse,
+  type HermesSettingsResponse,
   type ListBoardMessagesResponse,
   type ListBoardsResponse,
   type ListCeoApprovalsResponse,
@@ -293,6 +295,38 @@ export function getAdapter(
     `${baseUrl}/api/v1/adapters/${encodeURIComponent(adapterId)}`,
     { method: "GET" },
     getAdapterResponseSchema,
+    options,
+  );
+}
+
+export interface SaveHermesSettingsRequestBody {
+  readonly runtimeRoot: string;
+  readonly routerBaseUrl: string;
+  readonly apiKey?: string;
+  readonly pythonPath?: string;
+}
+
+export function getHermesSettings(
+  baseUrl: string,
+  options: RequestOptions = {},
+): Promise<HermesSettingsResponse> {
+  return request(
+    `${baseUrl}/api/v1/settings/hermes-router`,
+    { method: "GET" },
+    hermesSettingsResponseSchema,
+    options,
+  );
+}
+
+export function saveHermesSettings(
+  baseUrl: string,
+  body: SaveHermesSettingsRequestBody,
+  options: RequestOptions = {},
+): Promise<HermesSettingsResponse> {
+  return request(
+    `${baseUrl}/api/v1/settings/hermes-router`,
+    { method: "POST", body },
+    hermesSettingsResponseSchema,
     options,
   );
 }

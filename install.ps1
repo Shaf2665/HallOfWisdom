@@ -202,7 +202,7 @@ function Get-HallAnswers {
         $enableCodexTrustedLocal = $defaultCodexTrustedLocal
     }
 
-    [PSCustomObject]@{
+    $answers = [ordered]@{
         schemaVersion     = 1
         workspaceRoot     = $workspaceRoot
         dataDir           = $dataDir
@@ -212,6 +212,12 @@ function Get-HallAnswers {
         hallWebPort       = [int]$hallWebPort
         codexTrustedLocal = [bool]$enableCodexTrustedLocal
     }
+    if ($ExistingConfig -and ($ExistingConfig.PSObject.Properties.Match('hermesRouter').Count -gt 0)) {
+        # Hermes non-secret settings are managed by Hall UI. Reconfiguring
+        # the core paths must preserve that independently managed section.
+        $answers['hermesRouter'] = $ExistingConfig.hermesRouter
+    }
+    [PSCustomObject]$answers
 }
 
 # Split out of the former Install-HallDependenciesAndConfig so the "keep

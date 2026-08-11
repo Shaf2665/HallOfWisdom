@@ -34,6 +34,7 @@ import { runCeoPlanExecutionRecovery } from "./ceo-execution/ceo-plan-execution-
 import { canonicalizeHallOwnedRoot } from "./agent-worktrees/path-safety.js";
 import { AgentWorktreePathError } from "./agent-worktrees/agent-worktree-errors.js";
 import { runVerifyOnly } from "./verify-only/run-verify-only.js";
+import { createHermesEnvironmentProvider } from "./hermes-router/effective-environment.js";
 
 function formatError(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -203,6 +204,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
       enableCodexTrustedLocal: cliOptions.enableCodexTrustedLocal,
       comparisonRoot,
       agentWorktreeRoot,
+      hermesEnvironmentProvider: createHermesEnvironmentProvider(),
       db,
       onExecutionError: (taskId, error) => {
         console.error(`Task ${taskId} execution failed: ${formatError(error)}`);

@@ -56,6 +56,10 @@ export function createServerComposition(options: ServerCompositionOptions): Serv
       options.agentWorktreeRoot !== undefined &&
       composition.agentWorktreeManager !== undefined &&
       composition.agentWorktreeValidator !== undefined,
+    adapterConfig:
+      options.hermesEnvironmentProvider === undefined
+        ? undefined
+        : { environmentProvider: options.hermesEnvironmentProvider },
   });
 
   if (options.comparisonRoot === undefined) {

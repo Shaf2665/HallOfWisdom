@@ -52,8 +52,9 @@ export function ProvidersPanel({ baseUrl }: { readonly baseUrl: string }) {
       <div className="rounded border border-stone-200 bg-stone-50 p-3 text-sm text-stone-700 dark:border-stone-800 dark:bg-stone-950/40 dark:text-stone-300">
         <p>
           Claude Code is the recommended default provider. Claude Code and Codex sign in through
-          their official CLI flows. Hermes Router uses configuration from the environment that
-          starts Hall Core. This page never asks for or stores your credentials.
+          their official CLI flows. Hermes Router setup is saved locally from Settings, with its
+          client key kept separately from Hall&apos;s non-secret configuration. Hall never asks for
+          upstream provider keys.
         </p>
       </div>
 
