@@ -733,6 +733,9 @@ export type GetCeoPlanResponse = z.infer<typeof getCeoPlanResponseSchema>;
 export const listCeoPlansResponseSchema = z.object({ plans: z.array(ceoPlanSchema) }).strict();
 export type ListCeoPlansResponse = z.infer<typeof listCeoPlansResponseSchema>;
 
+export const deleteCeoPlanResponseSchema = z.object({ deleted: z.literal(true) }).strict();
+export type DeleteCeoPlanResponse = z.infer<typeof deleteCeoPlanResponseSchema>;
+
 export const listCeoPlanVersionsResponseSchema = z
   .object({ versions: z.array(ceoPlanVersionSchema) })
   .strict();

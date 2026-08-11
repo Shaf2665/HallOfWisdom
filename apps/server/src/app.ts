@@ -154,7 +154,10 @@ export async function createHallCoreApp(
     });
   }
 
-  registerCeoPlanRoutes(app, { orchestrator: options.ceoPlanOrchestrator });
+  registerCeoPlanRoutes(app, {
+    orchestrator: options.ceoPlanOrchestrator,
+    planRunStore: options.ceoExecution.planRunStore,
+  });
   registerCeoPlanEventsRoute(
     app,
     { orchestrator: options.ceoPlanOrchestrator },

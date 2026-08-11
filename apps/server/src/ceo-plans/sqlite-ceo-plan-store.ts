@@ -13,6 +13,7 @@ import { withTransaction } from "../persistence/transaction.js";
 import { CorruptRecordError } from "../persistence/persistence-errors.js";
 import {
   CeoPlanApprovalBindingError,
+  CeoPlanDeletionBlockedError,
   CeoPlanNotFoundError,
   CeoPlanStateConflictError,
   CeoPlanVersionNotFoundError,
@@ -23,6 +24,7 @@ import type {
   CeoPlanStorePort,
   CreatePlanInput,
   CreateVersionInput,
+  DeletePlanInput,
   DecideApprovalInput,
   DelegationLink,
   RecordDelegationInput,
@@ -380,6 +382,32 @@ export class SqliteCeoPlanStore implements CeoPlanStorePort {
         throw new CeoPlanStateConflictError(input.planId, row.status, "cancelled");
       }
       return planRowToPlan(this.#getPlanRow(input.planId));
+    });
+  }
+
+  deletePlan(input: DeletePlanInput): void {
+    withTransaction(this.#db, () => {
+      const row = this.#getPlanRow(input.planId);
+      if (row.status !== "cancelled") {
+        throw new CeoPlanStateConflictError(input.planId, row.status, "deleted");
+      }
+      const delegatedChild = this.#db
+        .prepare("SELECT 1 FROM ceo_delegation_links WHERE plan_id = ? LIMIT 1")
+        .get(input.planId);
+      if (delegatedChild !== undefined) {
+        throw new CeoPlanDeletionBlockedError(
+          input.planId,
+          "it has delegated child tasks. Child tasks are not deleted automatically.",
+        );
+      }
+      const result = this.#db
+        .prepare(
+          "DELETE FROM ceo_plans WHERE plan_id = ? AND revision = ? AND status = 'cancelled'",
+        )
+        .run(input.planId, input.expectedRevision);
+      if (result.changes === 0) {
+        throw new CeoPlanStateConflictError(input.planId, row.status, "deleted");
+      }
     });
   }
 

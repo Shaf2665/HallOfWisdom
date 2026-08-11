@@ -7,6 +7,7 @@ import type {
 } from "@hall-of-wisdom/protocol";
 import {
   CeoPlanApprovalBindingError,
+  CeoPlanDeletionBlockedError,
   CeoPlanNotFoundError,
   CeoPlanStateConflictError,
   CeoPlanVersionNotFoundError,
@@ -17,6 +18,7 @@ import type {
   CeoPlanStorePort,
   CreatePlanInput,
   CreateVersionInput,
+  DeletePlanInput,
   DecideApprovalInput,
   DelegationLink,
   RecordDelegationInput,
@@ -224,6 +226,24 @@ export class InMemoryCeoPlanStore implements CeoPlanStorePort {
       lastProgressFingerprint: stored.lastProgressFingerprint,
     });
     return updatedPlan;
+  }
+
+  deletePlan(input: DeletePlanInput): void {
+    const stored = this.#mustGetPlan(input.planId);
+    this.#checkRevision(stored, input.expectedRevision, "deleted");
+    this.#requireStatus(stored, ["cancelled"], "deleted");
+    if ((this.#delegationLinks.get(input.planId) ?? []).length > 0) {
+      throw new CeoPlanDeletionBlockedError(
+        input.planId,
+        "it has delegated child tasks. Child tasks are not deleted automatically.",
+      );
+    }
+
+    this.#plans.delete(input.planId);
+    this.#versions.delete(input.planId);
+    this.#approvals.delete(input.planId);
+    this.#delegationLinks.delete(input.planId);
+    this.#events.delete(input.planId);
   }
 
   recordDelegation(input: RecordDelegationInput): {

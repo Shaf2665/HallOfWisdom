@@ -9,9 +9,15 @@ import {
 } from "../schemas/ceo-plan-request.js";
 import { InvalidRequestError } from "../errors/app-error.js";
 import type { CeoPlanOrchestrator } from "../ceo-plans/ceo-plan-orchestrator.js";
+import type { CeoPlanRunStorePort } from "../ceo-execution/ceo-plan-run-store-port.js";
 import { parseWebOrigin } from "../config/web-origin.js";
 
 export interface CeoPlanRoutesDeps {
+  readonly orchestrator: CeoPlanOrchestrator;
+  readonly planRunStore: CeoPlanRunStorePort;
+}
+
+export interface CeoPlanEventsDeps {
   readonly orchestrator: CeoPlanOrchestrator;
 }
 
@@ -198,6 +204,20 @@ export function registerCeoPlanRoutes(app: FastifyInstance, deps: CeoPlanRoutesD
     if (!parsed.success) invalidBody(parsed, "MutationTokenRequest");
     return deps.orchestrator.cancel(request.params.planId, parsed.data.expectedMutationToken);
   });
+
+  app.delete<{ Params: PlanIdParams }>("/api/v1/ceo-plans/:planId", async (request) => {
+    const parsed = mutationTokenRequestSchema.safeParse(request.body);
+    if (!parsed.success) invalidBody(parsed, "MutationTokenRequest");
+    const hasExecutionHistory = deps.planRunStore
+      .listRuns()
+      .some((run) => run.planId === request.params.planId);
+    await deps.orchestrator.deletePlan(
+      request.params.planId,
+      parsed.data.expectedMutationToken,
+      hasExecutionHistory,
+    );
+    return { deleted: true };
+  });
 }
 
 export interface CeoPlanEventsSocket {
@@ -245,7 +265,7 @@ export function handleCeoPlanEventsConnection(
     readonly planId: string;
     readonly afterSequenceRaw: string | undefined;
   },
-  deps: CeoPlanRoutesDeps,
+  deps: CeoPlanEventsDeps,
 ): void {
   const { planId } = params;
 
@@ -316,7 +336,7 @@ export function handleCeoPlanEventsConnection(
 
 export function registerCeoPlanEventsRoute(
   app: FastifyInstance,
-  deps: CeoPlanRoutesDeps,
+  deps: CeoPlanEventsDeps,
   options: { readonly allowedOrigin: string },
 ): void {
   app.get<{ Params: PlanIdParams; Querystring: EventsQuery }>(

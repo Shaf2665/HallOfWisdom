@@ -20,6 +20,7 @@ import { detectRoutingCandidates } from "../routing/candidate-detection.js";
 import { evaluateCandidateEligibility } from "../routing/routing-policy.js";
 import {
   CeoPlanDelegationBlockedError,
+  CeoPlanDeletionBlockedError,
   CeoPlanMutationTokenInvalidError,
   CeoPlanStateConflictError,
   CeoPlanStepAdapterInvalidError,
@@ -457,6 +458,35 @@ export class CeoPlanOrchestrator {
       });
       this.#publishAfterCommit(planId, outcome.event);
       return outcome.plan;
+    });
+  }
+
+  deletePlan(
+    planId: string,
+    expectedMutationToken: string,
+    hasExecutionHistory: boolean,
+  ): Promise<void> {
+    return this.#toPromise(() => {
+      this.#runAtomicUnit(() => {
+        const expectedRevision = this.#verifyMutationToken(planId, expectedMutationToken);
+        const plan = this.#planStore.getPlan(planId);
+        if (plan.status !== "cancelled") {
+          throw new CeoPlanStateConflictError(planId, plan.status, "deleted");
+        }
+        if (hasExecutionHistory) {
+          throw new CeoPlanDeletionBlockedError(
+            planId,
+            "it has execution history. Execution records are retained.",
+          );
+        }
+        if (this.#planStore.listDelegationLinks(planId).length > 0) {
+          throw new CeoPlanDeletionBlockedError(
+            planId,
+            "it has delegated child tasks. Child tasks are not deleted automatically.",
+          );
+        }
+        this.#planStore.deletePlan({ planId, expectedRevision });
+      });
     });
   }
 

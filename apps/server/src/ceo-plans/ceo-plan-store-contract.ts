@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ceoPlanSchema, ceoPlanVersionSchema } from "@hall-of-wisdom/protocol";
 import {
   CeoPlanApprovalBindingError,
+  CeoPlanDeletionBlockedError,
   CeoPlanNotFoundError,
   CeoPlanStateConflictError,
   CeoPlanVersionNotFoundError,
@@ -357,6 +358,69 @@ export function defineCeoPlanStoreContractTests(
       expect(() =>
         store.cancel({ planId: "plan-1", expectedRevision: store.getRevision("plan-1") }),
       ).toThrow(CeoPlanStateConflictError);
+    });
+
+    it("deletes a cancelled plan and all of its plan-definition history", () => {
+      const store = createStore();
+      store.createPlan(createInput());
+      store.createVersion({
+        planId: "plan-1",
+        expectedRevision: store.getRevision("plan-1"),
+        createdBy: "operator",
+        createdAt: "2026-01-01T00:05:00.000Z",
+        content: content({ summary: "Revised summary" }),
+        contentHash: "b".repeat(64),
+      });
+      store.submit({ planId: "plan-1", expectedRevision: store.getRevision("plan-1") });
+      store.decideApproval({
+        planId: "plan-1",
+        expectedRevision: store.getRevision("plan-1"),
+        planVersion: 2,
+        contentHash: "b".repeat(64),
+        decision: "reject",
+        operatorNote: undefined,
+        decidedAt: "2026-01-01T00:10:00.000Z",
+      });
+      store.appendEvent("plan-1", "ceo.plan.cancelled", {}, "2026-01-01T00:11:00.000Z");
+      store.cancel({ planId: "plan-1", expectedRevision: store.getRevision("plan-1") });
+
+      store.deletePlan({ planId: "plan-1", expectedRevision: store.getRevision("plan-1") });
+
+      expect(store.listPlans()).toEqual([]);
+      expect(() => store.getPlan("plan-1")).toThrow(CeoPlanNotFoundError);
+      expect(() => store.listVersions("plan-1")).toThrow(CeoPlanNotFoundError);
+      expect(() => store.listApprovals("plan-1")).toThrow(CeoPlanNotFoundError);
+      expect(() => store.listEvents("plan-1")).toThrow(CeoPlanNotFoundError);
+    });
+
+    it("does not delete a cancelled plan that has delegated child tasks", () => {
+      const store = createStore();
+      store.createPlan(createInput());
+      store.submit({ planId: "plan-1", expectedRevision: store.getRevision("plan-1") });
+      store.decideApproval({
+        planId: "plan-1",
+        expectedRevision: store.getRevision("plan-1"),
+        planVersion: 1,
+        contentHash: "a".repeat(64),
+        decision: "approve",
+        operatorNote: undefined,
+        decidedAt: "2026-01-01T00:10:00.000Z",
+      });
+      store.recordDelegation({
+        planId: "plan-1",
+        expectedRevision: store.getRevision("plan-1"),
+        approvedVersion: 1,
+        approvedContentHash: "a".repeat(64),
+        links: [{ stepId: "step-1", childTaskId: "child-task-1", adapterId: "hall.claude-code" }],
+        delegatedAt: "2026-01-01T00:15:00.000Z",
+      });
+      store.cancel({ planId: "plan-1", expectedRevision: store.getRevision("plan-1") });
+
+      expect(() => {
+        store.deletePlan({ planId: "plan-1", expectedRevision: store.getRevision("plan-1") });
+      }).toThrow(CeoPlanDeletionBlockedError);
+      expect(store.getPlan("plan-1").status).toBe("cancelled");
+      expect(store.findPlanIdByChildTaskId("child-task-1")).toBe("plan-1");
     });
 
     it("delegate can only happen once — a second delegation attempt is rejected, with no duplicate links created", () => {

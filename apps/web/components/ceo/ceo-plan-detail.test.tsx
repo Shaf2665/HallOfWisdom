@@ -11,6 +11,12 @@ import type {
 } from "../../lib/api-schemas";
 import { CeoPlanDetail } from "./ceo-plan-detail";
 
+const navigation = vi.hoisted(() => ({ push: vi.fn() }));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: navigation.push }),
+}));
+
 vi.mock("../../lib/api-client", async () => {
   const actual =
     await vi.importActual<typeof import("../../lib/api-client")>("../../lib/api-client");
@@ -21,6 +27,7 @@ vi.mock("../../lib/api-client", async () => {
     listCeoApprovals: vi.fn(),
     submitCeoPlan: vi.fn(),
     createCeoPlanVersion: vi.fn(),
+    deleteCeoPlan: vi.fn(),
     getTask: vi.fn(),
     getRoutingAnalysis: vi.fn(),
     listAdapters: vi.fn(),
@@ -121,7 +128,9 @@ function makeTaskRecord(overrides: Partial<TaskRecord["task"]> = {}): TaskRecord
 
 describe("CeoPlanDetail", () => {
   beforeEach(() => {
+    navigation.push.mockReset();
     vi.mocked(apiClient.getRoutingAnalysis).mockReset();
+    vi.mocked(apiClient.deleteCeoPlan).mockReset();
     vi.mocked(apiClient.listAdapters).mockResolvedValue({ adapters: [] });
     vi.mocked(apiClient.getTask).mockResolvedValue(makeTaskRecord());
   });
@@ -317,5 +326,26 @@ describe("CeoPlanDetail", () => {
     expect(
       await screen.findByRole("heading", { name: `CEO Plan — ${PARENT_TASK_ID}` }),
     ).toBeInTheDocument();
+  });
+
+  it("deletes a cancelled plan after confirmation and returns to the CEO Plans list", async () => {
+    const plan = makePlan({ status: "cancelled" });
+    vi.mocked(apiClient.getCeoPlan).mockResolvedValue(makeGetPlanResponse({ plan }));
+    vi.mocked(apiClient.getCeoPlanVersion).mockResolvedValue(makeVersion());
+    vi.mocked(apiClient.listCeoApprovals).mockResolvedValue({ approvals: [] });
+    vi.mocked(apiClient.deleteCeoPlan).mockResolvedValue({ deleted: true });
+
+    render(<CeoPlanDetail baseUrl={BASE_URL} wsBaseUrl={WS_BASE_URL} planId={PLAN_ID} />);
+
+    await userEvent.click(await screen.findByRole("button", { name: "Delete plan" }));
+    expect(
+      screen.getByText("Delete this cancelled plan? This cannot be undone."),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
+
+    await waitFor(() => {
+      expect(apiClient.deleteCeoPlan).toHaveBeenCalledWith(BASE_URL, PLAN_ID, "tok-1");
+      expect(navigation.push).toHaveBeenCalledWith("/ceo");
+    });
   });
 });

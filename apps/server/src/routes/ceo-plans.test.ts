@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DEFAULT_CEO_PLAN_EXECUTION_POLICY } from "@hall-of-wisdom/protocol";
 import {
   buildTestApp,
   validDeferredTaskBody,
@@ -315,6 +316,96 @@ describe("CEO plan REST routes", () => {
     });
     expect(response.statusCode).toBe(409);
     expect(harness.taskStore.list().length).toBe(before);
+    await app.close();
+  });
+
+  it("DELETE /api/v1/ceo-plans/:planId permanently removes a cancelled plan but preserves its parent task", async () => {
+    const { app, harness } = await buildApp();
+    const taskId = await createParentTask(app);
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/v1/tasks/${taskId}/ceo-plans`,
+      payload: {},
+    });
+    const { plan } = created.json<{ plan: PlanJson }>();
+    const cancelled = await app.inject({
+      method: "POST",
+      url: `/api/v1/ceo-plans/${plan.id}/cancel`,
+      payload: { expectedMutationToken: await fetchMutationToken(app, plan.id) },
+    });
+    expect(cancelled.statusCode).toBe(200);
+
+    const deleted = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/ceo-plans/${plan.id}`,
+      payload: { expectedMutationToken: await fetchMutationToken(app, plan.id) },
+    });
+    expect(deleted.statusCode).toBe(200);
+    expect(deleted.json()).toEqual({ deleted: true });
+    expect(
+      (await app.inject({ method: "GET", url: `/api/v1/ceo-plans/${plan.id}` })).statusCode,
+    ).toBe(404);
+    expect(harness.taskStore.get(taskId).task.taskId).toBe(taskId);
+    await app.close();
+  });
+
+  it("rejects deletion for an active plan", async () => {
+    const { app } = await buildApp();
+    const taskId = await createParentTask(app);
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/v1/tasks/${taskId}/ceo-plans`,
+      payload: {},
+    });
+    const { plan } = created.json<{ plan: PlanJson }>();
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/ceo-plans/${plan.id}`,
+      payload: { expectedMutationToken: await fetchMutationToken(app, plan.id) },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(response.json<{ error: { code: string } }>().error.code).toBe("CEO_PLAN_STATE_CONFLICT");
+    expect(
+      (await app.inject({ method: "GET", url: `/api/v1/ceo-plans/${plan.id}` })).statusCode,
+    ).toBe(200);
+    await app.close();
+  });
+
+  it("rejects deletion of a cancelled plan that has execution history", async () => {
+    const { app, harness } = await buildApp();
+    const taskId = await createParentTask(app);
+    const created = await app.inject({
+      method: "POST",
+      url: `/api/v1/tasks/${taskId}/ceo-plans`,
+      payload: {},
+    });
+    const { plan } = created.json<{ plan: PlanJson }>();
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/ceo-plans/${plan.id}/cancel`,
+      payload: { expectedMutationToken: await fetchMutationToken(app, plan.id) },
+    });
+    harness.ceoExecution.planRunStore.configureRun({
+      runId: "history-run-1",
+      planId: plan.id,
+      planVersion: 1,
+      executionMode: "manual",
+      policy: DEFAULT_CEO_PLAN_EXECUTION_POLICY,
+      now: "2026-08-11T00:00:00.000Z",
+      steps: [],
+    });
+
+    const response = await app.inject({
+      method: "DELETE",
+      url: `/api/v1/ceo-plans/${plan.id}`,
+      payload: { expectedMutationToken: await fetchMutationToken(app, plan.id) },
+    });
+    expect(response.statusCode).toBe(409);
+    const error = response.json<{ error: { code: string; message: string } }>().error;
+    expect(error.code).toBe("CEO_PLAN_DELETION_BLOCKED");
+    expect(error.message).toContain("execution history");
+    expect(harness.ceoExecution.planRunStore.getRun("history-run-1").planId).toBe(plan.id);
     await app.close();
   });
 

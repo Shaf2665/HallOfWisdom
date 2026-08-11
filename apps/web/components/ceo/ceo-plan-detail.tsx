@@ -1,10 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useId, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ApiClientError,
   cancelCeoPlan,
   createCeoPlanVersion,
+  deleteCeoPlan,
   getCeoPlan,
   getCeoPlanVersion,
   getTask,
@@ -69,6 +71,8 @@ export function CeoPlanDetail({
   readonly planId: string;
 }) {
   const editFormTitleId = useId();
+  const deleteDialogTitleId = useId();
+  const router = useRouter();
   const [plan, setPlan] = useState<CeoPlan | null>(null);
   const [progress, setProgress] = useState<CeoPlanProgressSummary | null>(null);
   const [links, setLinks] = useState<readonly CeoDelegationLink[]>([]);
@@ -86,6 +90,7 @@ export function CeoPlanDetail({
   const [showReject, setShowReject] = useState(false);
   const [showDelegate, setShowDelegate] = useState(false);
   const [showEditForm, setShowEditForm] = useState(false);
+  const [showDelete, setShowDelete] = useState(false);
   const [agentSelections, setAgentSelections] = useState<{
     readonly version: number;
     readonly values: AgentSelections;
@@ -179,6 +184,20 @@ export function CeoPlanDetail({
     }
   }
 
+  async function handleDelete(): Promise<void> {
+    if (busy || plan?.status !== "cancelled") return;
+    setBusy(true);
+    setActionError(null);
+    try {
+      await deleteCeoPlan(baseUrl, planId, mutationToken);
+      router.push("/ceo");
+    } catch (error) {
+      setActionError(safeMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   if (state === "loading") {
     return (
       <p role="status" className="text-sm text-stone-500">
@@ -203,6 +222,7 @@ export function CeoPlanDetail({
   const showApproveReject = plan.status === "awaiting_approval";
   const showDelegateAction = plan.status === "approved";
   const showCancel = CANCELLABLE_STATUSES.has(plan.status);
+  const showDeleteAction = plan.status === "cancelled";
   const showEdit = EDITABLE_STATUSES.has(plan.status);
   const currentVersion = activeVersion;
   const progressByStepId = new Map(progress.steps.map((s) => [s.stepId, s.status]));
@@ -368,6 +388,18 @@ export function CeoPlanDetail({
               className="rounded border border-stone-300 px-3 py-1.5 text-sm font-medium text-stone-700 hover:bg-stone-100 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
             >
               Edit plan…
+            </button>
+          ) : null}
+          {showDeleteAction ? (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setShowDelete(true);
+              }}
+              className="rounded border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/40"
+            >
+              Delete plan
             </button>
           ) : null}
         </div>
@@ -654,6 +686,46 @@ export function CeoPlanDetail({
                 setShowEditForm(false);
               }}
             />
+          </div>
+        </Dialog>
+      ) : null}
+
+      {showDelete ? (
+        <Dialog
+          titleId={deleteDialogTitleId}
+          onClose={() => {
+            if (!busy) setShowDelete(false);
+          }}
+        >
+          <div className="flex flex-col gap-4">
+            <h2 id={deleteDialogTitleId} className="text-lg font-semibold">
+              Delete plan
+            </h2>
+            <p className="text-sm text-stone-700 dark:text-stone-300">
+              Delete this cancelled plan? This cannot be undone.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  setShowDelete(false);
+                }}
+                className="rounded border border-stone-300 px-3 py-1.5 text-sm font-medium text-stone-700 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+              >
+                Keep plan
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => {
+                  void handleDelete();
+                }}
+                className="rounded bg-red-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-red-600"
+              >
+                {busy ? "Deleting…" : "Delete permanently"}
+              </button>
+            </div>
           </div>
         </Dialog>
       ) : null}

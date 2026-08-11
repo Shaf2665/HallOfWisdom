@@ -78,6 +78,11 @@ export interface CancelInput {
   readonly expectedRevision: number;
 }
 
+export interface DeletePlanInput {
+  readonly planId: string;
+  readonly expectedRevision: number;
+}
+
 export interface DelegationLinkInput {
   readonly stepId: string;
   readonly childTaskId: string;
@@ -148,6 +153,7 @@ export interface CeoPlanStorePort {
     readonly approval: CeoApproval;
   };
   cancel(input: CancelInput): CeoPlan;
+  deletePlan(input: DeletePlanInput): void;
   recordDelegation(input: RecordDelegationInput): {
     readonly plan: CeoPlan;
     readonly links: readonly DelegationLink[];

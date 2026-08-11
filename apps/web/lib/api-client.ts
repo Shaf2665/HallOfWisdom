@@ -12,6 +12,7 @@ import {
   configureCeoPlanRunResponseSchema,
   createCeoPlanResponseSchema,
   createTaskResponseSchema,
+  deleteCeoPlanResponseSchema,
   decideCeoPlanApprovalResponseSchema,
   delegateCeoPlanResponseSchema,
   emergencyStopResponseSchema,
@@ -51,6 +52,7 @@ import {
   type ConfigureCeoPlanRunResponse,
   type CreateCeoPlanResponse,
   type CreateTaskResponse,
+  type DeleteCeoPlanResponse,
   type DecideCeoPlanApprovalResponse,
   type DelegateCeoPlanResponse,
   type EmergencyStopResponse,
@@ -895,6 +897,21 @@ export function cancelCeoPlan(
     `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}/cancel`,
     { method: "POST", body: { expectedMutationToken } },
     ceoPlanSchema,
+    options,
+  );
+}
+
+/** Permanently removes a cancelled plan and its plan-definition history. Linked child tasks or execution history block this action. */
+export function deleteCeoPlan(
+  baseUrl: string,
+  planId: string,
+  expectedMutationToken: string,
+  options: RequestOptions = {},
+): Promise<DeleteCeoPlanResponse> {
+  return request(
+    `${baseUrl}/api/v1/ceo-plans/${encodeURIComponent(planId)}`,
+    { method: "DELETE", body: { expectedMutationToken } },
+    deleteCeoPlanResponseSchema,
     options,
   );
 }

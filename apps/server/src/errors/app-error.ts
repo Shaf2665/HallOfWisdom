@@ -366,6 +366,16 @@ export class CeoPlanStateConflictError extends HallCoreError {
   }
 }
 
+/** A cancelled plan still has linked child tasks or execution history, so deleting its definition would leave related work without its plan. */
+export class CeoPlanDeletionBlockedError extends HallCoreError {
+  readonly code = "CEO_PLAN_DELETION_BLOCKED";
+  readonly statusCode = 409;
+
+  constructor(planId: string, safeReason: string) {
+    super(`CEO plan "${planId}" cannot be deleted: ${safeReason}`);
+  }
+}
+
 /**
  * Kickoff, "Plan versioning": approval/delegation is bound to an exact
  * `(planId, version, contentHash)` triple. Thrown when a request targets
