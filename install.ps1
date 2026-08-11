@@ -90,7 +90,7 @@ function Test-HallPrerequisitesOrExit {
     $checks = @(
         @{ Name = "Git"; Result = Test-HallGitPrerequisite }
         @{ Name = "Node.js"; Result = (Test-HallNodePrerequisite -RequiredRange $versions.NodeRange) }
-        @{ Name = "pnpm"; Result = (Test-HallPnpmPrerequisite -RequiredVersion $versions.PnpmVersion) }
+        @{ Name = "pnpm"; Result = (Test-HallPnpmPrerequisite -RequiredRange $versions.PnpmRange) }
         @{ Name = "Hall repository"; Result = (Test-HallRepositoryIntegrity -RepoRoot $RepoRoot) }
     )
     $failed = $false

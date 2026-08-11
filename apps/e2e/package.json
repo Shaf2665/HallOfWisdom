@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Playwright end-to-end verification for Phase 11/11.1 (Agents catalog, safe routing, requirement-safe manual assignment) against a deterministic, fixture-adapter Hall Core — no real Claude Code or Codex process is ever started, and no subscription usage is ever spent.",
   "engines": {
-    "node": ">=24.11.0 <25"
+    "node": ">=22.13.0 <23 || >=24.11.0 <25"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

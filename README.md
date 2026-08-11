@@ -16,8 +16,8 @@ a task. Contributor commands and architecture details are under [For Developers]
 
 ### 1. Requirements
 
-- [Node.js](https://nodejs.org/) `>=24.11.0 <25`
-- [pnpm](https://pnpm.io/installation) `10.33.0`
+- [Node.js](https://nodejs.org/) `>=22.13.0 <23 || >=24.11.0 <25` (Node 22 or 24 LTS)
+- [pnpm](https://pnpm.io/installation) `>=10.0.0 <11` (`packageManager` pins 10.33.0 for deterministic installs)
 - [Git](https://git-scm.com/downloads) — recent enough to support
   `git worktree list --porcelain -z` (confirmed against Git 2.54)
 - Windows 10/11 with PowerShell, or Linux/macOS with Bash

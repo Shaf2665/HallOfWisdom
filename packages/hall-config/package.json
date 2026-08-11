@@ -16,9 +16,11 @@
   "bin": {
     "hall-config": "./dist/cli.js"
   },
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
   "engines": {
-    "node": ">=24.11.0 <25"
+    "node": ">=22.13.0 <23 || >=24.11.0 <25"
   },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",

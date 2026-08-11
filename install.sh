@@ -29,10 +29,9 @@ check_platform() {
   esac
 }
 
-check_node_version() {
-  local required_range="$1"
-  local version_text
-  local clean_version
+version_matches_clause() {
+  local clean_version="$1"
+  local clause="$2"
   local min_major
   local min_minor
   local min_patch
@@ -41,20 +40,15 @@ check_node_version() {
   local minor
   local patch
 
-  version_text="$(node --version 2>/dev/null || true)"
-  if [[ ! "$required_range" =~ ^\>\=([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]+\<([0-9]+)$ ]]; then
-    die "The Node.js requirement '$required_range' in package.json has an unsupported format."
+  if [[ ! "$clause" =~ ^\>\=([0-9]+)\.([0-9]+)\.([0-9]+)[[:space:]]+\<([0-9]+)$ ]]; then
+    return 2
   fi
   min_major="${BASH_REMATCH[1]}"
   min_minor="${BASH_REMATCH[2]}"
   min_patch="${BASH_REMATCH[3]}"
   max_major="${BASH_REMATCH[4]}"
 
-  clean_version="${version_text#v}"
-  if [[ ! "$clean_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
-    printf '  [FAIL] Node.js returned an unrecognized version: %s\n' "$version_text" >&2
-    return 1
-  fi
+  [[ "$clean_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]] || return 1
   major="${BASH_REMATCH[1]}"
   minor="${BASH_REMATCH[2]}"
   patch="${BASH_REMATCH[3]}"
@@ -62,17 +56,61 @@ check_node_version() {
   if ((10#$major >= 10#$max_major || 10#$major < 10#$min_major)) ||
     ((10#$major == 10#$min_major && 10#$minor < 10#$min_minor)) ||
     ((10#$major == 10#$min_major && 10#$minor == 10#$min_minor && 10#$patch < 10#$min_patch)); then
-    printf '  [FAIL] Node.js %s was found, but Hall requires %s.\n' "$version_text" "$required_range" >&2
     return 1
   fi
 
-  printf '  [OK] Node.js (%s)\n' "$version_text"
+  return 0
+}
+
+check_version_in_range() {
+  local display_name="$1"
+  local version_text="$2"
+  local required_range="$3"
+  local clean_version="${version_text#v}"
+  local remaining="$required_range"
+  local clause
+  local match_status=0
+  local matched=0
+
+  if [[ ! "$clean_version" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+    printf '  [FAIL] %s returned an unrecognized version: %s\n' "$display_name" "$version_text" >&2
+    return 1
+  fi
+  if [[ "$remaining" == " || "* || "$remaining" == *" || " ]]; then
+    die "The $display_name requirement '$required_range' in package.json has an unsupported format."
+  fi
+
+  while [[ -n "$remaining" ]]; do
+    if [[ "$remaining" == *" || "* ]]; then
+      clause="${remaining%% || *}"
+      remaining="${remaining#* || }"
+    else
+      clause="$remaining"
+      remaining=""
+    fi
+    if version_matches_clause "$clean_version" "$clause"; then
+      matched=1
+    else
+      match_status=$?
+    fi
+    if ((match_status == 2)); then
+      die "The $display_name requirement '$required_range' in package.json has an unsupported format."
+    fi
+  done
+
+  if ((matched == 1)); then
+    printf '  [OK] %s (%s)\n' "$display_name" "$version_text"
+    return 0
+  fi
+
+  printf '  [FAIL] %s %s was found, but Hall requires %s.\n' "$display_name" "$version_text" "$required_range" >&2
+  return 1
 }
 
 check_prerequisites() {
   local failed=0
   local required_node_range
-  local required_pnpm_version
+  local required_pnpm_range
   local actual_pnpm_version
   local required_path
   local node_available=0
@@ -83,7 +121,7 @@ check_prerequisites() {
     node_available=1
     required_node_range="$(node -p "require('./package.json').engines.node" 2>/dev/null)" ||
       die "Could not read the Node.js requirement from package.json."
-    check_node_version "$required_node_range" || failed=1
+    check_version_in_range "Node.js" "$(node --version 2>/dev/null || true)" "$required_node_range" || failed=1
   else
     failed=1
   fi
@@ -93,16 +131,10 @@ check_prerequisites() {
       printf '  [FAIL] pnpm could not be checked because Node.js is missing. Install Node.js first.\n' >&2
       failed=1
     else
-      required_pnpm_version="$(node -p "require('./package.json').packageManager.replace(/^pnpm@/, '')" 2>/dev/null)" ||
+      required_pnpm_range="$(node -p "require('./package.json').engines.pnpm" 2>/dev/null)" ||
         die "Could not read the pnpm requirement from package.json."
       actual_pnpm_version="$(pnpm --version 2>/dev/null || true)"
-      if [[ "$actual_pnpm_version" == "$required_pnpm_version" ]]; then
-        printf '  [OK] pnpm (%s)\n' "$actual_pnpm_version"
-      else
-        printf '  [FAIL] pnpm %s was found, but Hall is pinned to pnpm %s.\n' \
-          "${actual_pnpm_version:-unknown}" "$required_pnpm_version" >&2
-        failed=1
-      fi
+      check_version_in_range "pnpm" "$actual_pnpm_version" "$required_pnpm_range" || failed=1
     fi
   else
     failed=1

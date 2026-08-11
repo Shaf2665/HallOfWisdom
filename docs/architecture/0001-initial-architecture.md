@@ -185,7 +185,7 @@ Runner (Node) without modification.
 | Linting                    | ESLint flat config + `typescript-eslint` strict/stylistic type-checked configs |                                                                                    |
 | Formatting                 | Prettier                                                                       | ESLint stylistic rules disabled via `eslint-config-prettier` to avoid conflicts    |
 | Tests                      | Vitest                                                                         | Lightweight, native TypeScript/ESM support, fast, no extra transpile config needed |
-| Runtime                    | Node.js `>=24.11.0 <25`                                                        | Current LTS at time of writing                                                     |
+| Runtime                    | Node.js `>=22.13.0 <23 \|\| >=24.11.0 <25`                                     | Node 22/24 LTS; 22.13 is the first unflagged `node:sqlite` release                 |
 
 Not yet introduced (by design, per the phase plan): Next.js, Fastify, Prisma, WebSockets, Tauri,
 Docker, Redis, PostgreSQL, Rust.

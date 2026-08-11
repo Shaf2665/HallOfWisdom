@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Hall of Wisdom's browser dashboard: talks to Hall Core's REST + WebSocket API directly from the client, with no custom server and no proxy.",
   "engines": {
-    "node": ">=24.11.0 <25"
+    "node": ">=22.13.0 <23 || >=24.11.0 <25"
   },
   "scripts": {
     "dev": "next dev --hostname 127.0.0.1 --port 3000",
