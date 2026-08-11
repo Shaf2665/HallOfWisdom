@@ -9,8 +9,8 @@ uses a local Hermes Coding Runtime connected to a Hermes Router endpoint. Hall d
 upstream OpenRouter or model-provider credentials to the router; Hermes uses a separate proxy/client
 key supplied through the environment that starts Hall Core.
 
-The normal Windows path is: clone, install, start, configure a provider, and run a task. Contributor
-commands and architecture details are under [For Developers](#for-developers).
+The normal path on Windows, Linux, and macOS is: clone, install, start, configure a provider, and run
+a task. Contributor commands and architecture details are under [For Developers](#for-developers).
 
 ## Getting Started
 
@@ -20,7 +20,7 @@ commands and architecture details are under [For Developers](#for-developers).
 - [pnpm](https://pnpm.io/installation) `10.33.0`
 - [Git](https://git-scm.com/downloads) — recent enough to support
   `git worktree list --porcelain -z` (confirmed against Git 2.54)
-- Windows 10/11 for the PowerShell installer and launcher below
+- Windows 10/11 with PowerShell, or Linux/macOS with Bash
 - At least one coding provider you intend to use:
   - Claude Code CLI
   - Codex CLI
@@ -28,15 +28,23 @@ commands and architecture details are under [For Developers](#for-developers).
 
 ### 2. Clone the repository
 
-```powershell
+```text
 git clone https://github.com/Shaf2665/HallOfWisdom.git
 cd HallOfWisdom
 ```
 
 ### 3. Install
 
+Windows (PowerShell):
+
 ```powershell
 .\install.ps1
+```
+
+Linux/macOS (Bash):
+
+```bash
+./install.sh
 ```
 
 The installer checks prerequisites, installs dependencies, builds Hall, and saves your local
@@ -45,8 +53,10 @@ configuration. It asks for:
 - the directory containing projects Hall may work with;
 - a durable data directory;
 - a Hall-owned agent-worktree directory;
-- an optional comparison-worktree directory; and
-- whether to enable Codex trusted-local execution (default **No**).
+- an optional comparison-worktree directory.
+
+The Windows installer also offers the existing Codex trusted-local opt-in. The Bash installer keeps
+that setting disabled on a first install and preserves it when reconfiguring an existing setup.
 
 Keep the durable data and agent-worktree directories configured if you intend to use Hermes. They
 allow Hall to persist run state and keep Hermes away from the original project checkout. Run the
@@ -55,8 +65,16 @@ installer again to verify or change the saved configuration. See
 
 ### 4. Start Hall
 
+Windows (PowerShell):
+
 ```powershell
 .\start.ps1
+```
+
+Linux/macOS (Bash):
+
+```bash
+./start.sh
 ```
 
 The launcher loads the saved configuration, starts Hall Core and Hall Web, waits for both services,
@@ -112,9 +130,17 @@ $env:HERMES_ROUTER_BASE_URL="https://your-router.example/v1"
 $env:HERMES_ROUTER_API_KEY="<hermes-proxy-key>"
 ```
 
+Bash placeholder example:
+
+```bash
+export HALL_HERMES_ROUTER_ROOT="/path/to/Hermes-router"
+export HERMES_ROUTER_BASE_URL="https://your-router.example/v1"
+export HERMES_ROUTER_API_KEY="<hermes-proxy-key>"
+```
+
 Use the Hermes proxy/client key—never put an upstream OpenRouter or provider key into Hall. These
-variables must exist in the terminal environment that launches `start.ps1`. After changing them,
-restart Hall and click **Recheck** on the Providers page.
+variables must exist in the terminal environment that launches `start.ps1` or `start.sh`. After
+changing them, restart Hall and click **Recheck** on the Providers page.
 
 ### 6. Create and run your first task
 
@@ -131,21 +157,23 @@ terminal result and execution artifact, then cleans up the worktree through its 
 
 ### 7. Stop Hall
 
-Return to the terminal running `start.ps1` and press **Ctrl+C**. Hall Core and Hall Web shut down
+Return to the terminal running the launcher and press **Ctrl+C**. Hall Core and Hall Web shut down
 cleanly.
 
 ### 8. Troubleshooting
 
-- **A prerequisite is missing** — install or upgrade the named tool, then rerun `install.ps1`.
+- **A prerequisite is missing** — install or upgrade the named tool, then rerun your platform's
+  installer.
 - **A port is already in use** — stop the process using the configured port. Defaults are 4310 for
   Hall Core and 3000 for Hall Web.
-- **A build is missing** — rerun `install.ps1`.
+- **A build is missing** — rerun your platform's installer.
 - **Claude Code or Codex is Not connected** — run the card's CLI login command, then click
   **Recheck**.
 - **Hermes is Not connected** — read the card's server-provided guidance. Confirm the runtime root,
   router endpoint, proxy key, durable data directory, and agent-worktree directory, then restart
   Hall and click **Recheck**.
-- **You want to reconfigure Hall** — rerun `install.ps1` and choose **Reconfigure Hall**.
+- **You want to reconfigure Hall** — rerun your platform's installer and choose **Reconfigure
+  Hall**.
 
 ## Current Features
 
@@ -165,7 +193,7 @@ cleanly.
   plans.
 - **Restart-safe cleanup and recovery** — reconcile interrupted runs and conservatively resume
   worktree cleanup.
-- **One-command Windows onboarding** — interactive `install.ps1` plus `start.ps1`.
+- **One-command cross-platform onboarding** — PowerShell on Windows and Bash on Linux/macOS.
 
 ## For Developers
 
@@ -221,8 +249,8 @@ Open `http://127.0.0.1:3000`.
 
 Trusted-local Codex mode is optional and bypasses Codex sandbox and approval enforcement. Enable it
 only when intended with `--enable-codex-trusted-local`. An already-built Hall Core can be started
-with `node apps/server/dist/server.js`; without flags it loads the configuration saved by
-`install.ps1`.
+with `node apps/server/dist/server.js`; without flags it loads the configuration saved by the
+platform installer.
 
 ### Hermes architecture
 
@@ -298,9 +326,8 @@ but does not claim generic secret detection.
 
 ## Current Project Status
 
-Hall of Wisdom is a working local alpha. The Windows onboarding milestone is complete: users can
-install, persist configuration, launch Hall, configure providers, and shut down cleanly through the
-root PowerShell scripts.
+Hall of Wisdom is a working local alpha. Root launchers provide the same install, persisted-config,
+start, and clean-shutdown flow through PowerShell on Windows and Bash on Linux/macOS.
 
 Hermes Router integration is complete for the current alpha scope, including runtime/router
 detection, validated execution and event handling, cancellation, Hall-owned isolated-worktree
