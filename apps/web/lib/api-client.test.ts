@@ -17,6 +17,7 @@ import {
   listTasks,
   startTask,
   transitionTask,
+  uploadBoardAttachment,
 } from "./api-client";
 
 const BASE_URL = "http://127.0.0.1:4310";
@@ -674,6 +675,85 @@ describe("api-client: boards", () => {
       code: "NETWORK_ERROR",
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("createBoardMessage: includes attachmentIds in the request body when given", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(message1, 201));
+    await createBoardMessage(BASE_URL, "hall.general", "", ["attachment-1", "attachment-2"]);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({
+      text: "",
+      attachmentIds: ["attachment-1", "attachment-2"],
+    });
+  });
+
+  it("createBoardMessage: omits attachmentIds from the request body when the array is empty", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(message1, 201));
+    await createBoardMessage(BASE_URL, "hall.general", "hello", []);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(JSON.parse(init.body as string)).toEqual({ text: "hello" });
+  });
+
+  describe("uploadBoardAttachment", () => {
+    const attachment = {
+      attachmentId: "attachment-1",
+      filename: "diagram.png",
+      mimeType: "image/png",
+      byteSize: 1024,
+      kind: "image" as const,
+    };
+
+    it("posts a multipart FormData body with no explicit Content-Type header", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(attachment, 201));
+      const file = new File(["bytes"], "diagram.png", { type: "image/png" });
+      await uploadBoardAttachment(BASE_URL, "hall.general", file);
+      const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+      expect(url).toBe(`${BASE_URL}/api/v1/boards/hall.general/attachments`);
+      expect(init.method).toBe("POST");
+      expect(init.body).toBeInstanceOf(FormData);
+      expect((init.body as FormData).get("file")).toBeInstanceOf(File);
+      // No Content-Type header set manually — the browser must generate its
+      // own multipart boundary, which a hardcoded header would break.
+      expect(init.headers).toBeUndefined();
+      expect(init.credentials).toBe("include");
+    });
+
+    it("validates and returns the resolved attachment metadata", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(attachment, 201));
+      const file = new File(["bytes"], "diagram.png", { type: "image/png" });
+      const result = await uploadBoardAttachment(BASE_URL, "hall.general", file);
+      expect(result).toEqual(attachment);
+    });
+
+    it("surfaces a 400 error for a rejected upload", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ error: { code: "INVALID_REQUEST", message: "Unsupported file type." } }, 400),
+      );
+      const file = new File(["bytes"], "app.exe", { type: "application/x-msdownload" });
+      await expect(uploadBoardAttachment(BASE_URL, "hall.general", file)).rejects.toMatchObject({
+        code: "INVALID_REQUEST",
+        statusCode: 400,
+      });
+    });
+
+    it("surfaces a network error without retrying", async () => {
+      fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+      const file = new File(["bytes"], "diagram.png", { type: "image/png" });
+      await expect(uploadBoardAttachment(BASE_URL, "hall.general", file)).rejects.toMatchObject({
+        code: "NETWORK_ERROR",
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects a malformed response (missing required field)", async () => {
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({ ...attachment, byteSize: undefined }, 201),
+      );
+      const file = new File(["bytes"], "diagram.png", { type: "image/png" });
+      await expect(uploadBoardAttachment(BASE_URL, "hall.general", file)).rejects.toMatchObject({
+        code: "INVALID_RESPONSE",
+      });
+    });
   });
 
   it("encodes boardId safely in the URL path", async () => {

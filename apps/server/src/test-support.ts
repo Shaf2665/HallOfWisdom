@@ -17,6 +17,8 @@ import { EventBus } from "./events/event-bus.js";
 import { BoardStore } from "./boards/board-store.js";
 import { MessageStore } from "./boards/message-store.js";
 import { MessageBus } from "./boards/message-bus.js";
+import { AttachmentStore } from "./boards/attachment-store.js";
+import { AttachmentBlobStore } from "./boards/attachment-blob-store.js";
 import { DEFAULT_LIMITS, type ServerLimits } from "./config/server-config.js";
 import {
   createComparisonComposition,
@@ -119,6 +121,10 @@ export interface TestHarness {
   readonly boardStore: BoardStore;
   readonly messageStore: MessageStore;
   readonly messageBus: MessageBus;
+  readonly attachmentStore: AttachmentStore;
+  readonly attachmentBlobStore: AttachmentBlobStore;
+  /** Test-only introspection point — the directory `attachmentBlobStore` reads/writes under, for assertions like "nothing was written to disk". */
+  readonly attachmentBlobRootDir: string;
   readonly limits: ServerLimits;
   readonly comparison?: ComparisonComposition | undefined;
   /** Phase 14 — always composed (ephemeral, deterministic planner), matching every other Hall Core composition root. */
@@ -228,6 +234,9 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
   const messageBus = new MessageBus({ maxSubscribersPerBoard: limits.maxSubscribersPerBoard });
   const generalBoard = boardStore.seedGeneralBoard(new Date().toISOString());
   messageStore.registerBoard(generalBoard.boardId);
+  const attachmentStore = new AttachmentStore();
+  const attachmentBlobRootDir = fs.mkdtempSync(path.join(os.tmpdir(), "hall-test-attachments-"));
+  const attachmentBlobStore = new AttachmentBlobStore({ rootDir: attachmentBlobRootDir });
 
   const ceoPlans = createCeoPlanComposition({
     registry,
@@ -273,6 +282,9 @@ export function buildTestHarness(options: TestHarnessOptions): TestHarness {
     boardStore,
     messageStore,
     messageBus,
+    attachmentStore,
+    attachmentBlobStore,
+    attachmentBlobRootDir,
     limits,
     comparison,
     ceoPlans,
@@ -298,6 +310,8 @@ export async function buildTestApp(options: TestHarnessOptions): Promise<{
     boardStore: harness.boardStore,
     messageStore: harness.messageStore,
     messageBus: harness.messageBus,
+    attachmentStore: harness.attachmentStore,
+    attachmentBlobStore: harness.attachmentBlobStore,
     registry: harness.registry,
     comparison: harness.comparison,
     ceoPlanOrchestrator: harness.ceoPlans.orchestrator,

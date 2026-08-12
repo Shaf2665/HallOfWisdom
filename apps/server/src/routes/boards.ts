@@ -6,11 +6,17 @@ import { InvalidMessageError, InvalidRequestError } from "../errors/app-error.js
 import type { BoardStorePort } from "../boards/board-store-port.js";
 import type { MessageStorePort } from "../boards/message-store-port.js";
 import type { MessageBus } from "../boards/message-bus.js";
+import type { AttachmentStorePort } from "../boards/attachment-store-port.js";
+import type { AttachmentBlobStore } from "../boards/attachment-blob-store.js";
 
 export interface BoardRoutesDeps {
   readonly boardStore: BoardStorePort;
   readonly messageStore: MessageStorePort;
   readonly messageBus: MessageBus;
+  readonly attachmentStore: AttachmentStorePort;
+  readonly attachmentBlobStore: AttachmentBlobStore;
+  /** See `ServerLimits.pendingAttachmentTtlMs`'s doc comment. */
+  readonly pendingAttachmentTtlMs: number;
 }
 
 /**
@@ -33,6 +39,23 @@ interface TaskIdParams {
 
 interface MessagesQuery {
   readonly afterSequence?: string;
+}
+
+/**
+ * Opportunistic, lazy cleanup — no background timer. Mirrors
+ * `routes/board-attachments.ts`'s identical helper (kept as a separate,
+ * tiny copy rather than a shared import, the same "domains stay apart"
+ * discipline `MessageBus`/`EventBus` already follow) — called here too so a
+ * message-creation attempt that never happens (abandoned upload) or fails
+ * partway is covered by the same mechanism as an abandoned upload. See
+ * `docs/architecture/0020-communication-board-attachments.md`.
+ */
+function sweepExpiredPendingAttachments(deps: BoardRoutesDeps): void {
+  const cutoffIso = new Date(Date.now() - deps.pendingAttachmentTtlMs).toISOString();
+  const sweptAttachmentIds = deps.attachmentStore.sweepExpiredPending(cutoffIso);
+  for (const attachmentId of sweptAttachmentIds) {
+    deps.attachmentBlobStore.remove(attachmentId);
+  }
 }
 
 function parseAfterSequenceQuery(raw: string | undefined): number | undefined {
@@ -105,13 +128,29 @@ export function registerBoardRoutes(app: FastifyInstance, deps: BoardRoutesDeps)
 
       const boardId = request.params.boardId;
       const now = new Date().toISOString();
+
+      sweepExpiredPendingAttachments(deps);
+
+      // Resolved BEFORE messageStore.append() — an unknown/wrong-board/
+      // already-linked attachmentId throws here, so nothing is ever stored
+      // for a request naming a bad attachment. The client sends only ids;
+      // canonical filename/mime/size always come from Hall Core's own
+      // attachment store, never from the request body.
+      const attachmentIds = parsed.data.attachmentIds ?? [];
+      const attachments =
+        attachmentIds.length > 0 ? deps.attachmentStore.resolvePending(boardId, attachmentIds) : [];
+
       const message = deps.messageStore.append(boardId, {
         messageId: randomUUID(),
         boardId,
         author: LOCAL_OPERATOR_AUTHOR,
         text: parsed.data.text,
+        ...(attachments.length > 0 ? { attachments } : {}),
         createdAt: now,
       });
+      if (attachmentIds.length > 0) {
+        deps.attachmentStore.link(boardId, attachmentIds, message.messageId);
+      }
       deps.boardStore.recordMessageAppended(boardId, message.sequence + 1, now);
       deps.messageBus.publish(boardId, message);
 

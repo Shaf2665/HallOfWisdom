@@ -30,6 +30,7 @@
   },
   "dependencies": {
     "@fastify/cors": "^11.3.0",
+    "@fastify/multipart": "^9.3.1",
     "@fastify/websocket": "^11.3.0",
     "@hall-of-wisdom/agent-adapter-sdk": "workspace:*",
     "@hall-of-wisdom/claude-code-adapter": "workspace:*",

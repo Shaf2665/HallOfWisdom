@@ -114,7 +114,7 @@ describe("migration 8 — agent execution artifacts", () => {
 
   it("runs after migration 7 in the ordered migration list", () => {
     expect(MIGRATIONS.map((migration) => migration.version)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10,
+      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11,
     ]);
   });
 

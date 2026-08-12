@@ -1,6 +1,8 @@
 import Fastify, { type FastifyInstance, type FastifyBaseLogger } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyCors from "@fastify/cors";
+import fastifyMultipart from "@fastify/multipart";
+import { MAX_ATTACHMENT_BYTES } from "@hall-of-wisdom/protocol";
 import type { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import { installErrorHandler, installNotFoundHandler } from "./errors/error-handler.js";
 import { AuthenticationRequiredError } from "./errors/app-error.js";
@@ -34,6 +36,9 @@ import type { EventBus } from "./events/event-bus.js";
 import type { BoardStorePort } from "./boards/board-store-port.js";
 import type { MessageStorePort } from "./boards/message-store-port.js";
 import type { MessageBus } from "./boards/message-bus.js";
+import type { AttachmentStorePort } from "./boards/attachment-store-port.js";
+import type { AttachmentBlobStore } from "./boards/attachment-blob-store.js";
+import { registerBoardAttachmentRoutes } from "./routes/board-attachments.js";
 import { DEFAULT_WEB_ORIGIN, type ServerLimits } from "./config/server-config.js";
 
 export interface CreateHallCoreAppOptions {
@@ -44,6 +49,8 @@ export interface CreateHallCoreAppOptions {
   readonly boardStore: BoardStorePort;
   readonly messageStore: MessageStorePort;
   readonly messageBus: MessageBus;
+  readonly attachmentStore: AttachmentStorePort;
+  readonly attachmentBlobStore: AttachmentBlobStore;
   readonly registry: AgentRegistry;
   readonly limits: ServerLimits;
   /** Phase 12 — present only when `--comparison-root` was supplied at startup; when absent, no comparison routes are registered at all. */
@@ -120,6 +127,17 @@ export async function createHallCoreApp(
     options: { maxPayload: options.limits.maxWebSocketMessageBytes },
   });
 
+  // A per-plugin `fileSize`/`files` limit, deliberately independent of the
+  // JSON `bodyLimit` above — see `routes/board-attachments.ts`'s doc
+  // comment. `throwFileSizeLimit: false` is what lets the upload route
+  // check `part.file.truncated` itself after fully buffering the part,
+  // rather than reacting to a thrown error mid-stream — see
+  // `docs/architecture/0020-communication-board-attachments.md`.
+  await app.register(fastifyMultipart, {
+    throwFileSizeLimit: false,
+    limits: { fileSize: MAX_ATTACHMENT_BYTES, files: 1, fields: 0 },
+  });
+
   installErrorHandler(app);
   installNotFoundHandler(app);
 
@@ -168,6 +186,9 @@ export async function createHallCoreApp(
     boardStore: options.boardStore,
     messageStore: options.messageStore,
     messageBus: options.messageBus,
+    attachmentStore: options.attachmentStore,
+    attachmentBlobStore: options.attachmentBlobStore,
+    pendingAttachmentTtlMs: options.limits.pendingAttachmentTtlMs,
   });
   registerBoardMessagesRoute(app, {
     boardStore: options.boardStore,
@@ -175,6 +196,12 @@ export async function createHallCoreApp(
     messageBus: options.messageBus,
     maxBufferedBytes: options.limits.maxWebSocketMessageBytes * 16,
     allowedOrigin: webOrigin,
+  });
+  registerBoardAttachmentRoutes(app, {
+    boardStore: options.boardStore,
+    attachmentStore: options.attachmentStore,
+    blobStore: options.attachmentBlobStore,
+    pendingAttachmentTtlMs: options.limits.pendingAttachmentTtlMs,
   });
 
   if (options.comparison) {

@@ -88,6 +88,24 @@ describe("WebSocket /api/v1/boards/:boardId/messages/live", () => {
     });
   }
 
+  async function postMessageWithAttachment(): Promise<void> {
+    const attachmentId = "11111111-1111-4111-8111-111111111111";
+    harness.attachmentStore.createPending({
+      attachmentId,
+      boardId: GENERAL_BOARD_ID,
+      filename: "diagram.png",
+      mimeType: "image/png",
+      byteSize: 1024,
+      kind: "image",
+      createdAt: new Date().toISOString(),
+    });
+    await app.inject({
+      method: "POST",
+      url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+      payload: { text: "see attached", attachmentIds: [attachmentId] },
+    });
+  }
+
   it("connects for a known board and replays stored messages", async () => {
     await setup();
     await postMessage("one");
@@ -100,6 +118,43 @@ describe("WebSocket /api/v1/boards/:boardId/messages/live", () => {
 
     expect(messages.map((message) => message.text)).toEqual(["one", "two"]);
     expect(messages.map((message) => message.sequence)).toEqual([0, 1]);
+    socket.close();
+  });
+
+  it("replay includes an attachment-bearing message's attachments array intact", async () => {
+    await setup();
+    await postMessageWithAttachment();
+
+    const socket = new WebSocket(`${baseUrl}/api/v1/boards/${GENERAL_BOARD_ID}/messages/live`);
+    const { messages } = collectMessages(socket);
+    await waitForOpen(socket);
+    await waitUntil(() => messages.length >= 1);
+
+    expect(messages[0]?.attachments).toEqual([
+      {
+        attachmentId: "11111111-1111-4111-8111-111111111111",
+        filename: "diagram.png",
+        mimeType: "image/png",
+        byteSize: 1024,
+        kind: "image",
+      },
+    ]);
+    socket.close();
+  });
+
+  it("live delivery includes an attachment-bearing message's attachments array intact", async () => {
+    await setup();
+    const socket = new WebSocket(`${baseUrl}/api/v1/boards/${GENERAL_BOARD_ID}/messages/live`);
+    const { messages } = collectMessages(socket);
+    await waitForOpen(socket);
+
+    await postMessageWithAttachment();
+    await waitUntil(() => messages.length >= 1);
+
+    expect(messages[0]?.attachments).toHaveLength(1);
+    expect(messages[0]?.attachments?.[0]?.attachmentId).toBe(
+      "11111111-1111-4111-8111-111111111111",
+    );
     socket.close();
   });
 

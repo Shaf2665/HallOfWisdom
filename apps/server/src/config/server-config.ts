@@ -27,6 +27,17 @@ export interface ServerLimits {
   readonly maxComparisonDiffChars: number;
   /** Bounded wait, during comparison cleanup, for an actively running (or just-finished) candidate to fully terminate before its worktree is removed. */
   readonly comparisonCleanupGraceTimeoutMs: number;
+  /**
+   * How long an uploaded attachment may sit unlinked to any message before
+   * it becomes eligible for the lazy expiry sweep (`AttachmentStorePort.sweepExpiredPending`).
+   * Covers both a client-side abandoned upload and a failed message-creation
+   * request — see `docs/architecture/0020-communication-board-attachments.md`.
+   * An operational sweep interval, not a wire-schema ceiling — the
+   * size/count/MIME-type limits themselves live in `@hall-of-wisdom/protocol`
+   * (`MAX_ATTACHMENT_BYTES` etc.), matching how `MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH`
+   * isn't duplicated here either.
+   */
+  readonly pendingAttachmentTtlMs: number;
 }
 
 /**
@@ -51,6 +62,7 @@ export const DEFAULT_LIMITS: ServerLimits = {
   maxComparisonChangedFiles: 500,
   maxComparisonDiffChars: 200_000,
   comparisonCleanupGraceTimeoutMs: 10_000,
+  pendingAttachmentTtlMs: 60 * 60 * 1000,
 };
 
 /** Bounded wait for active runs to reach a terminal state during graceful shutdown. */

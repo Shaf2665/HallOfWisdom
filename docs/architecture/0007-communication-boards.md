@@ -258,12 +258,13 @@ post the same summary twice. See
 Editing and deletion would require deciding what "delete" means for a sequence-numbered,
 replay-based stream (does a deleted message leave a gap? get replaced by a tombstone? break replay
 contiguity for late joiners?) — a real design question this phase does not need answered to prove
-the board/message model itself. Reactions, nested replies, and attachments each add their own
-schema, storage, and UI surface for a flat local-discussion prototype that has no requirement for
-any of them yet. Notifications and search indexing both presuppose data living longer than one Hall
-Core process lifetime by default — Phase 13's opt-in durable mode makes that possible for board
-data, but this phase itself never assumed it, and notifications/search indexing remain unbuilt
-regardless of storage backend.
+the board/message model itself. Reactions and nested replies each add their own schema, storage,
+and UI surface for a flat local-discussion prototype that has no requirement for either yet.
+Attachments were the one item in this list with a real requirement — see
+[`0020-communication-board-attachments.md`](0020-communication-board-attachments.md). Notifications
+and search indexing both presuppose data living longer than one Hall Core process lifetime by
+default — Phase 13's opt-in durable mode makes that possible for board data, but this phase itself
+never assumed it, and notifications/search indexing remain unbuilt regardless of storage backend.
 
 ## Why authentication and persistence remained deferred at this phase
 

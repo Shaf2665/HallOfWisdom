@@ -18,6 +18,10 @@ import {
   ceoPlanVersionSchema,
   communicationBoardSchema,
   communicationMessageSchema,
+  messageAttachmentSchema,
+  ALLOWED_ATTACHMENT_MIME_TYPES,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_ATTACHMENT_BYTES,
   executionTrustSchema,
   hallTaskSchema,
   structuredFailureSchema,
@@ -233,8 +237,19 @@ export type {
   TaskRequirements,
 } from "@hall-of-wisdom/protocol";
 
-export { communicationBoardSchema, communicationMessageSchema };
-export type { CommunicationBoard, CommunicationMessage } from "@hall-of-wisdom/protocol";
+export {
+  communicationBoardSchema,
+  communicationMessageSchema,
+  messageAttachmentSchema,
+  ALLOWED_ATTACHMENT_MIME_TYPES,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_ATTACHMENT_BYTES,
+};
+export type {
+  CommunicationBoard,
+  CommunicationMessage,
+  MessageAttachment,
+} from "@hall-of-wisdom/protocol";
 
 /**
  * Hall Core response shapes, kept local to this app rather than in

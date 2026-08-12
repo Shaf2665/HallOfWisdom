@@ -1,8 +1,17 @@
 import { describe, expect, it } from "vitest";
+import type { MessageAttachment } from "@hall-of-wisdom/protocol";
 import { BoardNotFoundError, MessageCapacityReachedError } from "../errors/app-error.js";
 import type { MessageStorePort } from "./message-store-port.js";
 
 const AUTHOR = { kind: "human" as const, displayName: "Operator" };
+
+const ATTACHMENT: MessageAttachment = {
+  attachmentId: "attachment-1",
+  filename: "diagram.png",
+  mimeType: "image/png",
+  byteSize: 1024,
+  kind: "image",
+};
 
 export interface MessageStoreContractHarness {
   readonly store: MessageStorePort;
@@ -123,6 +132,84 @@ export function defineMessageStoreContractTests(
         createdAt: "2026-01-01T00:00:00.000Z",
       });
       expect(store.nextSequence("board-1")).toBe(1);
+    });
+
+    it("appends and returns a message with attachments intact", () => {
+      const { store, createBoard } = createHarness();
+      createBoard("board-1");
+      store.registerBoard("board-1");
+      const message = store.append("board-1", {
+        messageId: "msg-1",
+        boardId: "board-1",
+        author: AUTHOR,
+        text: "see attached",
+        attachments: [ATTACHMENT],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      expect(message.attachments).toEqual([ATTACHMENT]);
+    });
+
+    it("list() returns attachments intact for a stored message", () => {
+      const { store, createBoard } = createHarness();
+      createBoard("board-1");
+      store.registerBoard("board-1");
+      store.append("board-1", {
+        messageId: "msg-1",
+        boardId: "board-1",
+        author: AUTHOR,
+        text: "see attached",
+        attachments: [ATTACHMENT],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      const [message] = store.list("board-1");
+      expect(message?.attachments).toEqual([ATTACHMENT]);
+    });
+
+    it("omits the attachments field entirely (never an empty array) when none are given", () => {
+      const { store, createBoard } = createHarness();
+      createBoard("board-1");
+      store.registerBoard("board-1");
+      const message = store.append("board-1", {
+        messageId: "msg-1",
+        boardId: "board-1",
+        author: AUTHOR,
+        text: "plain text",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      expect(message.attachments).toBeUndefined();
+      expect(Object.keys(message)).not.toContain("attachments");
+    });
+
+    it("omits the attachments field when an empty array is explicitly given", () => {
+      const { store, createBoard } = createHarness();
+      createBoard("board-1");
+      store.registerBoard("board-1");
+      const message = store.append("board-1", {
+        messageId: "msg-1",
+        boardId: "board-1",
+        author: AUTHOR,
+        text: "plain text",
+        attachments: [],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      expect(message.attachments).toBeUndefined();
+      expect(Object.keys(message)).not.toContain("attachments");
+    });
+
+    it("an attachments-only message (blank text) can be appended and listed", () => {
+      const { store, createBoard } = createHarness();
+      createBoard("board-1");
+      store.registerBoard("board-1");
+      const message = store.append("board-1", {
+        messageId: "msg-1",
+        boardId: "board-1",
+        author: AUTHOR,
+        text: "",
+        attachments: [ATTACHMENT],
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      expect(message.text).toBe("");
+      expect(message.attachments).toEqual([ATTACHMENT]);
     });
 
     it("two different boards have completely independent message histories", () => {

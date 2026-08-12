@@ -2,6 +2,7 @@ import type {
   CommunicationAuthor,
   CommunicationMessage,
   CommunicationMessageReference,
+  MessageAttachment,
 } from "@hall-of-wisdom/protocol";
 import {
   BoardNotFoundError,
@@ -26,6 +27,14 @@ export interface AppendMessageInput {
   readonly boardId: string;
   readonly author: CommunicationAuthor;
   readonly text: string;
+  /**
+   * Resolved, server-canonical attachment metadata — the route handler
+   * looks these up from `AttachmentStorePort.resolvePending()` before
+   * calling `append()`; this store never re-derives or trusts anything
+   * about an attachment beyond embedding what it's given. Omit (never pass
+   * an empty array) when the message has no attachments.
+   */
+  readonly attachments?: readonly MessageAttachment[];
   readonly reference?: CommunicationMessageReference;
   readonly createdAt: string;
 }
@@ -85,6 +94,9 @@ export class MessageStore implements MessageStorePort {
       sequence: messages.length,
       author: input.author,
       text: input.text,
+      ...(input.attachments !== undefined && input.attachments.length > 0
+        ? { attachments: [...input.attachments] }
+        : {}),
       ...(input.reference !== undefined ? { reference: input.reference } : {}),
       createdAt: input.createdAt,
     };

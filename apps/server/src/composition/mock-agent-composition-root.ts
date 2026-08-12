@@ -1,3 +1,6 @@
+import { mkdtempSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import {
   MockAgentAdapter,
@@ -19,6 +22,10 @@ import { MessageStore } from "../boards/message-store.js";
 import { SqliteMessageStore } from "../boards/sqlite-message-store.js";
 import type { MessageStorePort } from "../boards/message-store-port.js";
 import { MessageBus } from "../boards/message-bus.js";
+import { AttachmentStore } from "../boards/attachment-store.js";
+import { SqliteAttachmentStore } from "../boards/sqlite-attachment-store.js";
+import type { AttachmentStorePort } from "../boards/attachment-store-port.js";
+import { AttachmentBlobStore } from "../boards/attachment-blob-store.js";
 import type { ServerLimits } from "../config/server-config.js";
 import { ServerCliError } from "../config/server-cli-args.js";
 import type { ComparisonComposition } from "./comparison-composition-root.js";
@@ -85,6 +92,17 @@ export interface ServerCompositionOptions {
   readonly allowInMemoryAgentIsolation?: boolean | undefined;
   /** Supplies the effective Hermes environment for each detect/start so saved Settings apply without a Core restart. */
   readonly hermesEnvironmentProvider?: (() => Readonly<NodeJS.ProcessEnv>) | undefined;
+  /**
+   * Where `AttachmentBlobStore` reads/writes attachment bytes. `server.ts`
+   * always supplies this explicitly (durable mode: `<dataDir>/attachments`;
+   * ephemeral mode: a fixed, wiped-at-startup temp directory — see
+   * `docs/architecture/0020-communication-board-attachments.md`). Optional
+   * here purely so the many existing tests that construct a composition
+   * directly (with no interest in attachments at all) don't all need this
+   * field — omitting it falls back to a fresh, isolated `mkdtempSync` temp
+   * directory per composition.
+   */
+  readonly attachmentBlobRootDir?: string | undefined;
 }
 
 export interface ServerComposition {
@@ -96,6 +114,8 @@ export interface ServerComposition {
   readonly boardStore: BoardStorePort;
   readonly messageStore: MessageStorePort;
   readonly messageBus: MessageBus;
+  readonly attachmentStore: AttachmentStorePort;
+  readonly attachmentBlobStore: AttachmentBlobStore;
   /** Present only when `ServerCompositionOptions.comparisonRoot` was supplied. */
   readonly comparison?: ComparisonComposition | undefined;
   /** Phase 14 — always composed (unlike `comparison`, CEO plans need no separate filesystem root). */
@@ -172,6 +192,8 @@ export interface CoreStoresCompositionOptions {
    * constructor — there is no way to swap it in afterward.
    */
   readonly onTaskMutated?: ((taskId: string) => void) | undefined;
+  /** See `ServerCompositionOptions.attachmentBlobRootDir`'s doc comment — same optional/fallback behavior. */
+  readonly attachmentBlobRootDir?: string | undefined;
 }
 
 export interface CoreStoresComposition {
@@ -182,6 +204,8 @@ export interface CoreStoresComposition {
   readonly boardStore: BoardStorePort;
   readonly messageStore: MessageStorePort;
   readonly messageBus: MessageBus;
+  readonly attachmentStore: AttachmentStorePort;
+  readonly attachmentBlobStore: AttachmentBlobStore;
   readonly agentWorktreeStore: AgentWorktreeStorePort;
   readonly agentWorktreeValidator: AgentWorktreeValidator | undefined;
   readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
@@ -304,6 +328,11 @@ export function createCoreStoresComposition(
   });
   const generalBoard = boardStore.seedGeneralBoard(new Date().toISOString());
   messageStore.registerBoard(generalBoard.boardId);
+  const attachmentStore: AttachmentStorePort =
+    db !== undefined ? new SqliteAttachmentStore({ db }) : new AttachmentStore();
+  const attachmentBlobRootDir =
+    options.attachmentBlobRootDir ?? mkdtempSync(path.join(os.tmpdir(), "hall-attachments-"));
+  const attachmentBlobStore = new AttachmentBlobStore({ rootDir: attachmentBlobRootDir });
 
   return {
     taskStore,
@@ -313,6 +342,8 @@ export function createCoreStoresComposition(
     boardStore,
     messageStore,
     messageBus,
+    attachmentStore,
+    attachmentBlobStore,
     agentWorktreeStore,
     agentWorktreeValidator: agentWorktreeManager,
     agentExecutionArtifactStore,
@@ -375,6 +406,7 @@ export function createMockAgentServerComposition(
     agentWorktreeRoot: options.agentWorktreeRoot,
     isolatedAgentAdapterIds: options.isolatedAgentAdapterIds,
     allowInMemoryAgentIsolation: options.allowInMemoryAgentIsolation,
+    attachmentBlobRootDir: options.attachmentBlobRootDir,
     onTaskMutated: (taskId) => {
       ceoOrchestratorRef.current?.onChildTaskMutated(taskId);
       const scheduler = schedulerRef.current;

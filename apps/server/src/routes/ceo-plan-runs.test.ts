@@ -940,6 +940,8 @@ describe("CEO plan-run execution REST routes", () => {
       boardStore: composition.boardStore,
       messageStore: composition.messageStore,
       messageBus: composition.messageBus,
+      attachmentStore: composition.attachmentStore,
+      attachmentBlobStore: composition.attachmentBlobStore,
       registry: composition.registry,
       limits: DEFAULT_LIMITS,
       ceoPlanOrchestrator: composition.ceoPlans.orchestrator,

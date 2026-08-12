@@ -21,6 +21,7 @@ interface MessageRow {
   sequence: number;
   author_json: string;
   text: string;
+  attachments_json: string | null;
   reference_json: string | null;
   created_at: string;
 }
@@ -33,6 +34,9 @@ function rowToMessage(row: MessageRow): CommunicationMessage {
       sequence: row.sequence,
       author: JSON.parse(row.author_json) as unknown,
       text: row.text,
+      ...(row.attachments_json !== null
+        ? { attachments: JSON.parse(row.attachments_json) as unknown }
+        : {}),
       ...(row.reference_json !== null
         ? { reference: JSON.parse(row.reference_json) as unknown }
         : {}),
@@ -84,12 +88,16 @@ export class SqliteMessageStore implements MessageStorePort {
       }
 
       const authorJson = JSON.stringify(input.author);
+      const attachmentsJson =
+        input.attachments === undefined || input.attachments.length === 0
+          ? null
+          : JSON.stringify(input.attachments);
       const referenceJson = input.reference === undefined ? null : JSON.stringify(input.reference);
       this.#db
         .prepare(
           `INSERT INTO messages (
-             message_id, board_id, sequence, author_json, text, reference_json, created_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+             message_id, board_id, sequence, author_json, text, attachments_json, reference_json, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           input.messageId,
@@ -97,6 +105,7 @@ export class SqliteMessageStore implements MessageStorePort {
           sequence,
           authorJson,
           input.text,
+          attachmentsJson,
           referenceJson,
           input.createdAt,
         );
@@ -107,6 +116,7 @@ export class SqliteMessageStore implements MessageStorePort {
         sequence,
         author_json: authorJson,
         text: input.text,
+        attachments_json: attachmentsJson,
         reference_json: referenceJson,
         created_at: input.createdAt,
       });

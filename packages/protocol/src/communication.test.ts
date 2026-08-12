@@ -8,6 +8,15 @@ import {
   parseCommunicationMessage,
 } from "./communication.js";
 import { ProtocolValidationError } from "./errors.js";
+import { MAX_ATTACHMENTS_PER_MESSAGE, type MessageAttachment } from "./attachment.js";
+
+const validAttachment: MessageAttachment = {
+  attachmentId: "attachment-1",
+  filename: "diagram.png",
+  mimeType: "image/png",
+  byteSize: 1024,
+  kind: "image",
+};
 
 const validGeneralBoard = {
   boardId: "hall.general",
@@ -200,6 +209,73 @@ describe("communicationMessageSchema", () => {
       const validationError = error as ProtocolValidationError;
       expect(validationError.issues.length).toBeGreaterThan(0);
     }
+  });
+
+  describe("attachments", () => {
+    it("accepts a message with text and one attachment", () => {
+      const result = communicationMessageSchema.safeParse({
+        ...validMessage,
+        attachments: [validAttachment],
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("accepts an attachments-only message with blank text", () => {
+      const result = communicationMessageSchema.safeParse({
+        ...validMessage,
+        text: "",
+        attachments: [validAttachment],
+      });
+      expect(result.success).toBe(true);
+    });
+
+    it("still rejects blank text when there are no attachments", () => {
+      const result = communicationMessageSchema.safeParse({
+        ...validMessage,
+        text: "   ",
+        attachments: undefined,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects an explicitly empty attachments array (must be omitted, not empty)", () => {
+      const result = communicationMessageSchema.safeParse({
+        ...validMessage,
+        attachments: [],
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it(`rejects more than ${String(MAX_ATTACHMENTS_PER_MESSAGE)} attachments`, () => {
+      const attachments = Array.from({ length: MAX_ATTACHMENTS_PER_MESSAGE + 1 }, (_, index) => ({
+        ...validAttachment,
+        attachmentId: `attachment-${String(index)}`,
+      }));
+      const result = communicationMessageSchema.safeParse({ ...validMessage, attachments });
+      expect(result.success).toBe(false);
+    });
+
+    it("accepts exactly the maximum number of attachments", () => {
+      const attachments = Array.from({ length: MAX_ATTACHMENTS_PER_MESSAGE }, (_, index) => ({
+        ...validAttachment,
+        attachmentId: `attachment-${String(index)}`,
+      }));
+      const result = communicationMessageSchema.safeParse({ ...validMessage, attachments });
+      expect(result.success).toBe(true);
+    });
+
+    it("rejects an attachment with an unknown field (.strict())", () => {
+      const result = communicationMessageSchema.safeParse({
+        ...validMessage,
+        attachments: [{ ...validAttachment, url: "https://example.com/evil.png" }],
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("a message without an attachments key round-trips exactly as before (regression)", () => {
+      expect(parseCommunicationMessage(validMessage)).toEqual(validMessage);
+      expect(Object.keys(parseCommunicationMessage(validMessage))).not.toContain("attachments");
+    });
   });
 });
 

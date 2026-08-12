@@ -403,6 +403,8 @@ async function main(): Promise<void> {
     boardStore: stores.boardStore,
     messageStore: stores.messageStore,
     messageBus: stores.messageBus,
+    attachmentStore: stores.attachmentStore,
+    attachmentBlobStore: stores.attachmentBlobStore,
     registry,
     comparison,
     ceoPlanOrchestrator: ceoPlans.orchestrator,

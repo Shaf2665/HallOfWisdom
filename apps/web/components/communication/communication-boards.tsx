@@ -159,7 +159,7 @@ export function CommunicationBoards({
                   {lastError}
                 </p>
               ) : null}
-              <MessageList messages={messages} />
+              <MessageList baseUrl={baseUrl} messages={messages} />
               <MessageComposer baseUrl={baseUrl} boardId={selectedBoard.boardId} />
             </>
           ) : (

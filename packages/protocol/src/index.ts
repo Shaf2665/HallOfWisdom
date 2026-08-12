@@ -56,6 +56,7 @@ export {
   parseCommunicationBoard,
   MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH,
   communicationMessageTextSchema,
+  hasTextOrAttachments,
   communicationMessageReferenceSchema,
   communicationMessageSchema,
   parseCommunicationMessage,
@@ -67,6 +68,22 @@ export type {
   CommunicationMessageReference,
   CommunicationMessage,
 } from "./communication.js";
+
+export {
+  ATTACHMENT_KINDS,
+  attachmentKindSchema,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_FILENAME_LENGTH,
+  ALLOWED_ATTACHMENT_MIME_TYPES,
+  isAllowedAttachmentMimeType,
+  classifyAttachmentKind,
+  attachmentFilenameSchema,
+  attachmentMimeTypeSchema,
+  messageAttachmentSchema,
+  parseMessageAttachment,
+} from "./attachment.js";
+export type { AttachmentKind, AllowedAttachmentMimeType, MessageAttachment } from "./attachment.js";
 
 export {
   fileChangeOperationSchema,

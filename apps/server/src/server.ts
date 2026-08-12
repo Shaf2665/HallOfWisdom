@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { mkdirSync, rmSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { isContainedPath, validateWorkspace } from "@hall-of-wisdom/hall-runner";
 import { tryLoadConfig } from "@hall-of-wisdom/hall-config";
@@ -158,6 +160,13 @@ export async function runServer(argv: readonly string[]): Promise<number> {
   let ownershipHandle: InstanceOwnershipHandle | undefined;
   let ownershipFence: OwnershipFence | undefined;
   let agentWorktreeRoot: string | undefined;
+  // Communication Board attachment blobs (issue #23) — durable mode
+  // resolves this below to `<dataDir>/attachments`; ephemeral mode falls
+  // back to a FIXED (not per-PID) temp directory, wiped and recreated on
+  // every startup — the same "restart discards everything" behavior boards/
+  // messages already have in ephemeral mode. See
+  // docs/architecture/0020-communication-board-attachments.md.
+  let attachmentBlobRootDir: string | undefined;
   if (cliOptions.dataDir !== undefined) {
     try {
       const canonicalDataDir = resolveDataDir({
@@ -165,6 +174,8 @@ export async function runServer(argv: readonly string[]): Promise<number> {
         workspaceRoot,
         comparisonRoot,
       });
+      attachmentBlobRootDir = path.join(canonicalDataDir, "attachments");
+      mkdirSync(attachmentBlobRootDir, { recursive: true });
       agentWorktreeRoot =
         cliOptions.agentWorktreeRoot === undefined
           ? undefined
@@ -199,6 +210,13 @@ export async function runServer(argv: readonly string[]): Promise<number> {
         ? EXIT_INVALID_INPUT
         : EXIT_INTERNAL_ERROR;
     }
+  } else {
+    // Ephemeral mode: a fixed path (never mkdtempSync's random-suffixed
+    // one) so a stale previous run's blobs are always found and wiped here
+    // — a fresh, unpredictable path would just leak them on disk forever.
+    attachmentBlobRootDir = path.join(os.tmpdir(), "hall-core-ephemeral-attachments");
+    rmSync(attachmentBlobRootDir, { recursive: true, force: true });
+    mkdirSync(attachmentBlobRootDir, { recursive: true });
   }
 
   let composition;
@@ -208,6 +226,7 @@ export async function runServer(argv: readonly string[]): Promise<number> {
       mockScenario: cliOptions.mockScenario,
       mockStepDelayMs: cliOptions.mockStepDelayMs,
       limits: DEFAULT_LIMITS,
+      attachmentBlobRootDir,
       enableCodexTrustedLocal: cliOptions.enableCodexTrustedLocal,
       comparisonRoot,
       agentWorktreeRoot,
@@ -341,6 +360,8 @@ export async function runServer(argv: readonly string[]): Promise<number> {
     boardStore: composition.boardStore,
     messageStore: composition.messageStore,
     messageBus: composition.messageBus,
+    attachmentStore: composition.attachmentStore,
+    attachmentBlobStore: composition.attachmentBlobStore,
     registry: composition.registry,
     comparison: composition.comparison,
     ceoPlanOrchestrator: composition.ceoPlans.orchestrator,

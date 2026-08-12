@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { boundedNonBlankString, isoTimestampSchema, nonEmptyIdSchema } from "./ids.js";
 import { parseWithSchema } from "./errors.js";
+import { MAX_ATTACHMENTS_PER_MESSAGE, messageAttachmentSchema } from "./attachment.js";
 
 export const communicationBoardKindSchema = z.enum(["general", "task"]);
 export type CommunicationBoardKind = z.infer<typeof communicationBoardKindSchema>;
@@ -84,12 +85,15 @@ export const MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH = 4000;
 const NUL_CHARACTER = String.fromCharCode(0);
 
 /**
- * Blank-after-trim is rejected, but the original text (including internal
- * line breaks) is preserved on success — trimming is only used to decide
- * validity, never applied to the stored/returned value. NUL characters are
- * rejected outright: they have no legitimate place in a plain-text chat
- * message and can cause inconsistent handling across terminals, browsers,
- * and future storage layers.
+ * The original text (including internal line breaks) is always preserved
+ * exactly as given — this schema only bounds length and rejects NUL
+ * characters (they have no legitimate place in a plain-text chat message
+ * and can cause inconsistent handling across terminals, browsers, and
+ * future storage layers). Blank text is allowed at this field's level: a
+ * message may be attachments-only (see `messageAttachmentSchema`), so
+ * "must have text or attachments" is enforced as a cross-field check on
+ * `communicationMessageSchema` (and, server-side, on the create-message
+ * request schema) rather than here.
  */
 export const communicationMessageTextSchema = z
   .string()
@@ -97,8 +101,15 @@ export const communicationMessageTextSchema = z
     MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH,
     `text must not exceed ${String(MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH)} characters`,
   )
-  .refine((value) => value.trim().length > 0, "text must not be blank")
   .refine((value) => !value.includes(NUL_CHARACTER), "text must not contain NUL characters");
+
+/** Shared by `communicationMessageSchema` and the server's create-message request schema. */
+export function hasTextOrAttachments(value: {
+  readonly text: string;
+  readonly attachments?: readonly unknown[] | undefined;
+}): boolean {
+  return value.text.trim().length > 0 || (value.attachments?.length ?? 0) > 0;
+}
 
 /**
  * Server-owned navigation attached to a Hall-generated message. The
@@ -135,10 +146,21 @@ export const communicationMessageSchema = z
     sequence: z.number().int().nonnegative(),
     author: communicationAuthorSchema,
     text: communicationMessageTextSchema,
+    /**
+     * Omitted entirely (never an empty array) when the message has no
+     * attachments — this is what keeps every existing text-only message
+     * payload byte-identical to before this field existed. See
+     * `docs/architecture/0020-communication-board-attachments.md`.
+     */
+    attachments: z.array(messageAttachmentSchema).min(1).max(MAX_ATTACHMENTS_PER_MESSAGE).optional(),
     reference: communicationMessageReferenceSchema.optional(),
     createdAt: isoTimestampSchema,
   })
-  .strict();
+  .strict()
+  .refine(hasTextOrAttachments, {
+    message: "text must not be blank unless the message has at least one attachment",
+    path: ["text"],
+  });
 export type CommunicationMessage = z.infer<typeof communicationMessageSchema>;
 
 export function parseCommunicationMessage(input: unknown): CommunicationMessage {

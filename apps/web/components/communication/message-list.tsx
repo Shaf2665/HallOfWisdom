@@ -2,12 +2,93 @@
 
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import type { CommunicationMessage } from "@hall-of-wisdom/protocol";
+import type { CommunicationMessage, MessageAttachment } from "@hall-of-wisdom/protocol";
 import { EmptyState } from "../empty-state";
 
 const NEAR_BOTTOM_THRESHOLD_PX = 80;
 
-function MessageItem({ message }: { readonly message: CommunicationMessage }) {
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${String(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function FileIcon() {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      width="18"
+      height="18"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      className="shrink-0 text-stone-500 dark:text-stone-400"
+    >
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" />
+      <path d="M14 2v6h6" />
+    </svg>
+  );
+}
+
+/**
+ * Content always comes from `GET /api/v1/boards/:boardId/attachments/:attachmentId`
+ * — the confirmed message never carries a URL, only enough metadata
+ * (`attachmentId`, `filename`, `mimeType`, `byteSize`, `kind`) to build this
+ * one request. An image renders as a clickable thumbnail (opens the full
+ * image in a new tab); a non-image file renders as a compact filename/size
+ * card with a native download link.
+ */
+function AttachmentCard({
+  baseUrl,
+  boardId,
+  attachment,
+}: {
+  readonly baseUrl: string;
+  readonly boardId: string;
+  readonly attachment: MessageAttachment;
+}) {
+  const url = `${baseUrl}/api/v1/boards/${encodeURIComponent(boardId)}/attachments/${encodeURIComponent(attachment.attachmentId)}`;
+
+  if (attachment.kind === "image") {
+    return (
+      <a href={url} target="_blank" rel="noopener noreferrer" className="inline-block">
+        {/* eslint-disable-next-line @next/next/no-img-element -- served by Hall Core, not Next's remote-image optimizer */}
+        <img
+          src={url}
+          alt={attachment.filename}
+          className="h-24 w-24 rounded border border-stone-200 object-cover dark:border-stone-700"
+        />
+      </a>
+    );
+  }
+
+  return (
+    <a
+      href={url}
+      download={attachment.filename}
+      className="flex items-center gap-2 rounded border border-stone-200 bg-stone-50 p-1.5 pr-3 text-xs hover:bg-stone-100 dark:border-stone-700 dark:bg-stone-900 dark:hover:bg-stone-800"
+    >
+      <FileIcon />
+      <span className="flex flex-col">
+        <span className="max-w-[12rem] truncate font-medium text-stone-800 dark:text-stone-200">
+          {attachment.filename}
+        </span>
+        <span className="text-stone-500 dark:text-stone-400">{formatBytes(attachment.byteSize)}</span>
+      </span>
+    </a>
+  );
+}
+
+function MessageItem({
+  baseUrl,
+  message,
+}: {
+  readonly baseUrl: string;
+  readonly message: CommunicationMessage;
+}) {
   const planReference =
     message.author.kind === "system" && message.reference?.kind === "ceo_plan_created"
       ? message.reference
@@ -25,9 +106,23 @@ function MessageItem({ message }: { readonly message: CommunicationMessage }) {
           — line breaks are preserved visually via `whitespace-pre-wrap`
           without any Markdown/HTML interpretation; long unbroken runs wrap
           via `break-words` rather than causing horizontal overflow. */}
-      <p className="mt-1 break-words whitespace-pre-wrap text-stone-900 dark:text-stone-100">
-        {message.text}
-      </p>
+      {message.text.length > 0 ? (
+        <p className="mt-1 break-words whitespace-pre-wrap text-stone-900 dark:text-stone-100">
+          {message.text}
+        </p>
+      ) : null}
+      {message.attachments && message.attachments.length > 0 ? (
+        <div className="mt-2 flex flex-wrap gap-2">
+          {message.attachments.map((attachment) => (
+            <AttachmentCard
+              key={attachment.attachmentId}
+              baseUrl={baseUrl}
+              boardId={message.boardId}
+              attachment={attachment}
+            />
+          ))}
+        </div>
+      ) : null}
       {planReference ? (
         <Link
           href={`/ceo/${encodeURIComponent(planReference.planId)}`}
@@ -49,7 +144,13 @@ function MessageItem({ message }: { readonly message: CommunicationMessage }) {
  * "New messages" control appears instead. `prefers-reduced-motion` disables
  * the smooth-scroll animation, using an instant jump instead.
  */
-export function MessageList({ messages }: { readonly messages: readonly CommunicationMessage[] }) {
+export function MessageList({
+  baseUrl,
+  messages,
+}: {
+  readonly baseUrl: string;
+  readonly messages: readonly CommunicationMessage[];
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const previousCountRef = useRef(0);
   const isFirstRenderRef = useRef(true);
@@ -117,7 +218,9 @@ export function MessageList({ messages }: { readonly messages: readonly Communic
         {messages.length === 0 ? (
           <EmptyState message="No messages yet. Start the discussion." />
         ) : (
-          messages.map((message) => <MessageItem key={message.messageId} message={message} />)
+          messages.map((message) => (
+            <MessageItem key={message.messageId} baseUrl={baseUrl} message={message} />
+          ))
         )}
       </div>
       {showNewMessagesButton ? (

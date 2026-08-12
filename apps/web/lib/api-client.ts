@@ -35,6 +35,7 @@ import {
   listCeoPlanVersionsResponseSchema,
   listComparisonsResponseSchema,
   listTasksResponseSchema,
+  messageAttachmentSchema,
   ceoPlanRunSchedulerStatusResponseSchema,
   retryCeoPlanRunStepResponseSchema,
   routeAndAssignResponseSchema,
@@ -72,6 +73,7 @@ import {
   type ListCeoPlansResponse,
   type ListCeoPlanVersionsResponse,
   type ListComparisonsResponse,
+  type MessageAttachment,
   type CeoPlanRunSchedulerStatusResponse,
   type RetryCeoPlanRunStepResponse,
   type RouteAndAssignResponse,
@@ -178,46 +180,20 @@ interface RequestInit {
 }
 
 /**
- * The one place every HTTP call in this app goes through. Validates every
- * successful response at runtime against `responseSchema` before handing
- * it to a caller — a component must never receive a value it merely
- * *hopes* matches its TypeScript type. Never logs a response body (a
- * failure detail could, in principle, contain something a real future
- * adapter captured that shouldn't be printed to the browser console).
+ * Shared by every caller that already has a `Response` in hand —
+ * `request()` below (JSON body) and `uploadBoardAttachment()` (multipart
+ * `FormData` body, which can't go through `request()` since that helper
+ * always JSON-stringifies). Validates every successful response at runtime
+ * against `responseSchema` before handing it to a caller — a component must
+ * never receive a value it merely *hopes* matches its TypeScript type.
+ * Never logs a response body (a failure detail could, in principle, contain
+ * something a real future adapter captured that shouldn't be printed to the
+ * browser console).
  */
-async function request<S extends z.ZodTypeAny>(
-  url: string,
-  init: RequestInit,
+async function parseJsonResponse<S extends z.ZodTypeAny>(
+  response: Response,
   responseSchema: S,
-  options: RequestOptions,
 ): Promise<z.output<S>> {
-  const { signal, cleanup } = withTimeout(
-    options.signal,
-    options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-  );
-
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: init.method,
-      ...(init.body === undefined
-        ? {}
-        : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(init.body) }),
-      signal,
-      credentials: "include",
-    });
-  } catch {
-    if (signal.aborted) {
-      throw new ApiClientError("TIMEOUT", "The request to Hall Core timed out or was cancelled.");
-    }
-    throw new ApiClientError(
-      "NETWORK_ERROR",
-      "Could not reach Hall Core. Make sure it is running.",
-    );
-  } finally {
-    cleanup();
-  }
-
   const text = await response.text();
   let rawBody: unknown;
   if (text.length === 0) {
@@ -260,6 +236,43 @@ async function request<S extends z.ZodTypeAny>(
     );
   }
   return parsed.data as z.output<S>;
+}
+
+/** The one place every JSON-bodied HTTP call in this app goes through. See `parseJsonResponse()`'s doc comment for the response-handling half. */
+async function request<S extends z.ZodTypeAny>(
+  url: string,
+  init: RequestInit,
+  responseSchema: S,
+  options: RequestOptions,
+): Promise<z.output<S>> {
+  const { signal, cleanup } = withTimeout(
+    options.signal,
+    options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+  );
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: init.method,
+      ...(init.body === undefined
+        ? {}
+        : { headers: { "Content-Type": "application/json" }, body: JSON.stringify(init.body) }),
+      signal,
+      credentials: "include",
+    });
+  } catch {
+    if (signal.aborted) {
+      throw new ApiClientError("TIMEOUT", "The request to Hall Core timed out or was cancelled.");
+    }
+    throw new ApiClientError(
+      "NETWORK_ERROR",
+      "Could not reach Hall Core. Make sure it is running.",
+    );
+  } finally {
+    cleanup();
+  }
+
+  return parseJsonResponse(response, responseSchema);
 }
 
 export function getHealth(baseUrl: string, options: RequestOptions = {}): Promise<HealthResponse> {
@@ -570,14 +583,63 @@ export function createBoardMessage(
   baseUrl: string,
   boardId: string,
   text: string,
+  attachmentIds: readonly string[] = [],
   options: RequestOptions = {},
 ): Promise<CommunicationMessage> {
   return request(
     `${baseUrl}/api/v1/boards/${encodeURIComponent(boardId)}/messages`,
-    { method: "POST", body: { text } },
+    {
+      method: "POST",
+      body: attachmentIds.length > 0 ? { text, attachmentIds } : { text },
+    },
     communicationMessageSchema,
     options,
   );
+}
+
+/**
+ * Uploads one file to a board's attachment store, returning its resolved
+ * metadata (never a URL, never bytes — see `MessageAttachment`'s doc
+ * comment). Unlike every other call in this file, this does NOT go through
+ * `request()`: a `FormData` body must never have `Content-Type` set
+ * manually (the browser generates the multipart boundary itself), whereas
+ * `request()` always JSON-stringifies. Shares `withTimeout()`'s abort
+ * wiring and `parseJsonResponse()`'s response handling with every other
+ * call here, so error shapes/timeout behavior stay identical from a
+ * caller's point of view.
+ */
+export async function uploadBoardAttachment(
+  baseUrl: string,
+  boardId: string,
+  file: File,
+  options: RequestOptions = {},
+): Promise<MessageAttachment> {
+  const { signal, cleanup } = withTimeout(
+    options.signal,
+    options.timeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+  );
+  const formData = new FormData();
+  formData.append("file", file, file.name);
+
+  let response: Response;
+  try {
+    response = await fetch(
+      `${baseUrl}/api/v1/boards/${encodeURIComponent(boardId)}/attachments`,
+      { method: "POST", body: formData, signal, credentials: "include" },
+    );
+  } catch {
+    if (signal.aborted) {
+      throw new ApiClientError("TIMEOUT", "The request to Hall Core timed out or was cancelled.");
+    }
+    throw new ApiClientError(
+      "NETWORK_ERROR",
+      "Could not reach Hall Core. Make sure it is running.",
+    );
+  } finally {
+    cleanup();
+  }
+
+  return parseJsonResponse(response, messageAttachmentSchema);
 }
 
 export interface CreateComparisonRequestBody {

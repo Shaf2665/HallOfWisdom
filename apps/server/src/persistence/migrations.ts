@@ -665,6 +665,53 @@ const MIGRATION_10: Migration = {
   },
 };
 
+/**
+ * Migration 11 — Communication Board attachments (issue #23). Two things,
+ * deliberately not one: `messages.attachments_json` is a denormalized
+ * snapshot embedded directly on the message row (nullable, exactly like
+ * `reference_json` above) so `SqliteMessageStore.list()` never needs a join
+ * to render a message's attachments. The `attachments` table is the
+ * separate, authoritative lifecycle store an uploaded attachment lives in
+ * from the moment it's uploaded (`message_id IS NULL`, "pending") through
+ * being linked to a message (`message_id` set) or swept away unlinked past
+ * its TTL — `idx_attachments_pending_sweep` is a partial index scoped to
+ * exactly the sweep's own `WHERE message_id IS NULL` predicate.
+ * `message_id` is deliberately a plain column, not a foreign key: unlike
+ * `board_id` (which every attachment genuinely belongs to for its whole
+ * life), consistency between an attachment's `message_id` and the
+ * `messages` table is already guaranteed at the application level by
+ * `routes/boards.ts`'s required call order (`messageStore.append()` always
+ * runs, and durably succeeds, before `attachmentStore.link()` is ever
+ * called) — the same non-transactional-but-ordered discipline already
+ * governing `append` → `recordMessageAppended` → `publish`. A real foreign
+ * key here would only add friction to testing `AttachmentStorePort` in
+ * isolation from `MessageStorePort`, for a guarantee the application order
+ * already provides.
+ */
+const MIGRATION_11: Migration = {
+  version: 11,
+  description: "Communication Board attachments: message snapshot column and lifecycle table.",
+  up(db) {
+    db.exec(`
+      ALTER TABLE messages ADD COLUMN attachments_json TEXT;
+
+      CREATE TABLE attachments (
+        attachment_id TEXT PRIMARY KEY,
+        board_id TEXT NOT NULL REFERENCES boards(board_id) ON DELETE CASCADE,
+        message_id TEXT,
+        filename TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        byte_size INTEGER NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('image', 'file')),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX idx_attachments_board ON attachments (board_id);
+      CREATE INDEX idx_attachments_pending_sweep ON attachments (created_at)
+        WHERE message_id IS NULL;
+    `);
+  },
+};
+
 /** Ordered by `version`, ascending — `migration-runner.ts` applies whichever ones a given database hasn't recorded yet, one transaction each. */
 export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_1,
@@ -677,6 +724,7 @@ export const MIGRATIONS: readonly Migration[] = [
   MIGRATION_8,
   MIGRATION_9,
   MIGRATION_10,
+  MIGRATION_11,
 ];
 
 export const HIGHEST_KNOWN_SCHEMA_VERSION = MIGRATIONS.at(-1)?.version ?? 0;

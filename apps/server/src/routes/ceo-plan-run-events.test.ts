@@ -677,6 +677,8 @@ describe("WebSocket /api/v1/ceo-plan-runs/:runId/events/live", () => {
       boardStore: composition.boardStore,
       messageStore: composition.messageStore,
       messageBus: composition.messageBus,
+      attachmentStore: composition.attachmentStore,
+      attachmentBlobStore: composition.attachmentBlobStore,
       registry: composition.registry,
       limits: DEFAULT_LIMITS,
       ceoPlanOrchestrator: composition.ceoPlans.orchestrator,

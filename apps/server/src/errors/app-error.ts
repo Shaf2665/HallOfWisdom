@@ -277,6 +277,45 @@ export class MessageBoardIdentityMismatchError extends HallCoreError {
   }
 }
 
+/** Thrown by `GET .../attachments/:attachmentId` for an unknown id, a wrong-board id, or a still-pending (never linked to a message) id — the three cases are deliberately indistinguishable to the client, matching `MessageBoardIdentityMismatchError`'s "never disclose which specific check failed" posture for a resource lookup a browser cannot forge its way past by trial and error. Also thrown by `POST .../messages` when a supplied `attachmentId` cannot be resolved for the target board. */
+export class AttachmentNotFoundError extends HallCoreError {
+  readonly code = "ATTACHMENT_NOT_FOUND";
+  readonly statusCode = 404;
+
+  constructor(attachmentId: string) {
+    super(`No attachment found with attachmentId "${attachmentId}".`);
+  }
+}
+
+/** Thrown by `POST .../messages` when a supplied `attachmentId` is already linked to a different message — an attachment can be attached to at most one message, ever. */
+export class AttachmentAlreadyLinkedError extends HallCoreError {
+  readonly code = "ATTACHMENT_ALREADY_LINKED";
+  readonly statusCode = 409;
+
+  constructor(attachmentId: string) {
+    super(`Attachment "${attachmentId}" is already attached to a message.`);
+  }
+}
+
+/**
+ * Guards `AttachmentBlobStore`'s own invariant that every attachment id it
+ * is ever asked to read/write/remove is a `randomUUID()`-shaped string —
+ * should be unreachable in practice (every caller sources the id from
+ * either `randomUUID()` itself at upload time, or a value already read back
+ * out of `AttachmentStorePort`), the same "guards an internal invariant,
+ * not client input" role `MessageBoardIdentityMismatchError` plays for
+ * `MessageStore.append()`. Never derived from a raw filename or any other
+ * caller-supplied string.
+ */
+export class InvalidAttachmentIdError extends HallCoreError {
+  readonly code = "INTERNAL_ERROR";
+  readonly statusCode = 500;
+
+  constructor(attachmentId: string) {
+    super(`Attachment id "${attachmentId}" is not a valid generated identifier.`);
+  }
+}
+
 /** Phase 12 — controlled multi-agent execution comparison. */
 export class ComparisonNotFoundError extends HallCoreError {
   readonly code = "COMPARISON_NOT_FOUND";

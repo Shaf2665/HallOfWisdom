@@ -310,6 +310,149 @@ describe("REST board routes", () => {
       expect(serialized).not.toMatch(/[A-Za-z]:\\/);
       await app.close();
     });
+
+    describe("with attachments", () => {
+      function seedPendingAttachment(
+        harness: Awaited<ReturnType<typeof buildTestApp>>["harness"],
+        attachmentId: string,
+      ): void {
+        harness.attachmentStore.createPending({
+          attachmentId,
+          boardId: GENERAL_BOARD_ID,
+          filename: "diagram.png",
+          mimeType: "image/png",
+          byteSize: 1024,
+          kind: "image",
+          createdAt: new Date().toISOString(),
+        });
+      }
+
+      it("creates a message with text and attachments, resolving canonical metadata", async () => {
+        const { app, harness } = await buildTestApp({ workspaceRoot: tempRoot });
+        seedPendingAttachment(harness, "attachment-1");
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+          payload: { text: "see attached", attachmentIds: ["attachment-1"] },
+        });
+        expect(response.statusCode).toBe(201);
+        const body = response.json<CommunicationMessage>();
+        expect(body.attachments).toEqual([
+          {
+            attachmentId: "attachment-1",
+            filename: "diagram.png",
+            mimeType: "image/png",
+            byteSize: 1024,
+            kind: "image",
+          },
+        ]);
+        await app.close();
+      });
+
+      it("creates an attachments-only message with blank text", async () => {
+        const { app, harness } = await buildTestApp({ workspaceRoot: tempRoot });
+        seedPendingAttachment(harness, "attachment-1");
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+          payload: { text: "", attachmentIds: ["attachment-1"] },
+        });
+        expect(response.statusCode).toBe(201);
+        const body = response.json<CommunicationMessage>();
+        expect(body.text).toBe("");
+        expect(body.attachments).toHaveLength(1);
+        await app.close();
+      });
+
+      it("a plain text-only message never carries an attachments key (regression)", async () => {
+        const { app } = await buildTestApp({ workspaceRoot: tempRoot });
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+          payload: { text: "just text" },
+        });
+        expect(response.statusCode).toBe(201);
+        expect(Object.keys(response.json())).not.toContain("attachments");
+        await app.close();
+      });
+
+      it("rejects a message naming an unknown attachmentId, and stores no message", async () => {
+        const { app } = await buildTestApp({ workspaceRoot: tempRoot });
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+          payload: { text: "", attachmentIds: ["does-not-exist"] },
+        });
+        expect(response.statusCode).toBe(404);
+        const list = await app.inject({
+          method: "GET",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+        });
+        expect(list.json<ListMessagesResponseJson>().messages).toHaveLength(0);
+        await app.close();
+      });
+
+      it("rejects a message naming an attachmentId already linked to a different message", async () => {
+        const { app, harness } = await buildTestApp({ workspaceRoot: tempRoot });
+        seedPendingAttachment(harness, "attachment-1");
+        await app.inject({
+          method: "POST",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+          payload: { text: "", attachmentIds: ["attachment-1"] },
+        });
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+          payload: { text: "", attachmentIds: ["attachment-1"] },
+        });
+        expect(response.statusCode).toBe(409);
+        const list = await app.inject({
+          method: "GET",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+        });
+        expect(list.json<ListMessagesResponseJson>().messages).toHaveLength(1);
+        await app.close();
+      });
+
+      it("rejects an attachmentId belonging to a different board", async () => {
+        const { app, harness } = await buildTestApp({ workspaceRoot: tempRoot });
+        harness.attachmentStore.createPending({
+          attachmentId: "attachment-1",
+          boardId: "some-other-board",
+          filename: "f.png",
+          mimeType: "image/png",
+          byteSize: 10,
+          kind: "image",
+          createdAt: new Date().toISOString(),
+        });
+        const response = await app.inject({
+          method: "POST",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+          payload: { text: "", attachmentIds: ["attachment-1"] },
+        });
+        expect(response.statusCode).toBe(404);
+        await app.close();
+      });
+
+      it("a message with a since-linked attachment makes it downloadable via the attachments route", async () => {
+        const { app, harness } = await buildTestApp({ workspaceRoot: tempRoot });
+        const attachmentId = "11111111-1111-4111-8111-111111111111";
+        seedPendingAttachment(harness, attachmentId);
+        harness.attachmentBlobStore.write(attachmentId, Buffer.from("bytes"));
+        await app.inject({
+          method: "POST",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/messages`,
+          payload: { text: "", attachmentIds: [attachmentId] },
+        });
+        const response = await app.inject({
+          method: "GET",
+          url: `/api/v1/boards/${GENERAL_BOARD_ID}/attachments/${attachmentId}`,
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.rawPayload).toEqual(Buffer.from("bytes"));
+        await app.close();
+      });
+    });
   });
 
   describe("GET /api/v1/boards/:boardId/messages", () => {

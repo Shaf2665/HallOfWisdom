@@ -51,6 +51,50 @@ describe("SqliteMessageStore — SQLite-specific behavior", () => {
     expect(() => store.list("board-1")).toThrow(CorruptRecordError);
   });
 
+  it("rejects malformed stored attachments JSON with CorruptRecordError", () => {
+    const db = openMigratedDatabase();
+    insertBoardRow(db, "board-1");
+    const store = new SqliteMessageStore({ db, maxMessagesPerBoard: 100 });
+    store.registerBoard("board-1");
+    store.append("board-1", {
+      messageId: "msg-1",
+      boardId: "board-1",
+      author: { kind: "human", displayName: "Operator" },
+      text: "hello",
+      attachments: [
+        { attachmentId: "a1", filename: "f.png", mimeType: "image/png", byteSize: 10, kind: "image" },
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+    db.exec(`UPDATE messages SET attachments_json = 'not valid json{{{'`);
+    expect(() => store.list("board-1")).toThrow(CorruptRecordError);
+  });
+
+  it("attachments persist across a fresh SqliteMessageStore instance reopening the same database", () => {
+    const db = HallDatabase.openInMemory();
+    runMigrations(db);
+    openDatabases.push(db);
+    insertBoardRow(db, "board-1");
+    const storeA = new SqliteMessageStore({ db, maxMessagesPerBoard: 100 });
+    storeA.registerBoard("board-1");
+    storeA.append("board-1", {
+      messageId: "msg-1",
+      boardId: "board-1",
+      author: { kind: "human", displayName: "Operator" },
+      text: "see attached",
+      attachments: [
+        { attachmentId: "a1", filename: "f.png", mimeType: "image/png", byteSize: 10, kind: "image" },
+      ],
+      createdAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const storeB = new SqliteMessageStore({ db, maxMessagesPerBoard: 100 });
+    const [message] = storeB.list("board-1");
+    expect(message?.attachments).toEqual([
+      { attachmentId: "a1", filename: "f.png", mimeType: "image/png", byteSize: 10, kind: "image" },
+    ]);
+  });
+
   it("messages persist across a fresh SqliteMessageStore instance reopening the same database", () => {
     const db = HallDatabase.openInMemory();
     runMigrations(db);
