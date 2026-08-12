@@ -25,6 +25,12 @@ describe("parseHallCoreUrl", () => {
     expect(config.wsUrl).toBe("wss://127.0.0.1:4310");
   });
 
+  it("accepts a remote HTTPS hostname (Cloudflare Tunnel), deriving wss", () => {
+    const config = parseHallCoreUrl("https://core.hall.example.com");
+    expect(config.httpUrl).toBe("https://core.hall.example.com");
+    expect(config.wsUrl).toBe("wss://core.hall.example.com");
+  });
+
   it("rejects embedded credentials", () => {
     expect(() => parseHallCoreUrl("http://user:pass@127.0.0.1:4310")).toThrow(
       InvalidHallCoreUrlError,
@@ -57,7 +63,7 @@ describe("parseHallCoreUrl", () => {
     }
   });
 
-  it("supports a loopback address (the only officially supported host for this prototype)", () => {
+  it("supports a loopback address (the default, local-development host)", () => {
     expect(() => parseHallCoreUrl("http://127.0.0.1:4310")).not.toThrow();
     expect(() => parseHallCoreUrl("http://localhost:4310")).not.toThrow();
   });

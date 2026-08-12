@@ -242,6 +242,30 @@ describe("CORS", () => {
     expect(response.headers["access-control-allow-credentials"]).toBe("true");
     await app.close();
   });
+
+  it("a remote HTTPS web origin (Cloudflare Tunnel, via --web-origin) receives CORS headers", async () => {
+    const REMOTE_ORIGIN = "https://hall.example.com";
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: REMOTE_ORIGIN });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/health",
+      headers: { origin: REMOTE_ORIGIN },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["access-control-allow-origin"]).toBe(REMOTE_ORIGIN);
+    await app.close();
+  });
+
+  it("configuring a remote --web-origin stops granting the local loopback origin CORS access", async () => {
+    const { app } = await buildTestApp({ workspaceRoot: tempRoot, webOrigin: "https://hall.example.com" });
+    const response = await app.inject({
+      method: "GET",
+      url: "/api/v1/health",
+      headers: { origin: ALLOWED_ORIGIN },
+    });
+    expect(response.headers["access-control-allow-origin"]).toBeUndefined();
+    await app.close();
+  });
 });
 
 describe("Hall authentication", () => {

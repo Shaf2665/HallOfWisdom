@@ -72,17 +72,20 @@ parser assignment).
 username/password, no fragment, no query string, no path (Hall Core's base URL is an origin, not an
 endpoint — paths are appended per-call), trailing slash normalized away. `ws`/`wss` is derived from
 the validated `http`/`https` origin, never constructed separately (so the two can never silently
-drift apart). This is a local-development prototype: Hall Core itself only ever binds to
-`127.0.0.1` (`0004-hall-core-server.md`, "Local-only binding"), so a non-loopback configured URL
-would simply never be reachable — the function does not hard-reject a non-loopback host (a developer
-running Hall Core inside a container with a different loopback-adjacent address is a real, if
-uncommon, case), only genuinely unsafe or malformed values.
+drift apart). Hall Core itself only ever binds to `127.0.0.1` (`0004-hall-core-server.md`,
+"Local-only binding") and this is never exposed directly — but a non-loopback
+`NEXT_PUBLIC_HALL_CORE_URL` is a supported, real configuration: it is how a public HTTPS origin (a
+Cloudflare Tunnel hostname mapping back to `127.0.0.1:4310`) is configured for remote access, see
+`docs/remote-access.md`. The function does not hard-reject a non-loopback host, only genuinely
+unsafe or malformed values.
 
 ## Exact-origin CORS policy (client side)
 
 Hall Core enforces the actual allowlist server-side (`0004-hall-core-server.md`); the web app's
-obligation is simply to run on the one origin that allowlist expects. `package.json`'s `dev`/`start`
-scripts both pass `--hostname 127.0.0.1 --port 3000` explicitly — never `0.0.0.0`.
+obligation is simply to run on an origin that allowlist expects. `package.json`'s `dev`/`start`
+scripts both pass `--hostname 127.0.0.1 --port 3000` explicitly — never `0.0.0.0`; a public origin
+served through a Cloudflare Tunnel maps back to that same local Next.js process, it is never bound
+directly to a non-loopback address (`docs/remote-access.md`).
 
 ## WebSocket Origin validation (client side)
 

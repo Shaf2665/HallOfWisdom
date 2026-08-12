@@ -75,11 +75,17 @@ caller without loosening its own bind address.
 
 As of Phase 6, `@fastify/cors` is registered in `app.ts` before every route, with an **exact
 allowlist of one origin** — `[webOrigin]`, where `webOrigin` defaults to `http://127.0.0.1:3000`
-and can be overridden with `--web-origin` (parsed and normalized by `config/web-origin.ts`, the
-same strict http(s)-only/no-credentials/no-fragment/no-path validation `parseWebOrigin()` also
-applies to WebSocket `Origin` headers — see below). This is deliberately **not** `origin: true`,
+and can be overridden with `--web-origin`, parsed and normalized by `config/web-origin.ts` (the same
+strict http(s)-only/no-credentials/no-fragment/no-path validation `parseWebOrigin()` also applies to
+WebSocket `Origin` headers — see below). The `.\start.ps1`/`./start.sh` launchers pass `--web-origin`
+through from the opt-in `HALL_WEB_ORIGIN` environment variable (unset by default) so a public
+Cloudflare Tunnel hostname can be trusted here without changing what "one allowed origin" means or
+loosening Hall Core's own loopback-only bind address — see `docs/remote-access.md`. This is
+deliberately **not** `origin: true`,
 **not** a function that reflects the request's `Origin` header back, and **not** `"*"`; `credentials`
-is never enabled. Only `GET`, `POST`, and `OPTIONS` are allowed, with `Content-Type` as the only
+is enabled (needed for the signed Hall session cookie, see `0005-minimal-web-interface.md`), which is
+exactly why the allowlist can never be a wildcard or a reflected origin. Only `GET`, `POST`, and
+`OPTIONS` are allowed, with `Content-Type` as the only
 allowed request header, and a 600-second preflight cache. A request with no `Origin` header at all
 (PowerShell, `curl`, any non-browser tool) is unaffected by CORS entirely — CORS is a _browser_
 enforcement mechanism; Hall Core still answers such requests normally, it just never grants a

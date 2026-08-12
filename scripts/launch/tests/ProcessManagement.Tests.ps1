@@ -138,6 +138,46 @@ process.exit(1);
     Stop-HallLauncherProcess -Process $webFixture -ServiceName "Fake Web"
     Write-Host "  (calling Stop-HallLauncherProcess twice on an exited process did not throw)" -ForegroundColor DarkGray
 
+    # --- Start-HallCoreProcess: -WebOrigin (remote access, see docs/remote-access.md) ---
+    # A fake apps/server/dist/server.js under a throwaway repo root, so
+    # Start-HallCoreProcess's real Test-Path/node-spawn logic runs
+    # end-to-end. It records its own argv to a file (stdout isn't
+    # redirected by Start-HallCoreProcess, so a file is the only reliable
+    # way to observe what was actually passed) then exits immediately.
+    $fakeRepoRoot = Join-Path $fixtureRoot "fake-repo-webOrigin"
+    $fakeDistDir = Join-Path $fakeRepoRoot (Join-Path "apps" (Join-Path "server" "dist"))
+    New-Item -ItemType Directory -Path $fakeDistDir -Force | Out-Null
+    $argvRecorderScript = @'
+const fs = require("fs");
+const path = require("path");
+fs.writeFileSync(path.join(__dirname, "argv.json"), JSON.stringify(process.argv.slice(2)));
+'@
+    Set-Content -LiteralPath (Join-Path $fakeDistDir "server.js") -Value $argvRecorderScript -Encoding utf8
+    $argvPath = Join-Path $fakeDistDir "argv.json"
+
+    # `process.argv.slice(2)` excludes both the node executable and the
+    # script path itself (server.js is argv[1], the argument the fake
+    # fixture is invoked WITH, never inside its own slice(2)) - so "zero CLI
+    # flags" means an EMPTY array here, not a one-element array containing
+    # the dist path.
+    $procNoWebOrigin = Start-HallCoreProcess -RepoRoot $fakeRepoRoot
+    $procNoWebOrigin.WaitForExit(5000) | Out-Null
+    $argvNoWebOrigin = @(Get-Content -LiteralPath $argvPath -Raw | ConvertFrom-Json)
+    Assert-Equal 0 $argvNoWebOrigin.Count "zero CLI flags by default: no arguments beyond the dist path itself"
+    Remove-Item -LiteralPath $argvPath -Force
+
+    $procWithWebOrigin = Start-HallCoreProcess -RepoRoot $fakeRepoRoot -WebOrigin "https://hall.example.com"
+    $procWithWebOrigin.WaitForExit(5000) | Out-Null
+    $argvWithWebOrigin = @(Get-Content -LiteralPath $argvPath -Raw | ConvertFrom-Json)
+    Assert-True ($argvWithWebOrigin -contains "--web-origin") "an explicit -WebOrigin must be passed through as --web-origin"
+    Assert-True ($argvWithWebOrigin -contains "https://hall.example.com") "the --web-origin value must be the exact configured remote origin"
+    Remove-Item -LiteralPath $argvPath -Force
+
+    $procBlankWebOrigin = Start-HallCoreProcess -RepoRoot $fakeRepoRoot -WebOrigin "   "
+    $procBlankWebOrigin.WaitForExit(5000) | Out-Null
+    $argvBlankWebOrigin = @(Get-Content -LiteralPath $argvPath -Raw | ConvertFrom-Json)
+    Assert-Equal 0 $argvBlankWebOrigin.Count "a blank/whitespace -WebOrigin must be treated as unset, not passed through"
+
     # --- Ctrl+C flag plumbing (function-level, not a real console signal - see the dual-host smoke test for that) ---
     Register-HallLauncherCtrlCHandler
     try {

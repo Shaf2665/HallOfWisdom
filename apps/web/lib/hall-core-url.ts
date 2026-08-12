@@ -21,13 +21,14 @@ export const DEFAULT_HALL_CORE_URL = "http://127.0.0.1:4310";
  * overly permissive value here would undermine every other safety check
  * built on top of it (see `lib/api-client.ts`, `hooks/use-task-events.ts`).
  *
- * This is a local-development prototype: Hall Core itself only ever binds
- * to `127.0.0.1` (see `docs/architecture/0004-hall-core-server.md`, "Local-only
- * binding"), so a non-loopback `NEXT_PUBLIC_HALL_CORE_URL` will simply never
- * be reachable. This function does not reject such a value outright (a
- * developer running Hall Core inside a container/VM with a different
- * loopback-adjacent address is a real, if uncommon, case) — only genuinely
- * unsafe or malformed values are rejected.
+ * Hall Core itself only ever binds to `127.0.0.1` (see
+ * `docs/architecture/0004-hall-core-server.md`, "Local-only binding") — it is
+ * never reachable directly from the network. A non-loopback
+ * `NEXT_PUBLIC_HALL_CORE_URL` is still a supported value, though: it is how a
+ * public HTTPS origin (e.g. a second Cloudflare Tunnel hostname that maps
+ * internally back to `127.0.0.1:4310`) is configured for remote access — see
+ * `docs/remote-access.md`. This function does not reject a non-loopback host
+ * — only genuinely unsafe or malformed values are rejected.
  */
 export function parseHallCoreUrl(raw: string): HallCoreUrlConfig {
   let url: URL;

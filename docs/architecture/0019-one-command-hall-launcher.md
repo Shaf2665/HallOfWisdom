@@ -60,6 +60,14 @@ own process group (via a `CREATE_NEW_PROCESS_GROUP` `CreateProcess` P/Invoke, mi
 harness's own technique) would close this gap for the Ctrl+Break case too, but is deliberately
 deferred as an architecture change beyond this phase's approved scope.
 
+**Remote access (opt-in).** `start.ps1`/`start.sh` read two environment variables that are unset by
+default: `NEXT_PUBLIC_HALL_CORE_URL` (already the exact variable this launcher passes to Hall Web's
+build below — set it to override the loopback URL it would otherwise derive from
+`config.hallCorePort`) and `HALL_WEB_ORIGIN` (passed through to Hall Core as `--web-origin`, added to
+its CORS/WebSocket-origin allowlist). Unset, every code path above is unaffected — same loopback URL,
+same zero-CLI-flags Hall Core spawn. See `docs/remote-access.md` for the full Cloudflare Tunnel setup
+this supports.
+
 ## Consequences
 
 - A user who has run `install.ps1` once can start Hall with exactly one command.

@@ -81,6 +81,9 @@ The launcher loads the saved configuration, starts Hall Core and Hall Web, waits
 and opens Hall in your browser. See
 [`docs/architecture/0019-one-command-hall-launcher.md`](docs/architecture/0019-one-command-hall-launcher.md).
 
+To reach Hall from outside your local network (e.g. through a Cloudflare Tunnel), see
+[`docs/remote-access.md`](docs/remote-access.md).
+
 ### 5. Configure a provider
 
 Open **Providers** from the navigation bar. The page shows exactly:

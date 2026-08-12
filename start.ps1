@@ -31,7 +31,19 @@ function Invoke-HallLauncher {
     Test-HallPortFree -Port $config.hallCorePort -ServiceName "Hall Core"
     Test-HallPortFree -Port $config.hallWebPort -ServiceName "Hall Web"
 
-    $hallCoreUrl = "http://127.0.0.1:$($config.hallCorePort)"
+    # Remote access via Cloudflare Tunnel (see docs/remote-access.md) is
+    # opt-in: unset (the default), both env vars are blank and every line
+    # below behaves exactly as it did before - loopback URL, zero Hall Core
+    # CLI flags. NEXT_PUBLIC_HALL_CORE_URL reuses the exact env var name
+    # Hall Web's build already reads (see WebBuildEnv.ps1); HALL_WEB_ORIGIN
+    # is the public Hall Web origin Hall Core should additionally trust for
+    # CORS/WebSocket-origin checks (see server-cli-args.ts's --web-origin).
+    $hallCoreUrl = if ([string]::IsNullOrWhiteSpace($env:NEXT_PUBLIC_HALL_CORE_URL)) {
+        "http://127.0.0.1:$($config.hallCorePort)"
+    } else {
+        $env:NEXT_PUBLIC_HALL_CORE_URL
+    }
+    $remoteWebOrigin = $env:HALL_WEB_ORIGIN
     Invoke-HallWebBuildIfStale -RepoRoot $RepoRoot -HallCoreUrl $hallCoreUrl
 
     # From here on, at least one child process may be running - every exit
@@ -47,7 +59,7 @@ function Invoke-HallLauncher {
     $ctrlCHandlerRegistered = $false
     try {
         Write-Host "Starting Hall Core on port $($config.hallCorePort)..."
-        $coreProcess = Start-HallCoreProcess -RepoRoot $RepoRoot
+        $coreProcess = Start-HallCoreProcess -RepoRoot $RepoRoot -WebOrigin $remoteWebOrigin
         Wait-HallCoreHealthy -Port $config.hallCorePort -Process $coreProcess
         Write-Host "  [OK] Hall Core is ready"
 
@@ -56,7 +68,16 @@ function Invoke-HallLauncher {
         Wait-HallWebReady -Port $config.hallWebPort -Process $webProcess
         Write-Host "  [OK] Hall Web is ready"
 
-        $webUrl = "http://127.0.0.1:$($config.hallWebPort)"
+        # Once HALL_WEB_ORIGIN is set, Hall Core's CORS/WebSocket-origin
+        # allowlist only trusts that origin (see docs/remote-access.md,
+        # "Running local and remote at the same time") - the loopback URL
+        # would load but fail to sign in, reproducing issue #22. Announce
+        # and open the origin that will actually work.
+        $webUrl = if ([string]::IsNullOrWhiteSpace($remoteWebOrigin)) {
+            "http://127.0.0.1:$($config.hallWebPort)"
+        } else {
+            $remoteWebOrigin
+        }
         Write-Host ""
         Write-Host "Hall of Wisdom is running at $webUrl" -ForegroundColor Cyan
         Write-Host "Press Ctrl+C to stop." -ForegroundColor Cyan

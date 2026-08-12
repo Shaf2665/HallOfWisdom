@@ -130,6 +130,77 @@ try {
         function Start-Process { param($FilePath) }
         function Register-HallLauncherCtrlCHandler { throw "simulated Ctrl+C handler registration failure" }
     }
+
+    # --- Remote-access env vars (see docs/remote-access.md) are actually read by Invoke-HallLauncher itself, not just accepted as parameters further down the call chain ---
+    $corePort = New-HallTestPort
+    $webPort = New-HallTestPort
+    $script:hallTestCoreProcess = $null
+    $script:hallTestWebProcess = $null
+    $script:capturedWebOrigin = "(not called)"
+    $script:capturedHallCoreUrl = "(not called)"
+    $script:capturedOpenedUrl = "(not called)"
+
+    function Get-HallLauncherConfig {
+        param($RepoRoot)
+        [PSCustomObject]@{ hallCorePort = $corePort; hallWebPort = $webPort }
+    }
+    function Test-HallPortFree { param($Port, $ServiceName) }
+    function Invoke-HallWebBuildIfStale {
+        param($RepoRoot, $HallCoreUrl)
+        $script:capturedHallCoreUrl = $HallCoreUrl
+    }
+    function Start-HallCoreProcess {
+        param($RepoRoot, $WebOrigin)
+        $script:capturedWebOrigin = $WebOrigin
+        $script:hallTestCoreProcess = Start-HallTestFixtureProcess -Port $corePort
+        $script:hallTestCoreProcess
+    }
+    function Start-HallWebProcess {
+        param($RepoRoot, $Port, $HallCoreUrl)
+        $script:hallTestWebProcess = Start-HallTestFixtureProcess -Port $webPort
+        $script:hallTestWebProcess
+    }
+    # Fails fast right after the value Invoke-HallLauncher announces/opens
+    # is captured, reusing the same "throw to unwind, then assert cleanup"
+    # idiom Test-HallCleanupScenario uses above - this also doubles as
+    # regression coverage for the announced/opened URL being the remote
+    # origin, not the now-CORS-rejected loopback one, once HALL_WEB_ORIGIN
+    # is set (see docs/remote-access.md, "Running local and remote at the
+    # same time").
+    function Start-Process {
+        param($FilePath)
+        $script:capturedOpenedUrl = $FilePath
+        throw "simulated browser-open failure"
+    }
+
+    $env:NEXT_PUBLIC_HALL_CORE_URL = "https://core.hall.example.com"
+    $env:HALL_WEB_ORIGIN = "https://hall.example.com"
+    try {
+        try { Invoke-HallLauncher -RepoRoot $RepoRoot } catch { }
+
+        Assert-Equal "https://hall.example.com" $script:capturedWebOrigin `
+            "HALL_WEB_ORIGIN must be read by Invoke-HallLauncher and passed to Start-HallCoreProcess as -WebOrigin"
+        Assert-Equal "https://core.hall.example.com" $script:capturedHallCoreUrl `
+            "NEXT_PUBLIC_HALL_CORE_URL must be read by Invoke-HallLauncher, overriding the loopback Hall Core URL"
+        Assert-Equal "https://hall.example.com" $script:capturedOpenedUrl `
+            "once HALL_WEB_ORIGIN is set, the announced/opened URL must be the remote origin, not the loopback one CORS would now reject"
+
+        $deadline = (Get-Date).AddSeconds(10)
+        while (((-not $script:hallTestCoreProcess.HasExited) -or (-not $script:hallTestWebProcess.HasExited)) -and (Get-Date) -lt $deadline) {
+            Start-Sleep -Milliseconds 200
+        }
+        Assert-True $script:hallTestCoreProcess.HasExited "remote-access env var test: Hall Core's fixture process must be stopped, not left orphaned"
+        Assert-True $script:hallTestWebProcess.HasExited "remote-access env var test: Hall Web's fixture process must be stopped, not left orphaned"
+    } finally {
+        Remove-Item -LiteralPath env:NEXT_PUBLIC_HALL_CORE_URL -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath env:HALL_WEB_ORIGIN -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath function:Get-HallLauncherConfig -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath function:Test-HallPortFree -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath function:Invoke-HallWebBuildIfStale -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath function:Start-HallCoreProcess -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath function:Start-HallWebProcess -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath function:Start-Process -ErrorAction SilentlyContinue
+    }
 } finally {
     Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath env:HALL_START_PS1_UNDER_TEST -ErrorAction SilentlyContinue

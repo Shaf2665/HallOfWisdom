@@ -22,7 +22,16 @@ function ConvertTo-HallProcessArgumentString {
 }
 
 function Start-HallCoreProcess {
-    param([Parameter(Mandatory)][string]$RepoRoot)
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        # Optional public browser origin (e.g. a second Cloudflare Tunnel
+        # hostname mapped to 127.0.0.1:4310) to add to Hall Core's CORS/
+        # WebSocket-origin allowlist - see docs/remote-access.md. Blank
+        # (the default) preserves the zero-CLI-flags behavior below exactly:
+        # apps/server/src/server.ts's tryLoadConfig() already auto-loads the
+        # persisted Hall configuration - see design doc §2.
+        [string]$WebOrigin
+    )
     $distPath = Join-Path $RepoRoot (Join-Path "apps" (Join-Path "server" (Join-Path "dist" "server.js")))
     if (-not (Test-Path -LiteralPath $distPath)) {
         throw "Hall Core build not found at '$distPath' - run .\install.ps1 first."
@@ -30,11 +39,14 @@ function Start-HallCoreProcess {
     $nodeCommand = Get-Command node -ErrorAction SilentlyContinue
     if (-not $nodeCommand) { throw "'node' was not found on PATH." }
 
+    $argumentList = @($distPath)
+    if (-not [string]::IsNullOrWhiteSpace($WebOrigin)) {
+        $argumentList += @("--web-origin", $WebOrigin)
+    }
+
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $nodeCommand.Source
-    # Zero CLI flags: apps/server/src/server.ts's tryLoadConfig() already
-    # auto-loads the persisted Hall configuration - see design doc §2.
-    $psi.Arguments = ConvertTo-HallProcessArgumentString -ArgumentList @($distPath)
+    $psi.Arguments = ConvertTo-HallProcessArgumentString -ArgumentList $argumentList
     $psi.WorkingDirectory = $RepoRoot
     $psi.UseShellExecute = $false
     $psi.RedirectStandardInput = $true

@@ -204,10 +204,43 @@ if [[ "$(json_value "$status_json" config)" == "__HALL_NULL__" ]]; then
   die "The Hall configuration at '$config_path' is invalid: $(json_value "$status_json" error). Run ./install.sh again."
 fi
 
+# True when $1 is unset, empty, or contains only whitespace - matches
+# start.ps1's [string]::IsNullOrWhiteSpace so a "   " env var is treated as
+# unset on both platforms rather than passed through as a bogus origin.
+is_blank() {
+  [[ ! "$1" =~ [^[:space:]] ]]
+}
+
 hall_core_port="$(json_value "$status_json" config.hallCorePort)"
 hall_web_port="$(json_value "$status_json" config.hallWebPort)"
-hall_core_url="http://127.0.0.1:$hall_core_port"
-hall_web_url="http://127.0.0.1:$hall_web_port"
+# Readiness polling always targets the local port directly, regardless of
+# any remote-access override below - Hall Core/Hall Web are started and
+# supervised on this machine, and a Cloudflare Tunnel hostname may not even
+# resolve yet at the moment they're starting up.
+hall_core_local_url="http://127.0.0.1:$hall_core_port"
+hall_web_local_url="http://127.0.0.1:$hall_web_port"
+# Remote access via Cloudflare Tunnel (see docs/remote-access.md) is opt-in:
+# unset (the default), both env vars are blank and every line below behaves
+# exactly as before - loopback URL, zero Hall Core CLI flags.
+# NEXT_PUBLIC_HALL_CORE_URL reuses the exact env var name Hall Web's build
+# already reads below; HALL_WEB_ORIGIN is the public Hall Web origin Hall
+# Core should additionally trust for CORS/WebSocket-origin checks (see
+# server-cli-args.ts's --web-origin). Both feed the Hall Web build/marker and
+# the announced/opened URL only - never the readiness checks above.
+if is_blank "${NEXT_PUBLIC_HALL_CORE_URL:-}"; then
+  hall_core_url="$hall_core_local_url"
+else
+  hall_core_url="$NEXT_PUBLIC_HALL_CORE_URL"
+fi
+# Once HALL_WEB_ORIGIN is set, Hall Core's CORS/WebSocket-origin allowlist
+# only trusts that origin (see docs/remote-access.md) - the loopback URL
+# would load but fail to sign in, reproducing issue #22. Announce/open the
+# origin that will actually work.
+if is_blank "${HALL_WEB_ORIGIN:-}"; then
+  hall_web_url="$hall_web_local_url"
+else
+  hall_web_url="$HALL_WEB_ORIGIN"
+fi
 
 check_port_free "$hall_core_port" "Hall Core"
 check_port_free "$hall_web_port" "Hall Web"
@@ -226,9 +259,13 @@ fi
 set -m
 
 printf 'Starting Hall Core on port %s...\n' "$hall_core_port"
-node "$server_dist" </dev/null &
+core_args=("$server_dist")
+if ! is_blank "${HALL_WEB_ORIGIN:-}"; then
+  core_args+=(--web-origin "$HALL_WEB_ORIGIN")
+fi
+node "${core_args[@]}" </dev/null &
 core_pid=$!
-wait_for_service "$hall_core_url/api/v1/health" "Hall Core" "$core_pid" 30
+wait_for_service "$hall_core_local_url/api/v1/health" "Hall Core" "$core_pid" 30
 printf '  [OK] Hall Core is ready.\n'
 
 printf 'Starting Hall Web on port %s...\n' "$hall_web_port"
@@ -237,7 +274,7 @@ printf 'Starting Hall Web on port %s...\n' "$hall_web_port"
   NEXT_PUBLIC_HALL_CORE_URL="$hall_core_url" exec node "$next_bin" start --hostname 127.0.0.1 --port "$hall_web_port"
 ) </dev/null &
 web_pid=$!
-wait_for_service "$hall_web_url/" "Hall Web" "$web_pid" 60
+wait_for_service "$hall_web_local_url/" "Hall Web" "$web_pid" 60
 printf '  [OK] Hall Web is ready.\n'
 
 printf '\nHall of Wisdom is running at %s\n' "$hall_web_url"

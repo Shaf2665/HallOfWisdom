@@ -387,6 +387,24 @@ describe("WebSocket /api/v1/tasks/:taskId/events", () => {
     expect(code).toBe(1000);
   });
 
+  it("accepts a WebSocket connection whose Origin is a remote HTTPS web origin (Cloudflare Tunnel)", async () => {
+    await setup({ scenario: "success", progressMessageCount: 1 }, "https://hall.example.com");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/v1/tasks",
+      payload: validCreateTaskBody(),
+    });
+    const { task } = created.json<CreateTaskResponseJson>();
+
+    const socket = new WebSocket(`${baseUrl}/api/v1/tasks/${task.taskId}/events`, {
+      headers: { Origin: "https://hall.example.com" },
+    });
+    const { closeCode } = collectMessages(socket);
+    await waitForOpen(socket);
+    const code = await closeCode;
+    expect(code).toBe(1000);
+  });
+
   it("rejects a WebSocket connection whose Origin header does not match, and creates no subscriber", async () => {
     await setup({ scenario: "success" }, "http://127.0.0.1:3000");
     const created = await app.inject({

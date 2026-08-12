@@ -81,6 +81,14 @@ describe("resolveServerConfig — webOrigin derivation from hallWebPort", () => 
     const resolved = resolveServerConfig({ ...NO_OVERRIDES, workspaceRoot: "D:\\W" }, changedPortConfig);
     expect(resolved.webOrigin).toBe("http://127.0.0.1:4444");
   });
+
+  it("accepts a remote HTTPS --web-origin (Cloudflare Tunnel), winning over persisted hallWebPort", () => {
+    const resolved = resolveServerConfig(
+      { ...NO_OVERRIDES, workspaceRoot: "D:\\W", webOrigin: "https://hall.example.com" },
+      PERSISTED,
+    );
+    expect(resolved.webOrigin).toBe("https://hall.example.com");
+  });
 });
 
 describe("resolveServerConfig — enableCodexTrustedLocal precedence", () => {
