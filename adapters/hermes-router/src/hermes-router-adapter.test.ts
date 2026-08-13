@@ -135,6 +135,54 @@ describe("HermesRouterAdapter.startTask", () => {
     expect(await handle.completion).toBe(events[2]);
   });
 
+  it("derives a routing-intent hint from the task's declared requirements and forwards it to transport", async () => {
+    const calls: HermesExecutionTransportOptions[] = [];
+    const adapter = new HermesRouterAdapter({
+      isolatedExecutionEnabled: true,
+      platform: "linux",
+      parentEnv: { HALL_HERMES_ROUTER_ROOT: "/opt/Hermes Router" },
+      fs: { isFile: () => true },
+      startTransport(options) {
+        calls.push(options);
+        return completedTransport();
+      },
+    });
+
+    await collect(
+      await adapter.startTask(
+        taskInput({
+          hallTask: {
+            ...taskInput().hallTask,
+            requirements: {
+              requiredCapabilities: ["project.edit"],
+              allowedExecutionTrust: ["trusted_local"],
+            },
+          },
+        }),
+      ),
+    );
+
+    expect(calls[0]?.taskIntent).toBe("coding");
+  });
+
+  it("falls back to the general routing intent (never throws) when the task declares no requirements", async () => {
+    const calls: HermesExecutionTransportOptions[] = [];
+    const adapter = new HermesRouterAdapter({
+      isolatedExecutionEnabled: true,
+      platform: "linux",
+      parentEnv: { HALL_HERMES_ROUTER_ROOT: "/opt/Hermes Router" },
+      fs: { isFile: () => true },
+      startTransport(options) {
+        calls.push(options);
+        return completedTransport();
+      },
+    });
+
+    await collect(await adapter.startTask(taskInput()));
+
+    expect(calls[0]?.taskIntent).toBe("general");
+  });
+
   it("rejects session resumption without invoking transport", async () => {
     let startCount = 0;
     const adapter = new HermesRouterAdapter({

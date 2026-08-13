@@ -25,6 +25,7 @@ import type {
 } from "../../lib/api-schemas";
 import { useCeoPlanRunEvents } from "../../hooks/use-ceo-plan-run-events";
 import { ConnectionStatus } from "../connection-status";
+import { CeoWorkerActivityPanel } from "./ceo-worker-activity-panel";
 import { CeoPlanExecutionConfigureDialog } from "./ceo-plan-execution-configure-dialog";
 import { CeoPlanExecutionStartDialog } from "./ceo-plan-execution-start-dialog";
 import { CeoPlanExecutionConfirmDialog } from "./ceo-plan-execution-confirm-dialog";
@@ -43,7 +44,7 @@ const RUN_STATUS_LABELS: Record<string, string> = {
   cancelled: "Cancelled",
 };
 
-const STEP_STATUS_LABELS: Record<string, string> = {
+export const STEP_STATUS_LABELS: Record<string, string> = {
   waiting_for_dependencies: "Waiting on dependencies",
   ready: "Ready",
   queued: "Queued",
@@ -69,7 +70,7 @@ const CANCEL_DESCRIPTION =
 const EMERGENCY_STOP_CONFIRMATION_TEXT =
   "I understand that Hall will attempt to cancel only the active tasks linked to this plan, and that some cancellations may fail.";
 
-function statusBadgeClass(status: string): string {
+export function statusBadgeClass(status: string): string {
   if (status === "failed" || status === "cancelled") {
     return "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300";
   }
@@ -554,6 +555,15 @@ export function CeoPlanExecutionSection({
           </ul>
         </div>
       ) : null}
+
+      <CeoWorkerActivityPanel
+        baseUrl={baseUrl}
+        wsBaseUrl={wsBaseUrl}
+        version={version}
+        links={links}
+        stepExecutions={stepExecutions}
+        attempts={attempts}
+      />
 
       {showStart ? (
         <CeoPlanExecutionStartDialog

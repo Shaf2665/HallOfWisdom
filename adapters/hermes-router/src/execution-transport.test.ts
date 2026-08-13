@@ -181,6 +181,25 @@ describe("Hermes execution process launch", () => {
     expect(child.stdin.writableEnded).toBe(true);
   });
 
+  it("adds an additive task_intent field to the stdin JSON when a routing hint is provided", () => {
+    const child = new FakeProcess();
+
+    startHermesExecutionTransport(options(child, { taskIntent: "coding" }));
+
+    expect(child.stdinText).toBe(
+      '{"prompt":"Implement the task.","run_id":"hall-run-123","task_intent":"coding"}',
+    );
+  });
+
+  it("omits task_intent entirely (byte-identical to before this field existed) when no routing hint is provided", () => {
+    const child = new FakeProcess();
+
+    startHermesExecutionTransport(options(child));
+
+    expect(child.stdinText).toBe('{"prompt":"Implement the task.","run_id":"hall-run-123"}');
+    expect(child.stdinText).not.toContain("task_intent");
+  });
+
   it("keeps paths containing spaces as single argv/cwd values", () => {
     const child = new FakeProcess();
     const { spawner, calls } = recordingSpawner(child);

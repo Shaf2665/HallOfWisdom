@@ -28,15 +28,20 @@ function describeEvent(event: NormalizedAgentEvent): string {
   }
 }
 
+function eventRowClass(event: NormalizedAgentEvent): string {
+  if (event.type === "run.failed") {
+    return "border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-950/30";
+  }
+  if (isTerminalEvent(event)) {
+    return "border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30";
+  }
+  return "border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900";
+}
+
 function EventRow({ event }: { readonly event: NormalizedAgentEvent }) {
-  const terminal = isTerminalEvent(event);
   return (
     <li
-      className={`flex flex-col gap-1 rounded border px-3 py-2 text-sm ${
-        terminal
-          ? "border-amber-300 bg-amber-50 dark:border-amber-700 dark:bg-amber-950/30"
-          : "border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900"
-      }`}
+      className={`flex flex-col gap-1 rounded border px-3 py-2 text-sm ${eventRowClass(event)}`}
     >
       <div className="flex items-center justify-between gap-3 text-xs text-stone-500 dark:text-stone-400">
         <span>

@@ -42,6 +42,16 @@ export interface HermesExecutionTransportOptions {
   readonly env: Readonly<NodeJS.ProcessEnv>;
   readonly prompt: string;
   readonly runId: string;
+  /**
+   * Optional routing-intent hint (e.g. "coding", "review", "general" — see
+   * `task-intent.ts`) forwarded to Hermes Router as an additive `task_intent`
+   * field. Deliberately just a string here, not the `TaskIntent` type: the
+   * transport layer doesn't need to know the vocabulary, only forward it.
+   * Omitted entirely from the wire payload when absent, so callers that
+   * don't pass it (including every pre-existing test) see byte-identical
+   * output to before this field existed.
+   */
+  readonly taskIntent?: string;
   readonly platform?: NodeJS.Platform;
   readonly spawner?: HermesProcessSpawner;
   readonly maxInputBytes?: number;
@@ -123,10 +133,9 @@ function serializeInput(
     );
   }
 
-  const input = Buffer.from(
-    JSON.stringify({ prompt: options.prompt, run_id: options.runId }),
-    "utf8",
-  );
+  const payload: Record<string, string> = { prompt: options.prompt, run_id: options.runId };
+  if (options.taskIntent !== undefined) payload.task_intent = options.taskIntent;
+  const input = Buffer.from(JSON.stringify(payload), "utf8");
   const maxInputBytes =
     options.maxInputBytes !== undefined &&
     Number.isInteger(options.maxInputBytes) &&

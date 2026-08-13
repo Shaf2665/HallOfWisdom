@@ -17,6 +17,7 @@ import {
 import { startHermesExecutionTransport } from "./execution-transport.js";
 import { HermesRun, type HermesExecutionTransportStarter } from "./hermes-run.js";
 import { buildHermesTaskPrompt } from "./prompt-builder.js";
+import { deriveTaskIntent } from "./task-intent.js";
 import type { DetectionProcessRunner } from "./process-runner.js";
 
 export interface HermesRouterAdapterConfig {
@@ -74,6 +75,7 @@ export class HermesRouterAdapter implements AgentAdapter {
       title: parsedInput.hallTask.title,
       description: parsedInput.hallTask.description,
     });
+    const taskIntent = deriveTaskIntent(parsedInput.hallTask.requirements);
 
     return Promise.resolve(
       new HermesRun({
@@ -82,6 +84,7 @@ export class HermesRouterAdapter implements AgentAdapter {
         workingDirectory: parsedInput.workingDirectory,
         env: parentEnv,
         prompt,
+        taskIntent,
         runId: parsedInput.runId,
         platform: this.#detectionOptions.platform,
         taskId: parsedInput.hallTask.taskId,
