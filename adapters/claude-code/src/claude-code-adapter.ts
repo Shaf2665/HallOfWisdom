@@ -173,6 +173,11 @@ export class ClaudeCodeAdapter implements AgentAdapter {
       description: parsedInput.hallTask.description,
       priority: parsedInput.hallTask.priority,
       projectId: parsedInput.hallTask.projectId,
+      attachments: parsedInput.attachments?.map((attachment) => ({
+        relativePath: attachment.relativePath,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+      })),
     });
 
     const run = new ClaudeCodeRun({

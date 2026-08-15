@@ -239,6 +239,13 @@ export async function detectClaudeCode(options: DetectionOptions): Promise<Agent
         safeSummary: "Network access is never offered to a task through this adapter.",
         evidence: "declared_only",
       },
+      {
+        capability: "vision.image",
+        status: "declared",
+        safeSummary:
+          "Claude models are multimodal and an attached image is reachable via the Read tool; never independently verified live, so routing never treats this as satisfying required vision work.",
+        evidence: "declared_only",
+      },
     ],
     limitations: [
       "Runs in this adapter's fixed --safe-mode profile; no discretionary --setting-sources are passed.",

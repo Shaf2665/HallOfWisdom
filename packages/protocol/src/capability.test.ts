@@ -19,6 +19,7 @@ describe("capabilityIdSchema", () => {
       "cancellation",
       "session.resume",
       "network.access",
+      "vision.image",
     ];
     for (const id of ids) {
       expect(capabilityIdSchema.safeParse(id).success).toBe(true);

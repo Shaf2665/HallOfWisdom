@@ -7,10 +7,12 @@ import type { RunTaskResult } from "@hall-of-wisdom/hall-runner";
 import {
   parseAgentTaskInput,
   type AgentAdapter,
+  type AgentDetectionResult,
   type AgentTaskInput,
 } from "@hall-of-wisdom/agent-adapter-sdk";
 import {
   parseHallTask,
+  type CapabilityObservation,
   type ExecutionTrust,
   type HallTask,
   type NormalizedAgentEvent,
@@ -61,9 +63,14 @@ import {
   evaluateRouting,
   type RoutingCandidate,
 } from "../routing/routing-policy.js";
-import { AgentExecutionOrchestrationError } from "../agent-execution/agent-execution-errors.js";
+import {
+  AgentExecutionOrchestrationError,
+  AttachmentsRequireIsolatedExecutionError,
+  ImageAttachmentRequiresVisionCapabilityError,
+} from "../agent-execution/agent-execution-errors.js";
 import type { IsolatedAgentExecutionCoordinator } from "../agent-execution/isolated-agent-execution-coordinator.js";
 import type { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
+import type { TaskAttachmentMaterializer } from "../agent-execution/task-attachment-materializer.js";
 import {
   buildAgentExecutionTerminalSnapshot,
   enrichTerminalSnapshotWithRunResult,
@@ -87,6 +94,14 @@ export interface TaskOrchestratorOptions {
   readonly onExecutionError?: ((taskId: string, error: unknown) => void) | undefined;
   readonly executionCoordinator?: IsolatedAgentExecutionCoordinator | undefined;
   readonly artifactTerminalizer?: AgentExecutionArtifactTerminalizer | undefined;
+  /**
+   * Optional — when absent, task execution is byte-identical to before
+   * attachment materialization existed. When present, bridges Communication
+   * Board attachments into `AgentTaskInput` — see
+   * `docs/architecture/0020-communication-board-attachments.md`, "Agent
+   * integration".
+   */
+  readonly attachmentMaterializer?: TaskAttachmentMaterializer | undefined;
 }
 
 export interface CreateTaskResult {
@@ -146,6 +161,7 @@ export class TaskOrchestrator {
   readonly #onExecutionError: ((taskId: string, error: unknown) => void) | undefined;
   readonly #executionCoordinator: IsolatedAgentExecutionCoordinator | undefined;
   readonly #artifactTerminalizer: AgentExecutionArtifactTerminalizer | undefined;
+  readonly #attachmentMaterializer: TaskAttachmentMaterializer | undefined;
 
   readonly #activeExecutionsByRunId = new Map<string, ActiveTaskExecution>();
   readonly #activeRunIdByTaskId = new Map<string, string>();
@@ -173,6 +189,7 @@ export class TaskOrchestrator {
     this.#onExecutionError = options.onExecutionError;
     this.#executionCoordinator = options.executionCoordinator;
     this.#artifactTerminalizer = options.artifactTerminalizer;
+    this.#attachmentMaterializer = options.attachmentMaterializer;
   }
 
   createTask(rawRequest: unknown): CreateTaskResult {
@@ -499,7 +516,10 @@ export class TaskOrchestrator {
   async routingAnalysis(taskId: string, rawRequest: unknown): Promise<RoutingAnalysisResult> {
     const parsed = this.#parseRoutingRequest(rawRequest);
     const { task } = this.#taskStore.get(taskId);
-    const requirements = parsed.requirements ?? task.requirements;
+    const requirements = this.#requirementsWithVisionIfImageAttached(
+      taskId,
+      parsed.requirements ?? task.requirements,
+    );
     if (requirements === undefined) {
       throw new TaskRequirementsNotSetError(taskId);
     }
@@ -550,9 +570,15 @@ export class TaskOrchestrator {
     if (requirements === undefined) {
       throw new TaskRequirementsNotSetError(taskId);
     }
+    // Routed against — but never persisted — with `vision.image` injected
+    // for an image-attached task: see `#requirementsWithVisionIfImageAttached`'s
+    // doc comment on why the *persisted* `requirements` below stays the
+    // operator's own, undecorated value (a synthetic, attachment-derived
+    // requirement must never outlive the attachment it came from).
+    const routingRequirements = this.#requirementsWithVisionIfImageAttached(taskId, requirements);
 
     const candidates = await detectRoutingCandidates(this.#registry);
-    const routing = evaluateRouting(requirements, candidates);
+    const routing = evaluateRouting(routingRequirements, candidates);
     if (routing.recommendedAdapterId === undefined) {
       throw new NoRoutingCandidateError(taskId, routing.explanation);
     }
@@ -953,6 +979,7 @@ export class TaskOrchestrator {
     let terminalEvent: NormalizedAgentEvent | undefined;
     let terminalSnapshot: AgentExecutionTerminalSnapshot | undefined;
     let runResult: RunTaskResult | undefined;
+    let preflightCapabilityObservations: readonly CapabilityObservation[] | undefined;
     try {
       if (this.#isCancellationRequested(active)) {
         terminalSnapshot = this.#cancelTaskBeforeAdapterRun(
@@ -960,7 +987,8 @@ export class TaskOrchestrator {
           "Task execution was cancelled before provider launch.",
         );
       } else {
-        await this.#preflightExecution(adapterId, taskInput);
+        const detection = await this.#preflightExecution(adapterId, taskInput);
+        preflightCapabilityObservations = detection.capabilityObservations;
       }
       if (terminalSnapshot === undefined && this.#isCancellationRequested(active)) {
         terminalSnapshot = this.#cancelTaskBeforeAdapterRun(
@@ -988,11 +1016,20 @@ export class TaskOrchestrator {
               preparedWorktreeId,
             );
           }
+          let executionTaskInput = prepared.taskInput;
+          if (terminalSnapshot === undefined && this.#attachmentMaterializer !== undefined) {
+            executionTaskInput = this.#withMaterializedAttachments(
+              taskId,
+              prepared.taskInput,
+              preparedWorktreeId,
+              preflightCapabilityObservations,
+            );
+          }
           if (terminalSnapshot === undefined) {
             runResult = await runTask({
               registry: this.#registry,
               adapterId,
-              taskInput: prepared.taskInput,
+              taskInput: executionTaskInput,
               options: { signal },
               onEvent: (event) => {
                 const snapshot = this.#handleEvent(active, event, preparedWorktreeId);
@@ -1049,7 +1086,111 @@ export class TaskOrchestrator {
     });
   }
 
-  async #preflightExecution(adapterId: string, taskInput: AgentTaskInput): Promise<void> {
+  /**
+   * Called only after `preparedWorktreeId` has already been assigned from
+   * `prepared.worktreeId` — a thrown error here still reaches the outer
+   * `catch` with a real worktree id attached, so `#terminalizeExecution`
+   * still requests cleanup of whatever `IsolatedAgentExecutionCoordinator
+   * .prepare()` just created. Reading the snapshot before checking
+   * `worktreeId` is deliberate: it is what lets a non-isolated execution
+   * with attachments fail with a clear, specific reason instead of
+   * silently running text-only.
+   */
+  /**
+   * Best-effort routing-time signal: when this task has a real, linked
+   * image attachment, `vision.image` is added to the requirements
+   * `routingAnalysis()`/`routeAndAssign()` evaluate against, so an
+   * adapter without verified vision support is excluded from the
+   * candidate list an operator sees, not just rejected at execution time.
+   * Never mutates already-persisted requirements — only the in-memory
+   * copy used for this one routing decision. `undefined` passes through
+   * unchanged (the caller's own "no requirements at all" check still
+   * applies); an already-present `vision.image` is not duplicated; and if
+   * requirements are already at the 9-capability cap (see
+   * `packages/protocol`'s `capability.ts`), this silently declines to add
+   * a 10th — `#withMaterializedAttachments`'s execution-time check remains
+   * the authoritative, fail-closed guard regardless.
+   *
+   * `routeAndAssign()` deliberately persists the *un-augmented* requirements
+   * (see that method's own local variable naming) even though it routes
+   * against this method's output — a `vision.image` requirement derived
+   * from today's attachments must never outlive them as a durable fact on
+   * the task record; if the attachment is later deleted, a text-only task
+   * must not stay permanently gated on a capability it no longer needs.
+   */
+  #requirementsWithVisionIfImageAttached(
+    taskId: string,
+    requirements: TaskRequirements,
+  ): TaskRequirements;
+  #requirementsWithVisionIfImageAttached(
+    taskId: string,
+    requirements: TaskRequirements | undefined,
+  ): TaskRequirements | undefined;
+  #requirementsWithVisionIfImageAttached(
+    taskId: string,
+    requirements: TaskRequirements | undefined,
+  ): TaskRequirements | undefined {
+    if (requirements === undefined) return undefined;
+    const materializer = this.#attachmentMaterializer;
+    if (materializer === undefined) return requirements;
+    if (requirements.requiredCapabilities.includes("vision.image")) return requirements;
+    if (requirements.requiredCapabilities.length >= 9) return requirements;
+    const snapshot = materializer.snapshotAttachments(taskId);
+    if (!snapshot.attachments.some((attachment) => attachment.kind === "image")) {
+      return requirements;
+    }
+    return {
+      ...requirements,
+      requiredCapabilities: [...requirements.requiredCapabilities, "vision.image"],
+    };
+  }
+
+  /**
+   * `capabilityObservations` is the resolved adapter's own fresh
+   * `detect()` result from this same execution's `#preflightExecution`
+   * call (never a second `detect()` spawn) — used only to gate a real
+   * image attachment against verified `vision.image` support. This is a
+   * deliberate execution-time backstop independent of whatever
+   * `taskRecord.task.requirements` says: it applies to a manually
+   * assigned adapter exactly the same as an auto-routed one, and to a
+   * task whose requirements were never set to include `vision.image` at
+   * all (see `ImageAttachmentRequiresVisionCapabilityError`'s doc
+   * comment). `routingAnalysis()`/`routeAndAssign()` separately inject
+   * `vision.image` into the *routing-time* requirements for an
+   * image-attached task, so an operator sees ineligible adapters excluded
+   * before ever assigning one — this check is what still fails closed if
+   * that earlier signal was bypassed or the attachment changed since.
+   */
+  #withMaterializedAttachments(
+    taskId: string,
+    taskInput: AgentTaskInput,
+    worktreeId: string | undefined,
+    capabilityObservations: readonly CapabilityObservation[] | undefined,
+  ): AgentTaskInput {
+    const materializer = this.#attachmentMaterializer;
+    if (materializer === undefined) return taskInput;
+    const snapshot = materializer.snapshotAttachments(taskId);
+    if (snapshot.attachments.length === 0) return taskInput;
+    if (worktreeId === undefined) {
+      throw new AttachmentsRequireIsolatedExecutionError();
+    }
+    if (snapshot.attachments.some((attachment) => attachment.kind === "image")) {
+      const visionVerified = (capabilityObservations ?? []).some(
+        (observation) =>
+          observation.capability === "vision.image" && observation.status === "verified",
+      );
+      if (!visionVerified) {
+        throw new ImageAttachmentRequiresVisionCapabilityError();
+      }
+    }
+    const manifest = materializer.materializeSnapshot(snapshot, taskInput.workingDirectory);
+    return { ...taskInput, attachments: manifest };
+  }
+
+  async #preflightExecution(
+    adapterId: string,
+    taskInput: AgentTaskInput,
+  ): Promise<AgentDetectionResult> {
     const adapter = this.#resolveAdapter(adapterId);
     const detection = await adapter.detect();
     if (detection.availability !== "available") {
@@ -1067,7 +1208,7 @@ export class TaskOrchestrator {
         "started",
       );
     }
-    if (taskRecord.task.requirements === undefined) return;
+    if (taskRecord.task.requirements === undefined) return detection;
     const executionTrust: ExecutionTrust = detection.executionTrust ?? "unavailable";
     const eligibility = evaluateCandidateEligibility(taskRecord.task.requirements, {
       adapterId,
@@ -1080,6 +1221,7 @@ export class TaskOrchestrator {
     if (!eligibility.eligible) {
       throw new AdapterRequirementsMismatchError();
     }
+    return detection;
   }
 
   #isCancellationRequested(active: ActiveTaskExecution): boolean {

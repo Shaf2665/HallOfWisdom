@@ -341,6 +341,40 @@ describe("buildCodexTrustedLocalArgv — Paperclip parity (Phase 10.2)", () => {
   });
 });
 
+describe("buildCodexArgv — native --image support", () => {
+  it("passes no --image flag at all when there are no image paths (byte-identical to before)", () => {
+    expect(buildCodexArgv(WORKDIR, [])).toEqual(buildCodexArgv(WORKDIR));
+  });
+
+  it("passes --image with every path, terminated by -- before the stdin sentinel", () => {
+    const argv = buildCodexArgv(WORKDIR, [
+      "C:\\wd\\.hall-attachments\\a\\one.png",
+      "C:\\wd\\.hall-attachments\\b\\two.png",
+    ]);
+    const imageIndex = argv.indexOf("--image");
+    expect(imageIndex).toBeGreaterThanOrEqual(0);
+    expect(argv[imageIndex + 1]).toBe("C:\\wd\\.hall-attachments\\a\\one.png");
+    expect(argv[imageIndex + 2]).toBe("C:\\wd\\.hall-attachments\\b\\two.png");
+    expect(argv[imageIndex + 3]).toBe("--");
+    expect(argv.at(-1)).toBe("-");
+  });
+});
+
+describe("buildCodexTrustedLocalArgv — native --image support", () => {
+  it("passes no --image flag at all when there are no image paths (byte-identical to before)", () => {
+    expect(buildCodexTrustedLocalArgv(WORKDIR, [])).toEqual(buildCodexTrustedLocalArgv(WORKDIR));
+  });
+
+  it("passes --image with every path, terminated by -- before the stdin sentinel", () => {
+    const argv = buildCodexTrustedLocalArgv(WORKDIR, ["C:\\wd\\.hall-attachments\\a\\one.png"]);
+    const imageIndex = argv.indexOf("--image");
+    expect(imageIndex).toBeGreaterThanOrEqual(0);
+    expect(argv[imageIndex + 1]).toBe("C:\\wd\\.hall-attachments\\a\\one.png");
+    expect(argv[imageIndex + 2]).toBe("--");
+    expect(argv.at(-1)).toBe("-");
+  });
+});
+
 describe("buildCodexArgv vs buildCodexTrustedLocalArgv — strict profile is untouched", () => {
   it("buildCodexArgv still never includes --dangerously-bypass-approvals-and-sandbox", () => {
     expect(buildCodexArgv(WORKDIR)).not.toContain("--dangerously-bypass-approvals-and-sandbox");

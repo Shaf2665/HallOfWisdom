@@ -55,6 +55,7 @@ import { IsolatedAgentExecutionCoordinator } from "../agent-execution/isolated-a
 import type { AgentWorktreeValidator } from "../agent-execution/isolated-agent-execution-coordinator.js";
 import { GitArtifactCollector } from "../agent-execution/git-artifact-collector.js";
 import { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
+import { HallTaskAttachmentMaterializer } from "../agent-execution/task-attachment-materializer.js";
 
 export interface ServerCompositionOptions {
   /** Canonical, already-validated workspace root. */
@@ -298,23 +299,16 @@ export function createCoreStoresComposition(
     gitArtifactCollector,
   });
 
-  const orchestrator = new TaskOrchestrator({
-    taskStore,
-    eventStore,
-    eventBus,
-    registry: options.registry,
-    workspaceRoot: options.workspaceRoot,
-    onExecutionError: options.onExecutionError,
-    executionCoordinator,
-    artifactTerminalizer,
-  });
-
   // A fresh, isolated store per call (never shared module-level state — see
   // `BoardStore`'s own test coverage for this) with the one General board
   // seeded immediately, before this composition is ever handed to a route.
   // `seedGeneralBoard` is idempotent in durable mode — see
   // `SqliteBoardStore.seedGeneralBoard`'s doc comment — so calling it again
   // on a database a previous boot already seeded is a safe no-op.
+  //
+  // Built before `TaskOrchestrator` (not after, as in earlier phases) so
+  // its `attachmentMaterializer` can be wired in at construction time
+  // rather than added on afterward.
   const boardStore: BoardStorePort =
     db !== undefined
       ? new SqliteBoardStore({ db, maxBoards: options.limits.maxBoards, taskStore })
@@ -333,6 +327,23 @@ export function createCoreStoresComposition(
   const attachmentBlobRootDir =
     options.attachmentBlobRootDir ?? mkdtempSync(path.join(os.tmpdir(), "hall-attachments-"));
   const attachmentBlobStore = new AttachmentBlobStore({ rootDir: attachmentBlobRootDir });
+  const attachmentMaterializer = new HallTaskAttachmentMaterializer({
+    boardStore,
+    messageStore,
+    blobStore: attachmentBlobStore,
+  });
+
+  const orchestrator = new TaskOrchestrator({
+    taskStore,
+    eventStore,
+    eventBus,
+    registry: options.registry,
+    workspaceRoot: options.workspaceRoot,
+    onExecutionError: options.onExecutionError,
+    executionCoordinator,
+    artifactTerminalizer,
+    attachmentMaterializer,
+  });
 
   return {
     taskStore,

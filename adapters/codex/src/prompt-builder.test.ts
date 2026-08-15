@@ -82,4 +82,27 @@ describe("buildCodexTaskPrompt", () => {
     const prompt = buildCodexTaskPrompt(input());
     expect(prompt).not.toMatch(/OPENAI_API_KEY|CODEX_HOME|CODEX_API_KEY/);
   });
+
+  it("is byte-identical for a text-only task whether `attachments` is omitted or undefined", () => {
+    expect(buildCodexTaskPrompt({ ...input(), attachments: undefined })).toBe(
+      buildCodexTaskPrompt(input()),
+    );
+  });
+
+  it("lists materialized attachments with their relative path, filename, and MIME type", () => {
+    const prompt = buildCodexTaskPrompt(
+      input({
+        attachments: [
+          { relativePath: ".hall-attachments/abc/spec.txt", filename: "spec.txt", mimeType: "text/plain" },
+        ],
+      }),
+    );
+    expect(prompt).toContain(".hall-attachments/abc/spec.txt");
+    expect(prompt).toContain("spec.txt");
+    expect(prompt).toContain("text/plain");
+  });
+
+  it("omits the attachments section entirely for an empty attachments array", () => {
+    expect(buildCodexTaskPrompt(input({ attachments: [] }))).toBe(buildCodexTaskPrompt(input()));
+  });
 });

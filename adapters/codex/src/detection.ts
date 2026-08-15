@@ -11,6 +11,7 @@ import {
   fetchCodexExecHelpText,
   matchesIsolationFlags,
   matchesTrustedLocalFlags,
+  matchesVisionFlags,
 } from "./cli-compatibility.js";
 import type { CodexSandboxCompatibilityProbe } from "./sandbox-compatibility-probe.js";
 import {
@@ -266,7 +267,11 @@ function unsupportedRestricted(
   return detectedVersion !== undefined ? { ...result, detectedVersion } : result;
 }
 
-function available(diagnosticMessage: string, detectedVersion?: string): AgentDetectionResult {
+function available(
+  diagnosticMessage: string,
+  visionFlagSupported: boolean,
+  detectedVersion?: string,
+): AgentDetectionResult {
   const result: AgentDetectionResult = {
     installed: true,
     availability: "available",
@@ -313,6 +318,19 @@ function available(diagnosticMessage: string, detectedVersion?: string): AgentDe
         safeSummary: "Network access is never offered to a task through this adapter.",
         evidence: "declared_only",
       },
+      visionFlagSupported
+        ? {
+            capability: "vision.image",
+            status: "verified",
+            safeSummary: "Verified: the installed Codex CLI's `exec --help` exposes `--image`.",
+            evidence: "environment_probe",
+          }
+        : {
+            capability: "vision.image",
+            status: "unsupported",
+            safeSummary: "The installed Codex CLI's `exec --help` does not expose `--image`.",
+            evidence: "environment_probe",
+          },
     ],
     limitations: [TRUSTED_LOCAL_AVAILABLE_MESSAGE],
   };
@@ -594,5 +612,13 @@ export async function detectCodex(options: DetectionOptions): Promise<AgentDetec
     return unsupportedRestricted(TRUSTED_LOCAL_FLAG_UNSUPPORTED_MESSAGE, detectedVersion);
   }
 
-  return available(TRUSTED_LOCAL_AVAILABLE_MESSAGE, detectedVersion);
+  // Reuses execHelpText fetched above — no third `exec --help` spawn.
+  // Independent of the isolation/trusted-local marker checks above: an
+  // older CLI missing only `--image` still reaches `available()`, it just
+  // never reports `vision.image` as `verified`.
+  return available(
+    TRUSTED_LOCAL_AVAILABLE_MESSAGE,
+    matchesVisionFlags(execHelpText),
+    detectedVersion,
+  );
 }

@@ -106,6 +106,33 @@ describe("buildTaskPrompt", () => {
     expect(prompt).not.toMatch(/process\.env/);
   });
 
+  it("is byte-identical for a text-only task whether or not `attachments` is explicitly omitted vs. undefined", () => {
+    const withKey = buildTaskPrompt({ ...baseInput(), attachments: undefined });
+    const withoutKey = buildTaskPrompt(baseInput());
+    expect(withKey).toBe(withoutKey);
+  });
+
+  it("lists materialized attachments with their relative path, filename, and MIME type", () => {
+    const prompt = buildTaskPrompt(
+      baseInput({
+        attachments: [
+          { relativePath: ".hall-attachments/abc/spec.txt", filename: "spec.txt", mimeType: "text/plain" },
+          { relativePath: ".hall-attachments/def/photo.png", filename: "photo.png", mimeType: "image/png" },
+        ],
+      }),
+    );
+    expect(prompt).toContain(".hall-attachments/abc/spec.txt");
+    expect(prompt).toContain("spec.txt");
+    expect(prompt).toContain("text/plain");
+    expect(prompt).toContain(".hall-attachments/def/photo.png");
+    expect(prompt).toContain("Read");
+  });
+
+  it("omits the attachments section entirely for an empty attachments array", () => {
+    const prompt = buildTaskPrompt(baseInput({ attachments: [] }));
+    expect(prompt).toBe(buildTaskPrompt(baseInput()));
+  });
+
   it("never contains a leading '--' token that could be misread as a flag by naive downstream parsing", () => {
     const prompt = buildTaskPrompt(baseInput({ title: "--dangerously-skip-permissions" }));
     // It is still present as literal content (this is a prompt string, not

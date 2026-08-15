@@ -1,3 +1,4 @@
+import path from "node:path";
 import {
   parseAgentDetectionResult,
   parseAgentTaskInput,
@@ -440,15 +441,31 @@ export class CodexAdapter implements AgentAdapter {
       description: parsedInput.hallTask.description,
       priority: parsedInput.hallTask.priority,
       projectId: parsedInput.hallTask.projectId,
+      attachments: parsedInput.attachments?.map((attachment) => ({
+        relativePath: attachment.relativePath,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+      })),
     });
+
+    // Native `--image <FILE>...` support (verified live in `detection.ts`
+    // before this adapter is ever selected for required vision work) —
+    // absolute paths, since `codex exec` is spawned with its own `cwd`
+    // rather than relying on `--cd`'s resolution behavior for this flag.
+    // Empty for a task with no image attachments, which is what keeps
+    // `buildCodexArgv`/`buildCodexTrustedLocalArgv`'s output unchanged for
+    // every task that doesn't attach one.
+    const imagePaths = (parsedInput.attachments ?? [])
+      .filter((attachment) => attachment.kind === "image")
+      .map((attachment) => path.join(parsedInput.workingDirectory, attachment.relativePath));
 
     // The same #trustedLocal.enabled field that gated detect()'s
     // "available" result above is the only thing that selects the
     // Paperclip-compatible bypass argv. Strict mode (the default) always
     // reaches buildCodexArgv, byte-for-byte the Phase 10.1 profile.
     const args = this.#trustedLocal.enabled
-      ? buildCodexTrustedLocalArgv(parsedInput.workingDirectory)
-      : buildCodexArgv(parsedInput.workingDirectory);
+      ? buildCodexTrustedLocalArgv(parsedInput.workingDirectory, imagePaths)
+      : buildCodexArgv(parsedInput.workingDirectory, imagePaths);
 
     const run = new CodexRun({
       executablePath: resolution.executable.path,

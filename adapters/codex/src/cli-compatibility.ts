@@ -65,6 +65,17 @@ const TRUSTED_LOCAL_REQUIRED_HELP_MARKERS = [
   "--cd",
 ] as const;
 
+/**
+ * Confirmed present, exact name, on `codex exec --help` for the installed
+ * CLI ("`-i, --image <FILE>...` — Optional image(s) to attach to the
+ * initial prompt"), via a live, zero-model-usage probe. Checked
+ * independently of `REQUIRED_HELP_MARKERS`/`TRUSTED_LOCAL_REQUIRED_HELP_MARKERS`
+ * so an older installed CLI that lacks only this flag still passes the
+ * isolation profile it already supports — it just never reports
+ * `vision.image` as `verified` (see `detectCodex`'s `available()` branch).
+ */
+const VISION_REQUIRED_HELP_MARKERS = ["--image"] as const;
+
 const DEFAULT_HELP_TIMEOUT_MS = 5000;
 
 /**
@@ -151,6 +162,11 @@ export function matchesIsolationFlags(helpText: string): boolean {
 /** Pure marker match against already-fetched help text — never spawns. */
 export function matchesTrustedLocalFlags(helpText: string): boolean {
   return TRUSTED_LOCAL_REQUIRED_HELP_MARKERS.every((marker) => helpText.includes(marker));
+}
+
+/** Pure marker match against already-fetched help text — never spawns. */
+export function matchesVisionFlags(helpText: string): boolean {
+  return VISION_REQUIRED_HELP_MARKERS.every((marker) => helpText.includes(marker));
 }
 
 export async function verifyIsolationFlagSupport(

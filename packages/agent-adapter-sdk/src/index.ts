@@ -13,8 +13,14 @@ export {
 } from "./detection.js";
 export type { AvailabilityStatus, AgentDetectionResult } from "./detection.js";
 
-export { agentTaskInputSchema, parseAgentTaskInput } from "./task-input.js";
-export type { AgentTaskInput } from "./task-input.js";
+export {
+  agentTaskInputSchema,
+  parseAgentTaskInput,
+  taskAttachmentManifestEntrySchema,
+  MAX_TASK_ATTACHMENTS,
+  MAX_TASK_ATTACHMENTS_TOTAL_BYTES,
+} from "./task-input.js";
+export type { AgentTaskInput, TaskAttachmentManifestEntry } from "./task-input.js";
 
 export type { AgentExecutionOptions } from "./execution-options.js";
 export type { AgentRunHandle, RunTerminalState } from "./run-handle.js";

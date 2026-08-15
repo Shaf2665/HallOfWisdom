@@ -90,7 +90,10 @@ const DISABLED_FEATURES = [
  * `shell: false` / no-manually-concatenated-command-line discipline in
  * `process-spawner.ts`.
  */
-export function buildCodexArgv(workingDirectory: string): readonly string[] {
+export function buildCodexArgv(
+  workingDirectory: string,
+  imagePaths: readonly string[] = [],
+): readonly string[] {
   return [
     "exec",
     "--json",
@@ -104,8 +107,24 @@ export function buildCodexArgv(workingDirectory: string): readonly string[] {
     ...strictCodexFeatureDisableArgs(),
     "--cd",
     workingDirectory,
+    ...imageArgs(imagePaths),
     "-",
   ];
+}
+
+/**
+ * `--image <FILE>...` is variadic — without an explicit `--` terminator,
+ * the trailing `"-"` positional (Codex's own "read the prompt from stdin"
+ * convention, confirmed live in `codex exec --help`) could otherwise be
+ * consumed as another image path instead of the prompt marker. Verified
+ * live via the same zero-usage `--strict-config` config-parse-failure
+ * probe technique as the rest of this file: `--image <path> -- -` reaches
+ * config validation cleanly. Returns `[]` for no images — this is what
+ * keeps a task with no image attachments byte-identical to before this
+ * parameter existed.
+ */
+function imageArgs(imagePaths: readonly string[]): readonly string[] {
+  return imagePaths.length === 0 ? [] : ["--image", ...imagePaths, "--"];
 }
 
 /**
@@ -145,7 +164,10 @@ export function buildCodexArgv(workingDirectory: string): readonly string[] {
  * `docs/architecture/0009-codex-adapter.md`) are independent of, and must
  * hold regardless of, the sandbox/approval question.
  */
-export function buildCodexTrustedLocalArgv(workingDirectory: string): readonly string[] {
+export function buildCodexTrustedLocalArgv(
+  workingDirectory: string,
+  imagePaths: readonly string[] = [],
+): readonly string[] {
   return [
     "exec",
     "--json",
@@ -157,6 +179,7 @@ export function buildCodexTrustedLocalArgv(workingDirectory: string): readonly s
     ...DISABLED_FEATURES.flatMap((feature) => ["--disable", feature]),
     "--cd",
     workingDirectory,
+    ...imageArgs(imagePaths),
     "-",
   ];
 }

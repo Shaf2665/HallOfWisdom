@@ -44,6 +44,10 @@ export const codexDescriptor: AgentAdapterDescriptor = parseAgentAdapterDescript
   // never uses `codex exec resume`) and no `network.access` (never
   // offered to a task through this adapter). What's actually verified on
   // this machine right now is `detect()`'s `capabilityObservations` job.
+  // `vision.image` is declared because the installed CLI's `codex exec
+  // --help` genuinely exposes `-i, --image <FILE>...` — whether it is
+  // ever reported `verified` still depends on a live flag-support probe
+  // in `detection.ts`, same discipline as every other capability here.
   declaredCapabilities: [
     "project.read",
     "project.edit",
@@ -51,6 +55,7 @@ export const codexDescriptor: AgentAdapterDescriptor = parseAgentAdapterDescript
     "git.inspect",
     "structured.events",
     "cancellation",
+    "vision.image",
   ],
   integrationLevel: "structured_cli",
   supportedOperatingSystems: ["windows", "macos", "linux"],

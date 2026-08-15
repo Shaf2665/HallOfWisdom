@@ -95,33 +95,103 @@ filename/size card with a native download link. Neither ever receives raw bytes 
 WebSocket — a confirmed message's `attachments` array carries only metadata, enough to build a GET
 request.
 
-## Agent integration — the honest gap
+## Agent integration — the attachment → task execution bridge
 
-Before wiring anything, the actual question was: does board content of any kind reach CEO/worker
-task execution today? **No — and this predates and is independent of attachments.**
-`MessageStorePort.append()` has exactly three call sites (the human POST route, the CEO Agent's own
-audit-summary posts, execution-status system posts); `.list()` has exactly two, both purely for
-rendering to the browser (REST GET, WebSocket replay). `CommunicationMessage.reference` is one-way
-(a CEO plan links forward to its own audit post on a board) — nothing reads board content back into
-a task. No adapter, and no code in `task-orchestrator.ts`, ever calls `.list()` on a message store.
+An earlier revision of this document described a gap: board content of any kind never reached
+CEO/worker task execution. `MessageStorePort.append()` has exactly three call sites (the human POST
+route, the CEO Agent's own audit-summary posts, execution-status system posts); `.list()` has
+exactly two, both purely for rendering to the browser (REST GET, WebSocket replay); no adapter and
+no code in `task-orchestrator.ts` ever called `.list()` on a message store. A follow-up phase closed
+that gap for attachments specifically — this section documents what actually reaches an agent today,
+and what still does not.
 
-Given that, **no changes were made to `packages/agent-adapter-sdk`, no new `CapabilityId` was added,
-and `AgentTaskInput` gained no new field.** An unused `AgentTaskInput.attachments` field would
-exactly replicate an anti-pattern already present in this codebase: `AgentTaskInput.metadata` is
-schema-legal but "completely inert in practice" (`task-orchestrator.ts` never populates it, and
-`claude-code-adapter.test.ts` has a dedicated test proving the one adapter that reads it ignores it
-entirely). Building a second unused extension point on top of a documented one serves no one.
+### The semantic: what "this task's attachments" means
 
-Separately and independently: of the three CLI-backed adapters, none accept a file path or image
-bytes today. Claude Code and Codex each receive a single text prompt (one `--print <prompt>` argv
-element, or stdin); Hermes Router sends `{prompt, run_id}` over stdin. So even if a board→task
-bridge existed, **no adapter could consume an image attachment today**, and only Hermes Router's
-JSON-over-stdin transport is structurally close to being extended for text/code context without a
-larger redesign.
+A board is attached to *at most one* task, at the deterministic id `taskBoardId(taskId)` (`task:<taskId>`)
+— boards are never the reverse (a task is never created from a board message). So "the attachments
+for a task" is defined as: **at each execution attempt (a fresh start, or a retry), snapshot every
+attachment currently linked to a human-authored message on that task's own board.** That snapshot is
+immutable for the attempt it was taken for, and is re-created fresh on retry — a board can accumulate
+messages across a task's lifetime, including after assignment, and each execution attempt picks up
+whatever is linked at that moment. Only human messages are considered: per the upload/link flow
+described above, `attachmentIds` only ever reaches `MessageStorePort.append()` through the
+human-POST route today, so a system-authored message (a CEO audit post, an execution-status post)
+structurally cannot carry one — `TaskAttachmentMaterializer.snapshotAttachments` still filters on
+`author.kind === "human"` explicitly, as defense in depth, not because it currently needs to.
 
-Bridging board content (attachments or otherwise) into task execution — deciding what "the CEO can
-see this" even means, given boards are a many-message discussion stream and a task has one prompt —
-is a separate, larger feature. It is exactly the "new chat architecture" / "larger adapter redesign"
-this issue's own scope explicitly excludes. The attachment infrastructure and UI above are complete
-and usable for human↔human (and human↔system-audit) discussion today; making an agent aware of an
-attachment is future work with its own design questions, not a small addition to this one.
+### Materialization
+
+`TaskAttachmentMaterializer` (`apps/server/src/agent-execution/task-attachment-materializer.ts`) is
+called from `TaskOrchestrator#execute`, immediately after a worktree is prepared and before the
+adapter is started. For a task whose snapshot is non-empty, each attachment's bytes are copied from
+`AttachmentBlobStore` into `<worktree>/.hall-attachments/<attachmentId>/<filename>` — a Hall-owned,
+bounded directory inside the agent's own isolated working directory, never a second, adapter-external
+temp-storage location. Both path segments are already-validated-safe (a server-generated UUID, and a
+filename rejected at upload time for control characters, path separators, and quotes), so no new
+sanitization boundary is introduced. `GitArtifactCollector` excludes this exact directory from its
+collected diff evidence — the files are Hall-injected input, never agent-produced output — and no
+separate cleanup step exists: the directory lives inside the worktree, so the existing
+`git worktree remove --force` cleanup (Phase 16.5) removes it along with everything else.
+
+**Isolation is required.** Materialization only happens for an execution that resolved to a real,
+Hall-owned worktree (`isolation: "worktree"`) — there is no other Hall-owned bounded directory to
+write into safely, and Hall deliberately does not invent a second, non-worktree temp-storage
+architecture to work around that. If a task has linked attachments but its assigned adapter is not
+running isolated, execution fails clearly with `ATTACHMENT_REQUIRES_ISOLATED_EXECUTION` rather than
+silently running text-only. In this server's default durable composition, `hall.codex` and
+`hall.hermes-router` are isolated by default and `hall.claude-code` is not (a pre-existing default,
+unrelated to this feature) — so Claude Code only receives attachments when isolation is explicitly
+enabled for it, an already-supported configuration.
+
+**Limits fail clearly, never silently.** A single execution's attachments are capped at 20 files and
+64 MiB combined (`MAX_TASK_ATTACHMENTS`/`MAX_TASK_ATTACHMENTS_TOTAL_BYTES`,
+`@hall-of-wisdom/agent-adapter-sdk`) — exceeding either bound throws
+`ATTACHMENT_MATERIALIZATION_LIMIT_EXCEEDED` before any blob is read or file written, never a silent
+drop of the excess. A missing or unreadable blob throws `ATTACHMENT_BLOB_UNAVAILABLE`. Both failure
+paths reach the task through the same infrastructure-failure path every other orchestration error
+already uses (a normalized `run.failed` event with a stable, safe code), and — because the failure is
+thrown only after the worktree is already known to `TaskOrchestrator#execute`, not before — the
+prepared worktree is still cleaned up normally.
+
+### `AgentTaskInput.attachments`
+
+`agentTaskInputSchema` (`packages/agent-adapter-sdk/src/task-input.ts`) gained one new optional
+field: `attachments`, an array of `{ relativePath, filename, mimeType, kind }` (never an absolute
+host path — `relativePath` is always relative to `AgentTaskInput.workingDirectory`), omitted
+entirely (never an empty array) for a text-only task, matching the same convention
+`CommunicationMessage.attachments` already established. This *does* depart from the earlier revision
+of this document, which deliberately avoided adding an unused field to `AgentTaskInput` to avoid
+replicating the `metadata` anti-pattern (schema-legal but inert — `task-orchestrator.ts` never
+populates it, and `claude-code-adapter.test.ts` proves the one adapter that reads it ignores it
+regardless). `attachments` is different in kind, not just in name: it is populated by trusted
+server code from files Hall itself materialized (never client-controlled shape or content), and it
+is actually read by every adapter below — an inert extension point would have repeated the mistake;
+a consumed one does not.
+
+### Adapter propagation
+
+- **Claude Code / Codex** — both already receive the task prompt as a single bounded string (one
+  argv element, or stdin). Their `prompt-builder.ts` now accepts an optional `attachments` list and,
+  when present, appends a fixed "Attached files" section (relative path, filename, MIME type) ahead
+  of the task description — built as non-truncatable content, like the rest of the header, so a
+  truncated description never silently drops which files are attached. No new CLI flag or permission
+  is required: `Read` is already in Claude Code's fixed `--allowedTools` list, and Codex's sandbox
+  already permits reading any file inside its own working directory — both can open one of these
+  paths with the tools they already have.
+- **Hermes Router** — its stdin JSON payload gains an additive `attachments` array (`relative_path`,
+  `filename`, `mime_type`, `kind` per entry), the same additive, backward-compatible pattern already
+  used for `task_intent`.
+- A text-only task's `AgentTaskInput`/prompt/payload is byte-identical to before this field
+  existed — every adapter's own attachment handling short-circuits to a no-op when `attachments` is
+  absent.
+
+### What remains out of scope
+
+This phase carries attachments — of any allowed MIME type, including images — through as **file path
+context only**: a materialized path an adapter's own file-reading tool can open, nothing more. No
+adapter is told to treat an image attachment as multimodal model input, no new capability id or
+routing behavior exists for "vision," and no provider-specific image-input mechanism (a CLI flag, an
+embedded base64 payload, an OpenAI-style multimodal message) was added anywhere in this phase.
+Turning an image attachment into genuine multimodal input — deciding, per adapter, whether and how
+that's even possible, and wiring provider-neutral routing so a vision-requiring task only reaches an
+adapter that can actually see the image — is separate, future work.

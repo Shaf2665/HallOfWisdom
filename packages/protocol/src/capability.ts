@@ -19,10 +19,11 @@ export const capabilityIdSchema = z.enum([
   "cancellation",
   "session.resume",
   "network.access",
+  "vision.image",
 ]);
 export type CapabilityId = z.infer<typeof capabilityIdSchema>;
 
-const MAX_CAPABILITY_COUNT = 8;
+const MAX_CAPABILITY_COUNT = 9;
 
 /**
  * Shared by `TaskRequirements.requiredCapabilities` here and by

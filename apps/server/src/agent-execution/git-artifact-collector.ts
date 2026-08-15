@@ -11,6 +11,7 @@ import {
   type GitCommandRunner,
 } from "../agent-worktrees/git-command-runner.js";
 import { GitArtifactCollectionError } from "./agent-execution-errors.js";
+import { HALL_ATTACHMENTS_DIRNAME } from "./task-attachment-materializer.js";
 
 export interface GitArtifactCollectorOptions {
   readonly gitRunner: GitCommandRunner;
@@ -86,7 +87,7 @@ export class GitArtifactCollector {
         worktreePath,
         signal,
       ),
-    );
+    ).filter((filePath) => !isHallAttachmentsPath(filePath));
     const numstat = parseNumstat(
       await this.#runGitBytes(
         [
@@ -244,6 +245,18 @@ function parseNumstatCounter(value: string): number {
     throw new GitArtifactCollectionError("Git numstat counter exceeded safe integer range.");
   }
   return parsed;
+}
+
+/**
+ * Materialized attachments (`HALL_ATTACHMENTS_DIRNAME`, written by
+ * `TaskAttachmentMaterializer` before an agent runs) are Hall-injected
+ * input, never agent output — `git ls-files --others` would otherwise
+ * report every one of them as an untracked "change" this collector never
+ * intended to describe. `git` always reports forward-slash paths, on every
+ * platform, so a plain string prefix check is sufficient here.
+ */
+function isHallAttachmentsPath(filePath: string): boolean {
+  return filePath === HALL_ATTACHMENTS_DIRNAME || filePath.startsWith(`${HALL_ATTACHMENTS_DIRNAME}/`);
 }
 
 function boundedAdd(a: number, b: number): number {

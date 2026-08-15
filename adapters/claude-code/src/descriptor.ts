@@ -45,6 +45,15 @@ export const claudeCodeDescriptor: AgentAdapterDescriptor = parseAgentAdapterDes
   // Phase 11 — static declaration of what this adapter was designed to
   // support; `detect()`'s `capabilityObservations` report what's actually
   // verified on the current machine, gated by this declaration.
+  //
+  // `vision.image` is declared but — see `detection.ts` — never reported
+  // `verified`: the installed CLI has no `--image`/multimodal input flag
+  // (confirmed live against `claude --help`), so the only path an
+  // attached image reaches this adapter is its normal `Read` tool
+  // (already in the fixed `--allowedTools` list, and Claude models are
+  // multimodal), which is plausible but has never been proven end-to-end.
+  // `declared` keeps this legitimately in the catalog without letting
+  // routing ever pick this adapter for work that requires verified vision.
   declaredCapabilities: [
     "project.read",
     "project.edit",
@@ -52,6 +61,7 @@ export const claudeCodeDescriptor: AgentAdapterDescriptor = parseAgentAdapterDes
     "git.inspect",
     "structured.events",
     "cancellation",
+    "vision.image",
   ],
   integrationLevel: "structured_cli",
   supportedOperatingSystems: ["windows", "macos", "linux"],

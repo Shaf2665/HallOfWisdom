@@ -165,6 +165,75 @@ describe("HermesRouterAdapter.startTask", () => {
     expect(calls[0]?.taskIntent).toBe("coding");
   });
 
+  it("derives the vision routing intent when a real image attachment is present, overriding requirements-based coding intent", async () => {
+    const calls: HermesExecutionTransportOptions[] = [];
+    const adapter = new HermesRouterAdapter({
+      isolatedExecutionEnabled: true,
+      platform: "linux",
+      parentEnv: { HALL_HERMES_ROUTER_ROOT: "/opt/Hermes Router" },
+      fs: { isFile: () => true },
+      startTransport(options) {
+        calls.push(options);
+        return completedTransport();
+      },
+    });
+
+    await collect(
+      await adapter.startTask(
+        taskInput({
+          hallTask: {
+            ...taskInput().hallTask,
+            requirements: {
+              requiredCapabilities: ["project.edit"],
+              allowedExecutionTrust: ["trusted_local"],
+            },
+          },
+          attachments: [
+            {
+              relativePath: ".hall-attachments/abc/screenshot.png",
+              filename: "screenshot.png",
+              mimeType: "image/png",
+              kind: "image",
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(calls[0]?.taskIntent).toBe("vision");
+  });
+
+  it("never derives the vision routing intent for a non-image attachment", async () => {
+    const calls: HermesExecutionTransportOptions[] = [];
+    const adapter = new HermesRouterAdapter({
+      isolatedExecutionEnabled: true,
+      platform: "linux",
+      parentEnv: { HALL_HERMES_ROUTER_ROOT: "/opt/Hermes Router" },
+      fs: { isFile: () => true },
+      startTransport(options) {
+        calls.push(options);
+        return completedTransport();
+      },
+    });
+
+    await collect(
+      await adapter.startTask(
+        taskInput({
+          attachments: [
+            {
+              relativePath: ".hall-attachments/abc/spec.pdf",
+              filename: "spec.pdf",
+              mimeType: "application/pdf",
+              kind: "file",
+            },
+          ],
+        }),
+      ),
+    );
+
+    expect(calls[0]?.taskIntent).not.toBe("vision");
+  });
+
   it("falls back to the general routing intent (never throws) when the task declares no requirements", async () => {
     const calls: HermesExecutionTransportOptions[] = [];
     const adapter = new HermesRouterAdapter({

@@ -35,6 +35,13 @@ export interface HermesExecutionTransportRun {
   cancel(): void;
 }
 
+export interface HermesAttachmentInput {
+  readonly relativePath: string;
+  readonly filename: string;
+  readonly mimeType: string;
+  readonly kind: string;
+}
+
 export interface HermesExecutionTransportOptions {
   readonly pythonExecutable: string;
   readonly runnerPath: string;
@@ -52,6 +59,20 @@ export interface HermesExecutionTransportOptions {
    * output to before this field existed.
    */
   readonly taskIntent?: string;
+  /**
+   * Optional materialized-attachment manifest, forwarded as an additive
+   * `attachments` wire field — same "omitted entirely when absent" rule as
+   * `taskIntent`. Deliberately a local, narrower shape rather than
+   * `@hall-of-wisdom/agent-adapter-sdk`'s `TaskAttachmentManifestEntry`, so
+   * this transport module never depends on that SDK type. Carries only a
+   * relative path plus display metadata — never raw file bytes; the
+   * currently-installed Hermes Agent runtime reads a real image (`kind
+   * === "image"`) straight off this same materialized worktree path — see
+   * `docs/architecture/0020-communication-board-attachments.md` — and
+   * builds real multimodal content from it; a non-image attachment is
+   * still only ever rendered as plain-text path context.
+   */
+  readonly attachments?: readonly HermesAttachmentInput[] | undefined;
   readonly platform?: NodeJS.Platform;
   readonly spawner?: HermesProcessSpawner;
   readonly maxInputBytes?: number;
@@ -112,6 +133,13 @@ function containsTraversalOrNull(filePath: string): boolean {
   return filePath.includes("\0") || filePath.split(/[\\/]/u).includes("..");
 }
 
+interface HermesWireAttachment {
+  readonly relative_path: string;
+  readonly filename: string;
+  readonly mime_type: string;
+  readonly kind: string;
+}
+
 function serializeInput(
   options: HermesExecutionTransportOptions,
   platform: NodeJS.Platform,
@@ -125,7 +153,9 @@ function serializeInput(
     !pathApi.isAbsolute(options.workingDirectory) ||
     containsTraversalOrNull(options.workingDirectory) ||
     options.prompt.trim().length === 0 ||
-    !SAFE_RUN_ID_PATTERN.test(options.runId)
+    !SAFE_RUN_ID_PATTERN.test(options.runId) ||
+    (options.attachments?.some((attachment) => containsTraversalOrNull(attachment.relativePath)) ??
+      false)
   ) {
     throw new HermesTransportError(
       "HERMES_TRANSPORT_INVALID_INPUT",
@@ -133,8 +163,19 @@ function serializeInput(
     );
   }
 
-  const payload: Record<string, string> = { prompt: options.prompt, run_id: options.runId };
+  const payload: Record<string, string | HermesWireAttachment[]> = {
+    prompt: options.prompt,
+    run_id: options.runId,
+  };
   if (options.taskIntent !== undefined) payload.task_intent = options.taskIntent;
+  if (options.attachments !== undefined && options.attachments.length > 0) {
+    payload.attachments = options.attachments.map((attachment) => ({
+      relative_path: attachment.relativePath,
+      filename: attachment.filename,
+      mime_type: attachment.mimeType,
+      kind: attachment.kind,
+    }));
+  }
   const input = Buffer.from(JSON.stringify(payload), "utf8");
   const maxInputBytes =
     options.maxInputBytes !== undefined &&

@@ -75,7 +75,10 @@ export class HermesRouterAdapter implements AgentAdapter {
       title: parsedInput.hallTask.title,
       description: parsedInput.hallTask.description,
     });
-    const taskIntent = deriveTaskIntent(parsedInput.hallTask.requirements);
+    const hasImageAttachment = parsedInput.attachments?.some(
+      (attachment) => attachment.kind === "image",
+    );
+    const taskIntent = deriveTaskIntent(parsedInput.hallTask.requirements, hasImageAttachment);
 
     return Promise.resolve(
       new HermesRun({
@@ -85,6 +88,12 @@ export class HermesRouterAdapter implements AgentAdapter {
         env: parentEnv,
         prompt,
         taskIntent,
+        attachments: parsedInput.attachments?.map((attachment) => ({
+          relativePath: attachment.relativePath,
+          filename: attachment.filename,
+          mimeType: attachment.mimeType,
+          kind: attachment.kind,
+        })),
         runId: parsedInput.runId,
         platform: this.#detectionOptions.platform,
         taskId: parsedInput.hallTask.taskId,

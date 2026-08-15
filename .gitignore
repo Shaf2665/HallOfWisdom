@@ -46,6 +46,11 @@ Thumbs.db
 
 .claude/scheduled_tasks.lock
 
+# Local agent settings and hooks (skills are installed outside this repository)
+.claude/
+.codex/
+graphify-out
+
 # Subagent-driven-development workspace (task briefs, reports, review diffs) — working
 # artifacts for the current session, never part of a phase's deliverable.
 .superpowers/

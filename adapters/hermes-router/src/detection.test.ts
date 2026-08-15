@@ -233,6 +233,40 @@ describe("detectHermesRouter", () => {
           observation.status === "declared" && observation.evidence === "declared_only",
       ),
     ).toBe(true);
+    // vision_available absent (older/unaware runtime) — fail closed, no
+    // vision.image observation at all, never "verified".
+    expect(
+      result.capabilityObservations?.find((o) => o.capability === "vision.image"),
+    ).toBeUndefined();
+  });
+
+  it("reports vision.image verified only when the detect document says vision_available: true", async () => {
+    const runner = new RecordingProcessRunner({
+      status: "success",
+      stdout: detectDocument({ vision_available: true }),
+    });
+    const result = await detectHermesRouter(
+      detectionOptions(runner, { isolatedExecutionEnabled: true }),
+    );
+
+    expect(result.capabilityObservations).toHaveLength(6);
+    const vision = result.capabilityObservations?.find((o) => o.capability === "vision.image");
+    expect(vision?.status).toBe("verified");
+    expect(vision?.evidence).toBe("environment_probe");
+  });
+
+  it("never reports vision.image verified when vision_available is explicitly false", async () => {
+    const runner = new RecordingProcessRunner({
+      status: "success",
+      stdout: detectDocument({ vision_available: false }),
+    });
+    const result = await detectHermesRouter(
+      detectionOptions(runner, { isolatedExecutionEnabled: true }),
+    );
+
+    expect(
+      result.capabilityObservations?.find((o) => o.capability === "vision.image"),
+    ).toBeUndefined();
   });
 
   it("maps a valid unavailable router document to a safe unsupported result", async () => {

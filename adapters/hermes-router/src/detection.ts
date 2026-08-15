@@ -49,6 +49,16 @@ const availableDetectDocumentSchema = z
     capabilities: exactCapabilitiesSchema,
     integration_level: z.literal("structured_cli"),
     execution_trust: z.literal("trusted_local"),
+    /**
+     * Optional, additive: whether the detected Hermes runtime's configured
+     * router currently has an available vision-capable model (a live,
+     * bounded check against the router's own `/status`, reusing its
+     * existing model-capability data — see `hermes_agent`'s `detect`
+     * command). `.optional()` so an older Hermes runtime that predates
+     * this field still parses; its absence is treated the same as `false`
+     * — `vision.image` is then never reported `verified` (fail closed).
+     */
+    vision_available: z.boolean().optional(),
   })
   .strict();
 
@@ -188,6 +198,33 @@ function declaredCapabilityObservations(): CapabilityObservation[] {
   }));
 }
 
+/**
+ * `vision.image` is deliberately not part of `HERMES_RUNTIME_CAPABILITIES`
+ * (whose exact-match schema pins the Python `detect` command's own fixed
+ * `capabilities` list) — unlike those, this is never merely `declared`:
+ * every other Hermes capability above is stamped `"declared"` regardless
+ * of live state, which would never satisfy a required capability under
+ * routing's "only verified counts" rule (see `routing-policy.ts`). Real
+ * vision support instead depends on whether the router currently has an
+ * available vision-capable model — `document.vision_available`, computed
+ * by the Python side from a live, bounded `/status` check, never a
+ * hardcoded model or provider name. `undefined` (an older runtime that
+ * predates this field) is treated the same as `false` — fail closed, no
+ * observation at all, which routing-policy already treats as "missing".
+ */
+function visionCapabilityObservation(
+  visionAvailable: boolean | undefined,
+): CapabilityObservation | undefined {
+  if (visionAvailable !== true) return undefined;
+  return {
+    capability: "vision.image",
+    status: "verified",
+    safeSummary:
+      "Verified: the configured Hermes Router currently has an available vision-capable model.",
+    evidence: "environment_probe",
+  };
+}
+
 function parseDetectDocument(stdout: string): z.infer<typeof detectDocumentSchema> | undefined {
   if (Buffer.byteLength(stdout, "utf8") > MAX_HERMES_DETECTION_OUTPUT_BYTES) return undefined;
   const document = stdout.trim();
@@ -243,13 +280,20 @@ export async function detectHermesRouter(
   }
 
   const capabilityObservations = declaredCapabilityObservations();
-  return options.isolatedExecutionEnabled
-    ? available(document.runtime_version, capabilityObservations)
-    : unsupported(
-        HERMES_EXECUTION_DISABLED_MESSAGE,
-        document.runtime_version,
-        capabilityObservations,
-      );
+  if (!options.isolatedExecutionEnabled) {
+    return unsupported(
+      HERMES_EXECUTION_DISABLED_MESSAGE,
+      document.runtime_version,
+      capabilityObservations,
+    );
+  }
+  const visionObservation = visionCapabilityObservation(document.vision_available);
+  return available(
+    document.runtime_version,
+    visionObservation === undefined
+      ? capabilityObservations
+      : [...capabilityObservations, visionObservation],
+  );
 }
 
 export function createDefaultHermesDetectionOptions(

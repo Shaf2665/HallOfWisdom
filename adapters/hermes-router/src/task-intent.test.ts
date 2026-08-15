@@ -45,7 +45,7 @@ describe("deriveTaskIntent", () => {
     expect(deriveTaskIntent(requirements([]))).toBe("general");
   });
 
-  it("never derives planning, debug, or vision — they are not reachable from today's data", () => {
+  it("never derives planning or debug — they are not reachable from today's data", () => {
     const allCapabilities: TaskRequirements["requiredCapabilities"] = [
       "project.read",
       "project.edit",
@@ -57,6 +57,20 @@ describe("deriveTaskIntent", () => {
       "network.access",
     ];
     const result = deriveTaskIntent(requirements(allCapabilities));
-    expect(["planning", "debug", "vision"]).not.toContain(result);
+    expect(["planning", "debug"]).not.toContain(result);
+  });
+
+  it("derives vision when a real image attachment is present, regardless of other requirements", () => {
+    expect(deriveTaskIntent(requirements(["project.edit"]), true)).toBe("vision");
+    expect(deriveTaskIntent(undefined, true)).toBe("vision");
+  });
+
+  it("never derives vision from a vision.image requirement alone — only from a real image attachment", () => {
+    // A `vision.image` capability requirement with no `hasImageAttachment`
+    // argument (default false) must never fabricate multimodal intent —
+    // this is the same discipline `hermes_agent` enforces on the actual
+    // message content.
+    expect(deriveTaskIntent(requirements(["vision.image"]))).not.toBe("vision");
+    expect(deriveTaskIntent(requirements(["vision.image"]), false)).not.toBe("vision");
   });
 });

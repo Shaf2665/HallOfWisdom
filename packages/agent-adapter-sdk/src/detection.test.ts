@@ -67,8 +67,8 @@ describe("agentDetectionResultSchema", () => {
     expect(result.success).toBe(false);
   });
 
-  it("rejects more than 8 capability observations", () => {
-    const observations = Array.from({ length: 9 }, () => ({
+  it("rejects more than 9 capability observations", () => {
+    const observations = Array.from({ length: 10 }, () => ({
       capability: "structured.events" as const,
       status: "verified" as const,
       safeSummary: "Verified.",

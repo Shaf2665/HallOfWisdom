@@ -55,7 +55,7 @@ export const agentDetectionResultSchema = z
      */
     capabilityObservations: capabilityObservationSchema
       .array()
-      .max(8, "must not exceed 8 capability observations")
+      .max(9, "must not exceed 9 capability observations")
       .optional(),
     /**
      * Phase 11 — bounded, hand-authored safety caveats surfaced to the

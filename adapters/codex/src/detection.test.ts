@@ -613,6 +613,40 @@ describe("detectCodex — trusted-local mode enabled (Phase 10.2)", () => {
     ]);
   });
 
+  it("reports vision.image as unsupported when `exec --help` does not expose --image", async () => {
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: trustedLocalSpawner(),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    const vision = result.capabilityObservations?.find((o) => o.capability === "vision.image");
+    expect(vision?.status).toBe("unsupported");
+  });
+
+  it("reports vision.image as verified when `exec --help` exposes --image", async () => {
+    const helpTextWithImage = [
+      ...TRUSTED_LOCAL_EXEC_HELP_TEXT.split("\n"),
+      "-i, --image <FILE>...",
+    ].join("\n");
+    const result = await detectCodex({
+      platform: "linux",
+      parentEnv: FOUND_ENV,
+      fs: FS_WITH_CODEX,
+      spawner: scriptedSpawner(
+        "codex-cli 0.144.4",
+        "Logged in using ChatGPT",
+        0,
+        helpTextWithImage,
+      ),
+      trustedLocal: VALID_TRUSTED_LOCAL,
+    });
+    const vision = result.capabilityObservations?.find((o) => o.capability === "vision.image");
+    expect(vision?.status).toBe("verified");
+    expect(vision?.evidence).toBe("environment_probe");
+  });
+
   it("never reports isolated execution trust for trusted-local mode — Phase 11", async () => {
     const result = await detectCodex({
       platform: "linux",

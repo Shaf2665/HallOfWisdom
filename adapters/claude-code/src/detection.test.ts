@@ -162,6 +162,12 @@ describe("detectClaudeCode — subscription verification", () => {
       (o) => o.capability === "session.resume",
     );
     expect(sessionResume?.status).toBe("unsupported");
+    // vision.image is declared (plausible via the Read tool) but never
+    // reported verified — no real local-image mechanism has been proven,
+    // so required vision work must never auto-route here.
+    const vision = result.capabilityObservations?.find((o) => o.capability === "vision.image");
+    expect(vision?.status).toBe("declared");
+    expect(vision?.status).not.toBe("verified");
   });
 
   it("reports available for max/team/enterprise subscription types (case-insensitive)", async () => {

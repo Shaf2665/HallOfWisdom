@@ -210,6 +210,39 @@ describe("GitArtifactCollector", () => {
     ).rejects.toThrow(GitArtifactCollectionError);
   });
 
+  it("excludes materialized attachments (.hall-attachments/) from untracked evidence", async () => {
+    const fixture = createReadyWorktree();
+    const runner = new ScriptedGitRunner([
+      ok(`${FINAL_COMMIT}\n`),
+      okBytes(nul("src/a.ts")),
+      okBytes(
+        nul(
+          ".hall-attachments",
+          ".hall-attachments/11111111-1111-4111-8111-111111111111/photo.png",
+          "untracked file.ts",
+          ".hall-attachments-lookalike/other.txt",
+        ),
+      ),
+      okBytes(nul("2\t1\tsrc/a.ts")),
+    ]);
+    const collector = new GitArtifactCollector({
+      gitRunner: runner,
+      worktreeValidator: fixture.validator,
+    });
+
+    const evidence = await collector.collect("worktree-1");
+
+    // Every `.hall-attachments/...` path (and the bare directory entry
+    // itself) is excluded; a similarly-named but distinct directory
+    // (`.hall-attachments-lookalike`) is not swept up by an overly broad
+    // prefix check.
+    expect(evidence.changedFiles).toEqual([
+      ".hall-attachments-lookalike/other.txt",
+      "src/a.ts",
+      "untracked file.ts",
+    ]);
+  });
+
   it("does not invoke Git when manager-owned worktree validation rejects identity or containment", async () => {
     const runner = new ScriptedGitRunner([ok(`${FINAL_COMMIT}\n`)]);
     const collector = new GitArtifactCollector({

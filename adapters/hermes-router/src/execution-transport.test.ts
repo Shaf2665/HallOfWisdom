@@ -200,6 +200,53 @@ describe("Hermes execution process launch", () => {
     expect(child.stdinText).not.toContain("task_intent");
   });
 
+  it("adds an additive attachments field to the stdin JSON when a materialized manifest is provided", () => {
+    const child = new FakeProcess();
+
+    startHermesExecutionTransport(
+      options(child, {
+        attachments: [
+          {
+            relativePath: ".hall-attachments/abc/spec.txt",
+            filename: "spec.txt",
+            mimeType: "text/plain",
+            kind: "file",
+          },
+        ],
+      }),
+    );
+
+    expect(child.stdinText).toBe(
+      '{"prompt":"Implement the task.","run_id":"hall-run-123",' +
+        '"attachments":[{"relative_path":".hall-attachments/abc/spec.txt","filename":"spec.txt","mime_type":"text/plain","kind":"file"}]}',
+    );
+  });
+
+  it("omits attachments entirely (byte-identical to before this field existed) when no manifest is provided", () => {
+    const child = new FakeProcess();
+
+    startHermesExecutionTransport(options(child));
+
+    expect(child.stdinText).not.toContain("attachments");
+  });
+
+  it("rejects an attachment relative path containing traversal or a NUL byte", async () => {
+    const child = new FakeProcess();
+    const { spawner, calls } = recordingSpawner(child);
+
+    const run = startHermesExecutionTransport(
+      options(child, {
+        spawner,
+        attachments: [
+          { relativePath: "../escape.txt", filename: "escape.txt", mimeType: "text/plain", kind: "file" },
+        ],
+      }),
+    );
+
+    await expect(run.completion).rejects.toMatchObject({ code: "HERMES_TRANSPORT_INVALID_INPUT" });
+    expect(calls).toHaveLength(0);
+  });
+
   it("keeps paths containing spaces as single argv/cwd values", () => {
     const child = new FakeProcess();
     const { spawner, calls } = recordingSpawner(child);

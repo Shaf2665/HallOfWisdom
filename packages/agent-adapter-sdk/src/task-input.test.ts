@@ -69,4 +69,51 @@ describe("agentTaskInputSchema", () => {
     const input = { ...validInput, providerApiKey: "sk-should-not-be-here" };
     expect(agentTaskInputSchema.safeParse(input).success).toBe(false);
   });
+
+  it("accepts a valid attachments manifest", () => {
+    const input = {
+      ...validInput,
+      attachments: [
+        {
+          relativePath: ".hall-attachments/11111111-1111-4111-8111-111111111111/spec.txt",
+          filename: "spec.txt",
+          mimeType: "text/plain",
+          kind: "file" as const,
+        },
+      ],
+    };
+    expect(agentTaskInputSchema.safeParse(input).success).toBe(true);
+  });
+
+  it("rejects an empty attachments array (must be omitted entirely, never empty)", () => {
+    const input = { ...validInput, attachments: [] };
+    expect(agentTaskInputSchema.safeParse(input).success).toBe(false);
+  });
+
+  it("rejects an attachments manifest entry with an unexpected field (e.g. an absolute path)", () => {
+    const input = {
+      ...validInput,
+      attachments: [
+        {
+          relativePath: ".hall-attachments/abc/spec.txt",
+          filename: "spec.txt",
+          mimeType: "text/plain",
+          kind: "file" as const,
+          absolutePath: "C:\\Users\\attacker\\secret.txt",
+        },
+      ],
+    };
+    expect(agentTaskInputSchema.safeParse(input).success).toBe(false);
+  });
+
+  it("rejects an attachments manifest longer than MAX_TASK_ATTACHMENTS", () => {
+    const entry = {
+      relativePath: ".hall-attachments/11111111-1111-4111-8111-111111111111/file.txt",
+      filename: "file.txt",
+      mimeType: "text/plain",
+      kind: "file" as const,
+    };
+    const input = { ...validInput, attachments: Array.from({ length: 21 }, () => entry) };
+    expect(agentTaskInputSchema.safeParse(input).success).toBe(false);
+  });
 });

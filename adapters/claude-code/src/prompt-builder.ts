@@ -5,11 +5,46 @@ export const MAX_PROMPT_LENGTH = 8000;
 
 const DESCRIPTION_TRUNCATION_MARKER = "\n[... description truncated for length ...]";
 
+/**
+ * A materialized attachment, as this adapter needs it — deliberately a
+ * narrower local shape (not `@hall-of-wisdom/agent-adapter-sdk`'s
+ * `TaskAttachmentManifestEntry`) so this package never depends on that
+ * SDK type for its own prompt construction; the adapter's `startTask()`
+ * maps the real manifest entries into this shape at the one call site.
+ */
+export interface PromptAttachment {
+  readonly relativePath: string;
+  readonly filename: string;
+  readonly mimeType: string;
+}
+
 export interface PromptBuilderInput {
   readonly title: string;
   readonly description: string;
   readonly priority: string;
   readonly projectId: string;
+  /** Omitted (or empty) for a text-only task — see `buildAttachmentsSection`'s doc comment for why that keeps this function's output byte-identical to before attachments existed. */
+  readonly attachments?: readonly PromptAttachment[] | undefined;
+}
+
+/**
+ * Read tool is already in this adapter's fixed `--allowedTools` list (see
+ * `permission-profile.ts`) — no new CLI flag or permission is needed for
+ * Claude Code to open one of these paths itself. This section is built as
+ * fixed, non-truncatable content (like the header) specifically so a
+ * truncated *description* never silently drops which files are attached;
+ * the only element ever truncated by `MAX_PROMPT_LENGTH` is the trailing
+ * description, exactly as before this function accepted attachments.
+ * Returns an empty string when `attachments` is absent or empty — this is
+ * what keeps a text-only task's prompt byte-identical to before this
+ * parameter existed.
+ */
+function buildAttachmentsSection(attachments: readonly PromptAttachment[] | undefined): string {
+  if (attachments === undefined || attachments.length === 0) return "";
+  const lines = attachments.map(
+    (attachment) => `- ${attachment.relativePath} (${attachment.filename}, ${attachment.mimeType})`,
+  );
+  return `\n\nAttached files (read-only copies inside your working directory — use Read to open them):\n${lines.join("\n")}`;
 }
 
 export class PromptBuildError extends Error {
@@ -53,7 +88,7 @@ export function buildTaskPrompt(input: PromptBuilderInput): string {
 
 Task title: ${input.title}
 Priority: ${input.priority}
-Project: ${input.projectId}
+Project: ${input.projectId}${buildAttachmentsSection(input.attachments)}
 
 Task description:
 `;
