@@ -171,13 +171,14 @@ a consumed one does not.
 ### Adapter propagation
 
 - **Claude Code / Codex** — both already receive the task prompt as a single bounded string (one
-  argv element, or stdin). Their `prompt-builder.ts` now accepts an optional `attachments` list and,
+  argv element, or stdin). Their `prompt-builder.ts` accepts an optional `attachments` list and,
   when present, appends a fixed "Attached files" section (relative path, filename, MIME type) ahead
   of the task description — built as non-truncatable content, like the rest of the header, so a
-  truncated description never silently drops which files are attached. No new CLI flag or permission
-  is required: `Read` is already in Claude Code's fixed `--allowedTools` list, and Codex's sandbox
-  already permits reading any file inside its own working directory — both can open one of these
-  paths with the tools they already have.
+  truncated description never silently drops which files are attached. Every attachment, image or
+  not, always gets this text-line reference. `Read` is already in Claude Code's fixed
+  `--allowedTools` list, and Codex's sandbox already permits reading any file inside its own working
+  directory — both can open one of these paths with the tools they already have, independent of
+  whatever vision capability (below) they do or don't have.
 - **Hermes Router** — its stdin JSON payload gains an additive `attachments` array (`relative_path`,
   `filename`, `mime_type`, `kind` per entry), the same additive, backward-compatible pattern already
   used for `task_intent`.
@@ -185,13 +186,83 @@ a consumed one does not.
   existed — every adapter's own attachment handling short-circuits to a no-op when `attachments` is
   absent.
 
-### What remains out of scope
+## Vision / image capability (Session 2)
 
-This phase carries attachments — of any allowed MIME type, including images — through as **file path
-context only**: a materialized path an adapter's own file-reading tool can open, nothing more. No
-adapter is told to treat an image attachment as multimodal model input, no new capability id or
-routing behavior exists for "vision," and no provider-specific image-input mechanism (a CLI flag, an
-embedded base64 payload, an OpenAI-style multimodal message) was added anywhere in this phase.
-Turning an image attachment into genuine multimodal input — deciding, per adapter, whether and how
-that's even possible, and wiring provider-neutral routing so a vision-requiring task only reaches an
-adapter that can actually see the image — is separate, future work.
+Session 1 (above) carried attachments through as file-path context only, with no adapter told to
+treat an image as multimodal input. This session adds a provider-neutral `vision.image` capability
+id (`packages/protocol/src/capability.ts`) and wires each real adapter to it — verified only where
+genuinely proven, declared-only or fail-closed everywhere else.
+
+### Capability model
+
+`vision.image` slots into the existing capability/routing system unchanged: an adapter's `detect()`
+reports a `CapabilityObservation` with `status: "verified" | "declared" | "unsupported"`, and
+routing's `evaluateCandidateEligibility` (`apps/server/src/routing/routing-policy.ts`) only ever
+treats `"verified"` as satisfying a required capability — the same rule already governing every
+other capability id, unchanged by this session.
+
+### Per-adapter behavior
+
+- **Codex** — `codex exec --help` genuinely exposes `-i, --image <FILE>...` (confirmed live against
+  the installed CLI). `adapters/codex/src/cli-compatibility.ts` probes for the literal `--image`
+  marker independently of the existing isolation-flag markers, so an older CLI missing only this
+  flag still passes isolation and simply never reports `vision.image` verified. When verified,
+  `codex-adapter.ts` passes every image attachment's absolute materialized path via
+  `--image <paths...> --` (the trailing `--` — confirmed live via the same zero-model-usage
+  `--strict-config` probe technique already used elsewhere in this adapter — stops the variadic
+  flag from swallowing the `-` stdin-prompt sentinel).
+- **Claude Code** — `claude --help` exposes no image/multimodal-input flag. `vision.image` is
+  **declared** (plausible: Claude models are multimodal and an attached image is reachable through
+  the already-permitted `Read` tool) but `detect()` never reports it `verified` — no real
+  local-image mechanism has been proven end-to-end, and proving one would cost real subscription
+  usage this session deliberately did not spend. Routing's verified-only rule means required vision
+  work can never auto-route here.
+- **Hermes Router** — real end-to-end multimodal support. `hermes_agent` (in the separate
+  `Shaf2665/Hermes-router` repository) reads a `kind == "image"` attachment straight off its own
+  worktree (the same materialized path Hall already wrote), base64-encodes it, and builds an
+  OpenAI-format `image_url` content block alongside the text prompt — reaching `router.py`'s
+  pre-existing (untouched by this session) vision-aware model gating and Anthropic content
+  translation. Hall's `deriveTaskIntent` (`adapters/hermes-router/src/task-intent.ts`) derives
+  `task_intent: "vision"` only from a real image attachment, never merely from a `vision.image`
+  capability requirement — a `vision` intent with no image content must never be treated as
+  multimodal. `router.py`'s `/v1/status` reports `supports_vision` per model (reusing its existing,
+  non-hardcoded model-family pattern list); `hermes_agent detect` surfaces that as an additive
+  `vision_available` boolean, and `detectHermesRouter` reports `vision.image` verified only when
+  it's `true` — never a hard requirement for the adapter's own overall availability, so normal
+  coding/review/general routing is unaffected either way.
+
+### Fail-closed, not fail-soft: image preparation
+
+A real image attachment on a task means vision was required — not an optional decoration. Two
+independent layers enforce this:
+
+- **Routing time** — `TaskOrchestrator#requirementsWithVisionIfImageAttached` best-effort injects
+  `vision.image` into the requirements `routingAnalysis()`/`routeAndAssign()` evaluate against for
+  an image-attached task, so an ineligible adapter is filtered from the candidate list before ever
+  being assigned. This is never persisted onto the task record — a synthetic, attachment-derived
+  requirement must not outlive the attachment it came from (delete the image later, and a text-only
+  task must not stay permanently gated on a capability it no longer needs).
+- **Execution time** — `TaskOrchestrator#withMaterializedAttachments` re-checks the actually-resolved
+  adapter's fresh `detect()` result (from this same execution's preflight, never a second spawn)
+  immediately before materializing: an image attachment with no `verified` `vision.image` observation
+  throws `ImageAttachmentRequiresVisionCapabilityError` (`IMAGE_ATTACHMENT_REQUIRES_VISION_CAPABILITY`)
+  before any file is written — this is the authoritative, fail-closed backstop, applying identically
+  whether the adapter was auto-routed or manually assigned.
+
+On the Hermes side, preparing the actual image bytes is equally fail-closed:
+`hermes_agent.__main__.build_image_content_parts` raises
+`AgentError(IMAGE_ATTACHMENT_UNAVAILABLE_CODE, ...)` — never returns a partial list, never
+degrades to text-only — the moment any single required image is missing, unreadable (an `OSError`
+opening it), oversized (per-image or total budget), or an unsupported MIME type; one bad image
+among several fails the whole request, not just that one image. This check runs strictly before
+`AgentRuntime.run()` is ever called, so a preparation failure never reaches the router — no
+model/provider request is made. A valid image (and a task with no image attachment at all) is
+completely unaffected.
+
+### What remains
+
+No real end-to-end run against a live vision-capable model has been executed by either repository
+this session — Codex's `--image` flow is verified at the CLI-contract level (flag presence, argv
+shape) but never task-run; Hermes's flow is proven by unit tests up to the point `router.py`'s
+already-tested vision gating takes over. Claude Code is intentionally excluded from ever claiming
+verified support. No UI-facing "vision" requirement profile was added to `apps/web`.
