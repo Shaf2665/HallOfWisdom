@@ -1,6 +1,7 @@
 import { statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path, { type PlatformPath } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import {
   parseAgentDetectionResult,
@@ -13,15 +14,15 @@ import { nodeDetectionProcessRunner, type DetectionProcessRunner } from "./proce
 
 export { HERMES_PROTOCOL_VERSION } from "./hermes-protocol.js";
 export const HERMES_RUNNER_FILENAME = "hermes_agent_runner.py";
+export const HERMES_RUNTIME_DIRECTORY = "runtime";
 export const DEFAULT_HERMES_PYTHON = "python";
 export const DEFAULT_HERMES_DETECTION_TIMEOUT_MS = 5000;
 export const MAX_HERMES_DETECTION_OUTPUT_BYTES = 16_384;
 export const HERMES_EXECUTION_DISABLED_MESSAGE =
   "Hermes task execution requires Hall durable isolated-worktree execution.";
 
-const ROOT_NOT_CONFIGURED_MESSAGE = "Hermes Router runtime root is not configured.";
-const ROOT_NOT_FOUND_MESSAGE = "The Hermes Router runtime folder was not found.";
-const RUNNER_NOT_FOUND_MESSAGE = "Hermes coding runtime runner was not found.";
+const ROOT_NOT_FOUND_MESSAGE = "Hall's bundled Hermes execution runtime was not found.";
+const RUNNER_NOT_FOUND_MESSAGE = "Hall's bundled Hermes execution runner was not found.";
 const PROCESS_START_FAILED_MESSAGE = "Hermes coding runtime could not be started.";
 const DETECTION_FAILED_MESSAGE = "Hermes coding runtime detection could not be verified.";
 const ROUTER_UNAVAILABLE_MESSAGE =
@@ -104,6 +105,8 @@ export interface HermesDetectionOptions {
   readonly fs: FileSystemProbe;
   readonly processRunner: DetectionProcessRunner;
   readonly isolatedExecutionEnabled: boolean;
+  /** Test-only override for the Hall-owned runtime package root. */
+  readonly runtimeRoot?: string;
 }
 
 export type HermesRuntimeConfigurationResolution =
@@ -114,26 +117,34 @@ export type HermesRuntimeConfigurationResolution =
     }
   | {
       readonly ok: false;
-      readonly reason: "root_not_configured" | "root_not_found" | "runner_not_found";
+      readonly reason: "root_not_found" | "runner_not_found";
     };
 
+function bundledRuntimeRoot(platform: NodeJS.Platform): string {
+  const pathApi = pathApiForPlatform(platform);
+  return pathApi.resolve(
+    pathApi.dirname(fileURLToPath(import.meta.url)),
+    "..",
+    HERMES_RUNTIME_DIRECTORY,
+  );
+}
+
 export function resolveHermesRuntimeConfiguration(
-  options: Pick<HermesDetectionOptions, "platform" | "parentEnv" | "fs">,
+  options: Pick<HermesDetectionOptions, "platform" | "parentEnv" | "fs" | "runtimeRoot">,
 ): HermesRuntimeConfigurationResolution {
-  const configuredRoot = options.parentEnv.HALL_HERMES_ROUTER_ROOT?.trim();
   const pathApi = pathApiForPlatform(options.platform);
-  if (
-    configuredRoot === undefined ||
-    configuredRoot.length === 0 ||
-    !pathApi.isAbsolute(configuredRoot)
-  ) {
-    return { ok: false, reason: "root_not_configured" };
-  }
-  if (options.fs.isDirectory !== undefined && !options.fs.isDirectory(configuredRoot)) {
+  // Hall owns this runtime. HALL_HERMES_ROUTER_ROOT is accepted only during
+  // migration for installations that still carry the former external runner.
+  const configuredRoot = options.parentEnv.HALL_HERMES_ROUTER_ROOT?.trim();
+  const runtimeRoot =
+    configuredRoot !== undefined && configuredRoot.length > 0 && pathApi.isAbsolute(configuredRoot)
+      ? configuredRoot
+      : (options.runtimeRoot ?? bundledRuntimeRoot(options.platform));
+  if (options.fs.isDirectory !== undefined && !options.fs.isDirectory(runtimeRoot)) {
     return { ok: false, reason: "root_not_found" };
   }
 
-  const runnerPath = pathApi.resolve(configuredRoot, HERMES_RUNNER_FILENAME);
+  const runnerPath = pathApi.resolve(runtimeRoot, HERMES_RUNNER_FILENAME);
   if (!options.fs.isFile(runnerPath)) return { ok: false, reason: "runner_not_found" };
 
   const configuredPython = options.parentEnv.HALL_HERMES_PYTHON?.trim();
@@ -248,11 +259,7 @@ export async function detectHermesRouter(
   const configuration = resolveHermesRuntimeConfiguration(options);
   if (!configuration.ok) {
     const diagnosticMessage =
-      configuration.reason === "root_not_configured"
-        ? ROOT_NOT_CONFIGURED_MESSAGE
-        : configuration.reason === "root_not_found"
-          ? ROOT_NOT_FOUND_MESSAGE
-          : RUNNER_NOT_FOUND_MESSAGE;
+      configuration.reason === "root_not_found" ? ROOT_NOT_FOUND_MESSAGE : RUNNER_NOT_FOUND_MESSAGE;
     return unavailable(diagnosticMessage);
   }
   const processResult = await options.processRunner.run({
@@ -305,5 +312,6 @@ export function createDefaultHermesDetectionOptions(
     fs: overrides.fs ?? realFileSystemProbe,
     processRunner: overrides.processRunner ?? nodeDetectionProcessRunner,
     isolatedExecutionEnabled: overrides.isolatedExecutionEnabled ?? false,
+    ...(overrides.runtimeRoot === undefined ? {} : { runtimeRoot: overrides.runtimeRoot }),
   };
 }

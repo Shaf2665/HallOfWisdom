@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Disabled Hall adapter with normalized execution lifecycle for the local Hermes Router coding runtime.",
+  "description": "Hall-owned coding runtime adapter that uses Hermes Router solely for routed inference.",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "sideEffects": false,
@@ -14,7 +14,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "runtime"
   ],
   "engines": {
     "node": ">=22.13.0 <23 || >=24.11.0 <25"

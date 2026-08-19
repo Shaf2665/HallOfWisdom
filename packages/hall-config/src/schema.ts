@@ -24,7 +24,9 @@ const hermesRouterBaseUrlSchema = boundedNonBlankString(2048).superRefine((value
 
 export const HermesRouterConfigSchema = z
   .object({
-    runtimeRoot: boundedNonBlankString(4096),
+    // Retained only so existing configuration files remain readable. Hall now
+    // ships and owns the execution runtime; new setup never requires this.
+    runtimeRoot: boundedNonBlankString(4096).optional(),
     routerBaseUrl: hermesRouterBaseUrlSchema,
     pythonPath: boundedNonBlankString(4096).optional(),
   })

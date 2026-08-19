@@ -606,6 +606,122 @@ describe("createMockAgentServerComposition", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(composition.ceoExecution.planRunStore.getRun(runId).status).toBe("running");
   });
+
+  it("Issue #23 — a CEO-delegated child task inherits its parent Gateway task's attachments through the real composition wiring (ref box + real CeoPlanStorePort, no fake)", async () => {
+    const composition = createMockAgentServerComposition(buildOptions("success"));
+    const { taskStore, boardStore, messageStore, ceoPlans, attachmentMaterializer } = composition;
+
+    const now = "2026-08-15T00:00:00.000Z";
+    const parentTaskId = "gateway-parent-task-1";
+    taskStore.add({
+      task: {
+        taskId: parentTaskId,
+        projectId: "project-1",
+        title: "Analyze the attached file",
+        description: "Describe what is in the attached file.",
+        priority: "normal",
+        status: "backlog",
+        dependencyTaskIds: [],
+        createdAt: now,
+        updatedAt: now,
+        source: "wisdom_gateway",
+        // Matches MockAgentAdapter's own detect() output — this test is
+        // about attachment inheritance (Part 2), not vision routing (Part
+        // 3, covered elsewhere), so the attachment below is deliberately
+        // non-image (kind: "file") — an image would bake `vision.image`
+        // into the plan and make MockAgentAdapter ineligible, and no
+        // child task would ever be created to check inheritance on.
+        requirements: { requiredCapabilities: [], allowedExecutionTrust: ["simulated"] },
+      },
+      runId: undefined,
+      adapterId: undefined,
+      agentId: undefined,
+      eventCount: 0,
+      lastSequence: undefined,
+      terminalEventType: undefined,
+      failure: undefined,
+      cancellationRequested: false,
+      createdAt: now,
+      startedAt: undefined,
+      completedAt: undefined,
+      assignedExecutionTrust: undefined,
+    });
+
+    const board = boardStore.ensureTaskBoard(parentTaskId, now).board;
+    messageStore.registerBoard(board.boardId);
+    const parentAttachment = {
+      attachmentId: "11111111-1111-4111-8111-111111111111",
+      filename: "notes.txt",
+      mimeType: "text/plain",
+      byteSize: 12,
+      kind: "file" as const,
+    };
+    messageStore.append(board.boardId, {
+      messageId: "msg-1",
+      boardId: board.boardId,
+      author: { kind: "human", displayName: "Test User" },
+      text: "here are some notes",
+      attachments: [parentAttachment],
+      createdAt: now,
+    });
+
+    // A direct (never-delegated) task must still see only its own board —
+    // proven here, through the same real wiring, not a fake.
+    const directTaskId = "direct-task-1";
+    taskStore.add({
+      task: {
+        taskId: directTaskId,
+        projectId: "project-1",
+        title: "Unrelated direct task",
+        description: "Not part of any CEO plan.",
+        priority: "normal",
+        status: "backlog",
+        dependencyTaskIds: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+      runId: undefined,
+      adapterId: undefined,
+      agentId: undefined,
+      eventCount: 0,
+      lastSequence: undefined,
+      terminalEventType: undefined,
+      failure: undefined,
+      cancellationRequested: false,
+      createdAt: now,
+      startedAt: undefined,
+      completedAt: undefined,
+      assignedExecutionTrust: undefined,
+    });
+    expect(attachmentMaterializer.snapshotAttachments(directTaskId).attachments).toEqual([]);
+
+    const { plan } = await ceoPlans.orchestrator.createPlan(parentTaskId, undefined);
+    await ceoPlans.orchestrator.submit(plan.id, ceoPlans.orchestrator.getMutationToken(plan.id));
+    const version = ceoPlans.orchestrator.getVersion(plan.id, 1);
+    await ceoPlans.orchestrator.decideApproval(
+      plan.id,
+      ceoPlans.orchestrator.getMutationToken(plan.id),
+      1,
+      version.contentHash,
+      "approve",
+      undefined,
+    );
+    const delegated = await ceoPlans.orchestrator.delegate(
+      plan.id,
+      ceoPlans.orchestrator.getMutationToken(plan.id),
+    );
+    const childTaskId = delegated.childTasks[0]?.task.taskId;
+    expect(childTaskId).toBeDefined();
+    if (childTaskId === undefined) return;
+
+    // The real end-to-end mechanism: findPlanIdByChildTaskId (InMemoryCeoPlanStore's
+    // real reverse index, populated by a real recordDelegation call) →
+    // getPlan(planId).parentTaskId → the parent's own board — reached only
+    // through the ref box `createMockAgentServerComposition` wires between
+    // `createCoreStoresComposition` and `createCeoPlanComposition`.
+    const childSnapshot = attachmentMaterializer.snapshotAttachments(childTaskId);
+    expect(childSnapshot.attachments).toEqual([parentAttachment]);
+  });
 });
 
 function makeTempDir(prefix: string): string {

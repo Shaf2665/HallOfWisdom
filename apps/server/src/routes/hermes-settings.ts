@@ -1,4 +1,3 @@
-import path from "node:path";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { boundedNonBlankString } from "@hall-of-wisdom/protocol";
@@ -56,7 +55,6 @@ async function buildStatus(deps: HermesSettingsRouteDeps) {
       ...(savedConfig === undefined
         ? {}
         : {
-            runtimeRoot: savedConfig.runtimeRoot,
             routerBaseUrl: savedConfig.routerBaseUrl,
             ...(savedConfig.pythonPath === undefined ? {} : { pythonPath: savedConfig.pythonPath }),
           }),
@@ -70,7 +68,6 @@ async function buildStatus(deps: HermesSettingsRouteDeps) {
     ...(effective.savedConfig === undefined
       ? {}
       : {
-          runtimeRoot: effective.savedConfig.runtimeRoot,
           routerBaseUrl: effective.savedConfig.routerBaseUrl,
           ...(effective.savedConfig.pythonPath === undefined
             ? {}
@@ -133,13 +130,6 @@ export function registerHermesSettingsRoutes(
       );
     }
 
-    const runtimeRoot = parsed.data.runtimeRoot.trim();
-    if (!path.isAbsolute(runtimeRoot)) {
-      throw new InvalidRequestError("Check the Hermes Router setup fields and try again.", [
-        { path: "runtimeRoot", message: "must be an absolute folder path" },
-      ]);
-    }
-
     const loaded = tryLoadConfig();
     if (loaded === undefined) {
       throw new InvalidRequestError(
@@ -160,7 +150,6 @@ export function registerHermesSettingsRoutes(
     const updatedConfig = {
       ...loaded.config,
       hermesRouter: {
-        runtimeRoot,
         routerBaseUrl: parsed.data.routerBaseUrl.trim(),
         ...(parsed.data.pythonPath === undefined
           ? {}

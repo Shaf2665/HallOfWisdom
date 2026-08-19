@@ -355,7 +355,7 @@ export function getAdapter(
 }
 
 export interface SaveHermesSettingsRequestBody {
-  readonly runtimeRoot: string;
+  readonly runtimeRoot?: string;
   readonly routerBaseUrl: string;
   readonly apiKey?: string;
   readonly pythonPath?: string;
@@ -623,10 +623,12 @@ export async function uploadBoardAttachment(
 
   let response: Response;
   try {
-    response = await fetch(
-      `${baseUrl}/api/v1/boards/${encodeURIComponent(boardId)}/attachments`,
-      { method: "POST", body: formData, signal, credentials: "include" },
-    );
+    response = await fetch(`${baseUrl}/api/v1/boards/${encodeURIComponent(boardId)}/attachments`, {
+      method: "POST",
+      body: formData,
+      signal,
+      credentials: "include",
+    });
   } catch {
     if (signal.aborted) {
       throw new ApiClientError("TIMEOUT", "The request to Hall Core timed out or was cancelled.");

@@ -49,6 +49,18 @@ export interface CeoPlannerInput {
   /** Already-detected candidates for this call — the planner itself never calls `adapter.detect()`; see `ceo-plan-orchestrator.ts`. */
   readonly routingCandidates: readonly RoutingCandidateInput[];
   readonly planningInstructions: string | undefined;
+  /**
+   * Issue #23 — whether the parent task's own Communication Board carries
+   * at least one human-authored, image-kind attachment. Metadata only
+   * (an attachment's `kind`, itself always server-derived from MIME type —
+   * see `classifyAttachmentKind`), never the attachment's bytes: the CEO
+   * planner remains deterministic and never inspects image pixels. A
+   * planner uses this only to decide whether a step's `requirements`
+   * should require `vision.image` (`withVisionRequirementForImage` in
+   * `ceo-plan-routing.ts`) — it is not itself a capability or a routing
+   * decision.
+   */
+  readonly hasImageAttachment: boolean;
 }
 
 /**

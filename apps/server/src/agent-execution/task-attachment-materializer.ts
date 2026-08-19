@@ -10,6 +10,7 @@ import type { AttachmentBlobStore } from "../boards/attachment-blob-store.js";
 import type { BoardStorePort } from "../boards/board-store-port.js";
 import { taskBoardId } from "../boards/board-store.js";
 import type { MessageStorePort } from "../boards/message-store-port.js";
+import type { CeoPlanStorePort } from "../ceo-plans/ceo-plan-store-port.js";
 import {
   AttachmentBlobUnavailableError,
   AttachmentMaterializationLimitExceededError,
@@ -46,6 +47,16 @@ export interface HallTaskAttachmentMaterializerOptions {
   readonly boardStore: BoardStorePort;
   readonly messageStore: MessageStorePort;
   readonly blobStore: AttachmentBlobStore;
+  /**
+   * Lazily resolves the CEO plan store, for inheriting a delegated child
+   * task's parent Gateway attachments (Issue #23) — a thunk, not the store
+   * itself, because at composition time the plan store does not exist yet
+   * when this materializer is constructed (see `mock-agent-composition-root.ts`'s
+   * `ceoOrchestratorRef`-style forward reference). `undefined`, or a thunk
+   * that itself resolves to `undefined`, means "no CEO plan store wired" —
+   * every task then snapshots exactly as it always has: its own board only.
+   */
+  readonly getCeoPlanStore?: (() => CeoPlanStorePort | undefined) | undefined;
 }
 
 /**
@@ -59,26 +70,59 @@ export interface HallTaskAttachmentMaterializerOptions {
  * a board with no human attachments, snapshots to an empty list — this is
  * what keeps a text-only task's execution byte-identical to before this
  * class existed.
+ *
+ * A CEO-delegated child task additionally inherits its CEO plan's parent
+ * Gateway task's own human attachments (Issue #23), deduplicated by
+ * `attachmentId` against the child's own — found via
+ * `CeoPlanStorePort.findPlanIdByChildTaskId`, never by re-deriving the
+ * relationship from anywhere else. Nothing is copied into another board or
+ * blob store; only the snapshot (metadata) is merged, and the underlying
+ * blob is still read once, lazily, at materialize time.
  */
 export class HallTaskAttachmentMaterializer implements TaskAttachmentMaterializer {
   readonly #boardStore: BoardStorePort;
   readonly #messageStore: MessageStorePort;
   readonly #blobStore: AttachmentBlobStore;
+  readonly #getCeoPlanStore: (() => CeoPlanStorePort | undefined) | undefined;
 
   constructor(options: HallTaskAttachmentMaterializerOptions) {
     this.#boardStore = options.boardStore;
     this.#messageStore = options.messageStore;
     this.#blobStore = options.blobStore;
+    this.#getCeoPlanStore = options.getCeoPlanStore;
   }
 
   snapshotAttachments(taskId: string): TaskAttachmentSnapshot {
+    const ownAttachments = this.#snapshotBoardAttachments(taskId);
+    const inheritedAttachments = this.#snapshotInheritedAttachments(taskId);
+    if (inheritedAttachments.length === 0) return { attachments: ownAttachments };
+
+    const seenAttachmentIds = new Set(ownAttachments.map((attachment) => attachment.attachmentId));
+    const merged = [...ownAttachments];
+    for (const attachment of inheritedAttachments) {
+      if (seenAttachmentIds.has(attachment.attachmentId)) continue;
+      seenAttachmentIds.add(attachment.attachmentId);
+      merged.push(attachment);
+    }
+    return { attachments: merged };
+  }
+
+  #snapshotBoardAttachments(taskId: string): MessageAttachment[] {
     const boardId = taskBoardId(taskId);
-    if (!this.#boardStore.has(boardId)) return { attachments: [] };
-    const attachments = this.#messageStore
+    if (!this.#boardStore.has(boardId)) return [];
+    return this.#messageStore
       .list(boardId)
       .filter((message) => message.author.kind === "human")
       .flatMap((message) => message.attachments ?? []);
-    return { attachments };
+  }
+
+  #snapshotInheritedAttachments(taskId: string): MessageAttachment[] {
+    const planStore = this.#getCeoPlanStore?.();
+    if (planStore === undefined) return [];
+    const planId = planStore.findPlanIdByChildTaskId(taskId);
+    if (planId === undefined) return [];
+    const parentTaskId = planStore.getPlan(planId).parentTaskId;
+    return this.#snapshotBoardAttachments(parentTaskId);
   }
 
   materializeSnapshot(
@@ -89,14 +133,15 @@ export class HallTaskAttachmentMaterializer implements TaskAttachmentMaterialize
     if (attachments.length === 0) return [];
 
     const totalBytes = attachments.reduce((sum, attachment) => sum + attachment.byteSize, 0);
-    if (attachments.length > MAX_TASK_ATTACHMENTS || totalBytes > MAX_TASK_ATTACHMENTS_TOTAL_BYTES) {
+    if (
+      attachments.length > MAX_TASK_ATTACHMENTS ||
+      totalBytes > MAX_TASK_ATTACHMENTS_TOTAL_BYTES
+    ) {
       throw new AttachmentMaterializationLimitExceededError();
     }
 
     mkdirSync(path.join(agentWorkingDirectory, HALL_ATTACHMENTS_DIRNAME), { recursive: true });
-    return attachments.map((attachment) =>
-      this.#materializeOne(attachment, agentWorkingDirectory),
-    );
+    return attachments.map((attachment) => this.#materializeOne(attachment, agentWorkingDirectory));
   }
 
   #materializeOne(

@@ -36,6 +36,7 @@ import {
 } from "../ceo-plans/ceo-plan-composition.js";
 import { wrapTaskStoreWithMutationHook } from "../ceo-plans/task-mutation-hook.js";
 import type { CeoPlanOrchestrator } from "../ceo-plans/ceo-plan-orchestrator.js";
+import type { CeoPlanStorePort } from "../ceo-plans/ceo-plan-store-port.js";
 import {
   createCeoPlanExecutionComposition,
   type CeoPlanExecutionComposition,
@@ -55,7 +56,10 @@ import { IsolatedAgentExecutionCoordinator } from "../agent-execution/isolated-a
 import type { AgentWorktreeValidator } from "../agent-execution/isolated-agent-execution-coordinator.js";
 import { GitArtifactCollector } from "../agent-execution/git-artifact-collector.js";
 import { AgentExecutionArtifactTerminalizer } from "../agent-execution/agent-execution-artifact-terminalizer.js";
-import { HallTaskAttachmentMaterializer } from "../agent-execution/task-attachment-materializer.js";
+import {
+  HallTaskAttachmentMaterializer,
+  type TaskAttachmentMaterializer,
+} from "../agent-execution/task-attachment-materializer.js";
 
 export interface ServerCompositionOptions {
   /** Canonical, already-validated workspace root. */
@@ -143,6 +147,8 @@ export interface ServerComposition {
    * needs reconciling.
    */
   readonly agentExecutionArtifactTerminalizer: AgentExecutionArtifactTerminalizer;
+  /** See `CoreStoresComposition.attachmentMaterializer`'s doc comment — same instance, passed through unchanged. */
+  readonly attachmentMaterializer: TaskAttachmentMaterializer;
   /**
    * Arms the task-mutation bridge that lets `ceoExecution.scheduler` react
    * to child-task completions. Deliberately NOT armed automatically by
@@ -195,6 +201,8 @@ export interface CoreStoresCompositionOptions {
   readonly onTaskMutated?: ((taskId: string) => void) | undefined;
   /** See `ServerCompositionOptions.attachmentBlobRootDir`'s doc comment — same optional/fallback behavior. */
   readonly attachmentBlobRootDir?: string | undefined;
+  /** Forwarded to `HallTaskAttachmentMaterializer` — see that option's own doc comment for why this is a thunk, not the store itself. */
+  readonly getCeoPlanStore?: (() => CeoPlanStorePort | undefined) | undefined;
 }
 
 export interface CoreStoresComposition {
@@ -212,6 +220,8 @@ export interface CoreStoresComposition {
   readonly agentExecutionArtifactStore: AgentExecutionArtifactStorePort;
   readonly agentWorktreeManager: AgentWorktreeManager | undefined;
   readonly agentExecutionArtifactTerminalizer: AgentExecutionArtifactTerminalizer;
+  /** Exposed (rather than only handed to `TaskOrchestrator` internally) so composition-level tests can verify Issue #23's CEO-plan attachment inheritance wiring directly, without needing a real worktree/execution. */
+  readonly attachmentMaterializer: TaskAttachmentMaterializer;
 }
 
 /**
@@ -331,6 +341,7 @@ export function createCoreStoresComposition(
     boardStore,
     messageStore,
     blobStore: attachmentBlobStore,
+    getCeoPlanStore: options.getCeoPlanStore,
   });
 
   const orchestrator = new TaskOrchestrator({
@@ -360,6 +371,7 @@ export function createCoreStoresComposition(
     agentExecutionArtifactStore,
     agentWorktreeManager,
     agentExecutionArtifactTerminalizer: artifactTerminalizer,
+    attachmentMaterializer,
   };
 }
 
@@ -393,6 +405,13 @@ export function createMockAgentServerComposition(
   // ever read after this whole function has returned (the earliest any
   // task mutation could occur is a subsequent route call).
   const ceoOrchestratorRef: { current: CeoPlanOrchestrator | undefined } = { current: undefined };
+  // Same forward-reference need as `ceoOrchestratorRef`, one level down:
+  // `HallTaskAttachmentMaterializer` (built inside `createCoreStoresComposition`,
+  // below) needs to resolve a delegated child task's CEO plan (Issue #23,
+  // attachment inheritance), but the CEO plan store does not exist until
+  // `createCeoPlanComposition` runs, further down this function, after
+  // `createCoreStoresComposition` has already returned.
+  const ceoPlanStoreRef: { current: CeoPlanStorePort | undefined } = { current: undefined };
   // Phase 15 — same ref pattern, for the scheduler this composition builds
   // further below. Deliberately forwarded ONLY on a terminal child-task
   // status (`completed`/`failed`/`cancelled`), for two reasons: (1) it is
@@ -418,6 +437,7 @@ export function createMockAgentServerComposition(
     isolatedAgentAdapterIds: options.isolatedAgentAdapterIds,
     allowInMemoryAgentIsolation: options.allowInMemoryAgentIsolation,
     attachmentBlobRootDir: options.attachmentBlobRootDir,
+    getCeoPlanStore: () => ceoPlanStoreRef.current,
     onTaskMutated: (taskId) => {
       ceoOrchestratorRef.current?.onChildTaskMutated(taskId);
       const scheduler = schedulerRef.current;
@@ -447,6 +467,7 @@ export function createMockAgentServerComposition(
     db: options.db,
   });
   ceoOrchestratorRef.current = ceoPlans.orchestrator;
+  ceoPlanStoreRef.current = ceoPlans.planStore;
 
   const ceoExecution = createCeoPlanExecutionComposition({
     taskStore: stores.taskStore,

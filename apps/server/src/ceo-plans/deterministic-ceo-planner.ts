@@ -5,7 +5,7 @@ import type {
   CeoPlannerPort,
   CeoPlannerResult,
 } from "./ceo-planner-port.js";
-import { recommendStepAdapter } from "./ceo-plan-routing.js";
+import { recommendStepAdapter, withVisionRequirementForImage } from "./ceo-plan-routing.js";
 
 /** `exactOptionalPropertyTypes` forbids assigning `recommendedAdapterId: undefined` outright — this omits the key entirely when there is no recommendation, exactly like every other optional field in this codebase. */
 function optionalRecommendedAdapter(
@@ -61,7 +61,16 @@ export function createDeterministicCeoPlanner(): CeoPlannerPort {
       }
 
       const title = input.parentTask.title;
-      const requirements = input.parentTask.requirements;
+      // Issue #23 — the parent task's own requirements, plus `vision.image`
+      // when the parent's Communication Board carries a human-authored
+      // image attachment (`withVisionRequirementForImage`'s doc comment).
+      // All three generic steps inherit the same original user context, so
+      // all three carry the same requirements — see this module's own doc
+      // comment on why that is safe for a generic, non-semantic plan.
+      const requirements = withVisionRequirementForImage(
+        input.parentTask.requirements,
+        input.hasImageAttachment,
+      );
       const routing = recommendStepAdapter(requirements, input.routingCandidates);
       const truncatedDescription = truncateForBound(description, MAX_STEP_TEXT_LENGTH - 80);
 
@@ -72,6 +81,11 @@ export function createDeterministicCeoPlanner(): CeoPlannerPort {
       if (requirements === undefined) {
         constraints.push(
           "The parent task has no capability or execution-trust requirements set, so no step below carries an adapter recommendation.",
+        );
+      }
+      if (input.hasImageAttachment) {
+        constraints.push(
+          "The parent task's Communication Board carries an image attachment, so every step below requires verified vision capability.",
         );
       }
 

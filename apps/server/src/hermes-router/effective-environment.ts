@@ -36,9 +36,6 @@ export function readEffectiveHermesEnvironment(
     : tryLoadHermesRouterSecret();
   const environment: NodeJS.ProcessEnv = { ...parentEnv };
 
-  if (!hasValue(environment[HERMES_ROOT_ENV]) && savedConfig !== undefined) {
-    environment[HERMES_ROOT_ENV] = savedConfig.runtimeRoot;
-  }
   if (!hasValue(environment[HERMES_BASE_URL_ENV]) && savedConfig !== undefined) {
     environment[HERMES_BASE_URL_ENV] = savedConfig.routerBaseUrl;
   }

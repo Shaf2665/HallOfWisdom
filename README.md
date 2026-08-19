@@ -110,20 +110,21 @@ session.
 
 Hermes is **Connected** only when both conditions are true:
 
-1. the local Hermes runtime and configured router pass detection; and
+1. Hall's bundled Hermes runtime and the configured router pass detection; and
 2. Hall is running with durable SQLite state and its Hall-owned agent-worktree infrastructure.
 
 Otherwise Hermes remains **Not connected** and the card displays the server-provided reason. Hermes
 cannot run from Hall's ephemeral mode or directly against the source checkout.
 
-Open **Settings → Hermes Router**, click **Set up Hermes**, and enter the runtime folder, router base
-URL, and Hermes proxy/client key. Python is optional under **Advanced**. Hall saves non-secret values
+Open **Settings → Hermes Router**, click **Set up Hermes**, and enter the router base
+URL and Hermes proxy/client key. Python is optional under **Advanced**. Hall saves non-secret values
 in its normal local configuration and keeps the client key in a separate user-local secret file;
 the UI never displays a saved key. Never enter an upstream OpenRouter or provider key.
 
-Existing `HALL_HERMES_ROUTER_ROOT`, `HERMES_ROUTER_BASE_URL`, `HERMES_ROUTER_API_KEY`, and
-`HALL_HERMES_PYTHON` values remain supported as advanced overrides. They take precedence over saved
-settings when Hall Core starts with them.
+Existing `HALL_HERMES_ROUTER_ROOT` remains a temporary compatibility override for
+the former external runner. `HERMES_ROUTER_BASE_URL`, `HERMES_ROUTER_API_KEY`, and
+`HALL_HERMES_PYTHON` remain supported advanced overrides and take precedence over
+saved settings when Hall Core starts with them.
 
 ### 6. Create and run your first task
 

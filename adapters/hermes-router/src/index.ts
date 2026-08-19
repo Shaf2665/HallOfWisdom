@@ -9,6 +9,7 @@ export { HermesRouterAdapter, type HermesRouterAdapterConfig } from "./hermes-ro
 export {
   HERMES_PROTOCOL_VERSION,
   HERMES_RUNNER_FILENAME,
+  HERMES_RUNTIME_DIRECTORY,
   HERMES_EXECUTION_DISABLED_MESSAGE,
   detectHermesRouter,
   resolveHermesRuntimeConfiguration,

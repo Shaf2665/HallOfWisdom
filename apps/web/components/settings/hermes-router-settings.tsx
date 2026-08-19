@@ -18,7 +18,6 @@ export function HermesRouterSettings({ baseUrl }: { readonly baseUrl: string }) 
   const [working, setWorking] = useState(false);
   const [editing, setEditing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [runtimeRoot, setRuntimeRoot] = useState("");
   const [routerBaseUrl, setRouterBaseUrl] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [pythonPath, setPythonPath] = useState("");
@@ -33,7 +32,6 @@ export function HermesRouterSettings({ baseUrl }: { readonly baseUrl: string }) 
       .then((response) => {
         if (controller.signal.aborted) return;
         setStatus(response);
-        setRuntimeRoot(response.runtimeRoot ?? "");
         setRouterBaseUrl(response.routerBaseUrl ?? "");
         setPythonPath(response.pythonPath ?? "");
         setShowAdvanced(response.pythonPath !== undefined);
@@ -70,7 +68,6 @@ export function HermesRouterSettings({ baseUrl }: { readonly baseUrl: string }) 
       const response = await saveHermesSettings(
         baseUrl,
         {
-          runtimeRoot: runtimeRoot.trim(),
           routerBaseUrl: routerBaseUrl.trim(),
           ...(apiKey.trim().length === 0 ? {} : { apiKey: apiKey.trim() }),
           ...(pythonPath.trim().length === 0 ? {} : { pythonPath: pythonPath.trim() }),
@@ -95,7 +92,7 @@ export function HermesRouterSettings({ baseUrl }: { readonly baseUrl: string }) 
         <div>
           <h3 className="font-semibold text-stone-900 dark:text-stone-100">Hermes Router</h3>
           <p className="text-xs text-stone-500 dark:text-stone-400">
-            Connect Hall to your local Hermes runtime and router.
+            Connect Hall&apos;s built-in Hermes runtime to your Hermes Router inference gateway.
           </p>
         </div>
         <span
@@ -154,22 +151,6 @@ export function HermesRouterSettings({ baseUrl }: { readonly baseUrl: string }) 
         </div>
       ) : (
         <form className="flex flex-col gap-4" onSubmit={(event) => void handleSave(event)}>
-          <label className="flex flex-col gap-1 text-sm font-medium">
-            Hermes runtime folder
-            <input
-              required
-              value={runtimeRoot}
-              onChange={(event) => {
-                setRuntimeRoot(event.target.value);
-              }}
-              placeholder="Absolute path to your Hermes Router folder"
-              className="rounded border border-stone-300 bg-white px-3 py-2 font-normal dark:border-stone-700 dark:bg-stone-950"
-            />
-            <span className="text-xs font-normal text-stone-500 dark:text-stone-400">
-              The folder containing hermes_agent_runner.py.
-            </span>
-          </label>
-
           <label className="flex flex-col gap-1 text-sm font-medium">
             Router base URL
             <input
@@ -248,7 +229,6 @@ export function HermesRouterSettings({ baseUrl }: { readonly baseUrl: string }) 
               disabled={working}
               onClick={() => {
                 setEditing(false);
-                setRuntimeRoot(status?.runtimeRoot ?? "");
                 setRouterBaseUrl(status?.routerBaseUrl ?? "");
                 setPythonPath(status?.pythonPath ?? "");
                 setApiKey("");

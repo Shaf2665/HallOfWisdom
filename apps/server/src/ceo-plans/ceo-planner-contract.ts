@@ -65,6 +65,7 @@ export function defineCeoPlannerContractTests(
         parentTask: task,
         routingCandidates: [],
         planningInstructions: undefined,
+        hasImageAttachment: false,
       });
       expect(JSON.stringify(task)).toBe(frozen);
     });
@@ -75,6 +76,7 @@ export function defineCeoPlannerContractTests(
         parentTask: makeTask(),
         routingCandidates: [candidate()],
         planningInstructions: undefined,
+        hasImageAttachment: false,
       };
       // `candidate()` above is a plain data object (RoutingCandidateInput),
       // never an AgentAdapter — there is no `startTask`/`detect` method on
@@ -91,6 +93,7 @@ export function defineCeoPlannerContractTests(
         parentTask: makeTask(),
         routingCandidates: [candidate()],
         planningInstructions: undefined,
+        hasImageAttachment: false,
       };
       const first = planner.generatePlan(input);
       const second = planner.generatePlan(input);
@@ -103,6 +106,7 @@ export function defineCeoPlannerContractTests(
         parentTask: makeTask({ requirements: ISOLATED_ONLY_REQUIREMENTS }),
         routingCandidates: [candidate()],
         planningInstructions: undefined,
+        hasImageAttachment: false,
       });
       if (result.kind !== "plan") return; // scripted planners may legitimately choose to block; nothing to assert here
       for (const step of result.draft.steps) {
@@ -119,6 +123,7 @@ export function defineCeoPlannerContractTests(
           candidate({ adapterId: "hall.codex", executionTrust: "trusted_local" }),
         ],
         planningInstructions: undefined,
+        hasImageAttachment: false,
       });
       if (result.kind !== "plan") return;
       for (const step of result.draft.steps) {
@@ -137,6 +142,7 @@ export function defineCeoPlannerContractTests(
           candidate({ adapterId: "hall.mock-agent", executionTrust: "simulated" }),
         ],
         planningInstructions: undefined,
+        hasImageAttachment: false,
       });
       if (result.kind !== "plan") return;
       const recommended = new Set(result.draft.steps.map((step) => step.recommendedAdapterId));
@@ -150,6 +156,7 @@ export function defineCeoPlannerContractTests(
         parentTask: makeTask({ description: "" }),
         routingCandidates: [],
         planningInstructions: undefined,
+        hasImageAttachment: false,
       });
       expect(["blocked", "plan"]).toContain(result.kind);
       if (result.kind === "blocked") {
@@ -164,6 +171,7 @@ export function defineCeoPlannerContractTests(
         parentTask: makeTask(),
         routingCandidates: [candidate()],
         planningInstructions: undefined,
+        hasImageAttachment: false,
       });
       if (result.kind !== "plan") return;
 

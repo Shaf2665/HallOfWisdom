@@ -14,6 +14,7 @@ import {
 import type { TaskRecord } from "../tasks/task-record.js";
 import type { TaskStorePort } from "../tasks/task-store-port.js";
 import type { BoardStorePort } from "../boards/board-store-port.js";
+import { taskBoardId } from "../boards/board-store.js";
 import type { MessageStorePort } from "../boards/message-store-port.js";
 import type { MessageBus } from "../boards/message-bus.js";
 import { detectRoutingCandidates } from "../routing/candidate-detection.js";
@@ -28,7 +29,7 @@ import {
 } from "../errors/app-error.js";
 import type { CeoPlanStorePort, DelegationLink } from "./ceo-plan-store-port.js";
 import type { CeoPlannerPort } from "./ceo-planner-port.js";
-import { recommendStepAdapter } from "./ceo-plan-routing.js";
+import { recommendStepAdapter, withVisionRequirementForImage } from "./ceo-plan-routing.js";
 import { computeCeoPlanContentHash } from "./ceo-plan-content-hash.js";
 import type { CeoPlanEventBus } from "./ceo-plan-events.js";
 import type { CeoPlanMutationTokenIssuer } from "./ceo-plan-mutation-token.js";
@@ -140,6 +141,28 @@ export class CeoPlanOrchestrator {
     return currentRevision;
   }
 
+  /**
+   * Issue #23 — metadata-only check (an attachment's `kind`, never its
+   * bytes) for whether `taskId`'s own Communication Board carries a
+   * human-authored image attachment. Mirrors
+   * `TaskAttachmentMaterializer#snapshotAttachments`'s own-board lookup
+   * exactly (human-authored messages on `task:<taskId>`), duplicated
+   * rather than shared because this orchestrator has no other reason to
+   * depend on the materializer, and the two independent, small
+   * implementations reading the same board/message ports are simpler than
+   * a new cross-module dependency for four lines of logic.
+   */
+  #hasImageAttachment(taskId: string): boolean {
+    const boardId = taskBoardId(taskId);
+    if (!this.#boardStore.has(boardId)) return false;
+    return this.#messageStore
+      .list(boardId)
+      .filter((message) => message.author.kind === "human")
+      .some((message) =>
+        (message.attachments ?? []).some((attachment) => attachment.kind === "image"),
+      );
+  }
+
   #postAuditMessage(
     parentTaskId: string,
     text: string,
@@ -209,6 +232,7 @@ export class CeoPlanOrchestrator {
       parentTask: parent.task,
       routingCandidates: candidates,
       planningInstructions,
+      hasImageAttachment: this.#hasImageAttachment(parentTaskId),
     });
     if (result.kind === "blocked") {
       throw new CeoPlanningBlockedError(result.reason);
@@ -526,6 +550,16 @@ export class CeoPlanOrchestrator {
     }
 
     const candidates = await detectRoutingCandidates(this.#registry);
+    // Issue #23 — recomputed fresh, right before revalidating every step,
+    // so an image attached to the parent *after* this plan was created (or
+    // a step whose `requirements` an edit/re-version dropped) still blocks
+    // delegation to a non-vision adapter. Applied ephemerally to the
+    // eligibility check only — never persisted onto the child task below,
+    // exactly like `TaskOrchestrator#routeAndAssign`'s own routing-time-
+    // only augmentation (`requirementsWithVisionIfImageAttached`'s doc
+    // comment: "a synthetic, attachment-derived requirement must never
+    // outlive the attachment it came from").
+    const parentHasImageAttachment = this.#hasImageAttachment(plan.parentTaskId);
     const resolvedByStepId = new Map<
       string,
       { adapterId: string; agentId: string; executionTrust: string }
@@ -545,8 +579,12 @@ export class CeoPlanOrchestrator {
           `Step "${step.id}"'s adapter "${chosenAdapterId}" is not currently registered.`,
         );
       }
-      if (step.requirements !== undefined) {
-        const eligibility = evaluateCandidateEligibility(step.requirements, candidate);
+      const effectiveRequirements = withVisionRequirementForImage(
+        step.requirements,
+        parentHasImageAttachment,
+      );
+      if (effectiveRequirements !== undefined) {
+        const eligibility = evaluateCandidateEligibility(effectiveRequirements, candidate);
         if (!eligibility.eligible) {
           throw new CeoPlanDelegationBlockedError(
             planId,

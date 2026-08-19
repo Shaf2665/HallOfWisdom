@@ -19,8 +19,9 @@ export function HermesSetupGuide() {
       <details className="text-xs text-stone-500 dark:text-stone-400">
         <summary className="cursor-pointer underline">Environment overrides</summary>
         <p className="mt-2">
-          Existing HALL_HERMES_ROUTER_ROOT, HERMES_ROUTER_BASE_URL, HERMES_ROUTER_API_KEY, and
-          HALL_HERMES_PYTHON values still override saved settings for advanced setups.
+          HERMES_ROUTER_BASE_URL, HERMES_ROUTER_API_KEY, and HALL_HERMES_PYTHON override saved
+          settings for advanced setups. HALL_HERMES_ROUTER_ROOT is a temporary compatibility
+          override for the former external runtime.
         </p>
       </details>
     </section>

@@ -152,7 +152,7 @@ describe("ProviderCard", () => {
   });
 
   it.each([
-    ["unavailable", "Hermes Router runtime root is not configured."],
+    ["unavailable", "Hall's bundled Hermes execution runtime was not found."],
     ["unsupported", "Hermes coding runtime is installed but its configured router is unavailable."],
   ] as const)(
     "shows Hermes as Not connected with server guidance when availability is %s",

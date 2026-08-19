@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { AgentRegistry } from "@hall-of-wisdom/hall-runner";
 import { MockAgentAdapter } from "@hall-of-wisdom/mock-agent";
-import type { CeoPlanEvent } from "@hall-of-wisdom/protocol";
+import type {
+  AgentAdapter,
+  AgentAdapterDescriptor,
+  AgentDetectionResult,
+} from "@hall-of-wisdom/agent-adapter-sdk";
+import type { CeoPlanEvent, MessageAttachment } from "@hall-of-wisdom/protocol";
 import { TaskStore } from "../tasks/task-store.js";
 import { BoardStore } from "../boards/board-store.js";
 import { MessageStore } from "../boards/message-store.js";
@@ -20,9 +25,17 @@ import {
   CeoPlanningBlockedError,
 } from "../errors/app-error.js";
 
-function buildHarness(options: { plannerKind?: "scripted" | "deterministic" } = {}) {
+function buildHarness(
+  options: {
+    plannerKind?: "scripted" | "deterministic";
+    /** Replaces the default single `MockAgentAdapter()` registration entirely, when supplied — used by the vision-aware delegation tests, which need a registry with no non-vision candidate at all so `recommendedAdapterId` resolves deterministically. */
+    adapters?: readonly AgentAdapter[];
+  } = {},
+) {
   const registry = new AgentRegistry();
-  registry.register(new MockAgentAdapter());
+  for (const adapter of options.adapters ?? [new MockAgentAdapter()]) {
+    registry.register(adapter);
+  }
   const taskStore = new TaskStore({ maxTasks: 100 });
   const boardStore = new BoardStore({ maxBoards: 100, taskStore });
   const messageStore = new MessageStore({ maxMessagesPerBoard: 200 });
@@ -91,6 +104,95 @@ function buildHarness(options: { plannerKind?: "scripted" | "deterministic" } = 
     planEventBus,
     parentTaskId,
   };
+}
+
+/** A registrable fixture adapter reporting a *verified* `vision.image` observation — `MockAgentAdapter` never declares vision, so tests that need a genuinely eligible vision candidate register this instead. */
+function buildVisionCapableAdapter(): AgentAdapter {
+  const descriptor: AgentAdapterDescriptor = {
+    adapterId: "hall.vision-fixture",
+    displayName: "Vision Fixture",
+    adapterVersion: "0.0.0-test",
+    integrationLevel: "structured_cli",
+    supportedOperatingSystems: ["windows", "macos", "linux"],
+    supportedAgent: {
+      agentId: "vision-fixture",
+      displayName: "Vision Fixture",
+      adapterId: "hall.vision-fixture",
+      adapterVersion: "0.0.0-test",
+    },
+    capabilities: {
+      streaming: true,
+      cancellation: true,
+      sessionResume: false,
+      toolEvents: true,
+      fileEditing: true,
+      shellExecution: true,
+      subagents: false,
+      mcp: false,
+      acp: false,
+    },
+    declaredCapabilities: ["vision.image", "structured.events", "cancellation"],
+  };
+  const detection: AgentDetectionResult = {
+    installed: true,
+    availability: "available",
+    executionTrust: "isolated",
+    capabilityObservations: [
+      {
+        capability: "vision.image",
+        status: "verified",
+        safeSummary: "Test fixture.",
+        evidence: "environment_probe",
+      },
+      {
+        capability: "structured.events",
+        status: "verified",
+        safeSummary: "Test fixture.",
+        evidence: "environment_probe",
+      },
+      {
+        capability: "cancellation",
+        status: "verified",
+        safeSummary: "Test fixture.",
+        evidence: "environment_probe",
+      },
+    ],
+  };
+  return {
+    descriptor,
+    detect: () => Promise.resolve(detection),
+    startTask: () => Promise.reject(new Error("must never be called by this test suite")),
+  };
+}
+
+function imageAttachment(overrides: Partial<MessageAttachment> = {}): MessageAttachment {
+  return {
+    attachmentId: "11111111-1111-4111-8111-111111111111",
+    filename: "screenshot.png",
+    mimeType: "image/png",
+    byteSize: 2048,
+    kind: "image",
+    ...overrides,
+  };
+}
+
+/** Posts a human-authored board message carrying `attachment` onto `taskId`'s own Communication Board — the same shape a real Gateway/Communication-Board upload produces, built directly against the store ports so tests don't need the HTTP routes. */
+function postHumanAttachment(
+  harness: ReturnType<typeof buildHarness>,
+  taskId: string,
+  attachment: MessageAttachment,
+): void {
+  const { boardStore, messageStore } = harness;
+  const { board, created } = boardStore.ensureTaskBoard(taskId, "2026-01-01T00:00:00.000Z");
+  if (created) messageStore.registerBoard(board.boardId);
+  messageStore.append(board.boardId, {
+    messageId: `msg-${Math.random().toString(36).slice(2)}`,
+    boardId: board.boardId,
+    author: { kind: "human", displayName: "Test User" },
+    text: "here is a screenshot",
+    attachments: [attachment],
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
 }
 
 describe("CeoPlanOrchestrator — plan generation", () => {
@@ -931,5 +1033,236 @@ describe("CeoPlanOrchestrator — mutation token concurrency contract", () => {
     await orchestrator.submit(plan.id, tokenAfterCreate);
     const tokenAfterSubmit = orchestrator.getMutationToken(plan.id);
     expect(tokenAfterSubmit).not.toBe(tokenAfterCreate);
+  });
+});
+
+describe("CeoPlanOrchestrator — vision-aware delegation (Issue #23)", () => {
+  async function approve(
+    orchestrator: ReturnType<typeof buildHarness>["orchestrator"],
+    planId: string,
+  ) {
+    await orchestrator.submit(planId, orchestrator.getMutationToken(planId));
+    const version = orchestrator.getVersion(planId, 1);
+    await orchestrator.decideApproval(
+      planId,
+      orchestrator.getMutationToken(planId),
+      1,
+      version.contentHash,
+      "approve",
+      undefined,
+    );
+    return version;
+  }
+
+  it("bakes vision.image into every step's requirements when the parent task's board has a human image attachment", async () => {
+    const harness = buildHarness({ plannerKind: "deterministic" });
+    const { orchestrator, parentTaskId } = harness;
+    postHumanAttachment(harness, parentTaskId, imageAttachment());
+
+    const { plan } = await orchestrator.createPlan(parentTaskId, undefined);
+    const version = orchestrator.getVersion(plan.id, 1);
+    for (const step of version.steps) {
+      expect(step.requirements?.requiredCapabilities).toContain("vision.image");
+    }
+  });
+
+  it("does not add vision.image for a non-image (file) attachment", async () => {
+    const harness = buildHarness({ plannerKind: "deterministic" });
+    const { orchestrator, parentTaskId } = harness;
+    postHumanAttachment(
+      harness,
+      parentTaskId,
+      imageAttachment({ filename: "notes.txt", mimeType: "text/plain", kind: "file" }),
+    );
+
+    const { plan } = await orchestrator.createPlan(parentTaskId, undefined);
+    const version = orchestrator.getVersion(plan.id, 1);
+    // The default harness parent task already carries its own (non-vision)
+    // requirements, matching `MockAgentAdapter` — a file attachment must
+    // not add `vision.image` on top of them.
+    for (const step of version.steps) {
+      expect(step.requirements?.requiredCapabilities).not.toContain("vision.image");
+    }
+  });
+
+  it("does not mutate the parent task's own persisted requirements when baking vision.image into the plan", async () => {
+    const harness = buildHarness({ plannerKind: "deterministic" });
+    const { orchestrator, taskStore, parentTaskId } = harness;
+    const requirementsBefore = taskStore.get(parentTaskId).task.requirements;
+    postHumanAttachment(harness, parentTaskId, imageAttachment());
+
+    await orchestrator.createPlan(parentTaskId, undefined);
+    expect(taskStore.get(parentTaskId).task.requirements).toEqual(requirementsBefore);
+  });
+
+  it("blocks delegation with CeoPlanDelegationBlockedError when no registered adapter has verified vision.image", async () => {
+    const harness = buildHarness({ plannerKind: "deterministic" });
+    const { orchestrator, taskStore, parentTaskId } = harness;
+    postHumanAttachment(harness, parentTaskId, imageAttachment());
+
+    const { plan } = await orchestrator.createPlan(parentTaskId, undefined);
+    const before = taskStore.list().length;
+    await approve(orchestrator, plan.id);
+
+    await expect(
+      orchestrator.delegate(plan.id, orchestrator.getMutationToken(plan.id)),
+    ).rejects.toThrow(CeoPlanDelegationBlockedError);
+    // Fail-closed: zero child tasks created, exactly like every other
+    // ineligibility case delegation already guards against.
+    expect(taskStore.list().length).toBe(before);
+  });
+
+  it("delegates to the registered vision-capable adapter when the parent has an image attachment", async () => {
+    // A registry with ONLY the vision-capable fixture (no MockAgentAdapter)
+    // and a parent task with no pre-set `requirements`, so the synthesized
+    // vision requirement's own `allowedExecutionTrust` default
+    // (`["isolated", "trusted_local"]`) governs eligibility — the shared
+    // harness's default parent task is deliberately pinned to `["simulated"]`
+    // to match `MockAgentAdapter`, which would make this fixture's
+    // `"isolated"` trust ineligible for an unrelated reason.
+    const harness = buildHarness({
+      plannerKind: "deterministic",
+      adapters: [buildVisionCapableAdapter()],
+    });
+    const { orchestrator, taskStore } = harness;
+    const parentTaskId = "parent-vision-task";
+    taskStore.add({
+      task: {
+        taskId: parentTaskId,
+        projectId: "project-1",
+        title: "Analyze the attached screenshot",
+        description: "Describe what is shown in the attached screenshot.",
+        priority: "normal",
+        status: "backlog",
+        dependencyTaskIds: [],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      runId: undefined,
+      adapterId: undefined,
+      agentId: undefined,
+      eventCount: 0,
+      lastSequence: undefined,
+      terminalEventType: undefined,
+      failure: undefined,
+      cancellationRequested: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      startedAt: undefined,
+      completedAt: undefined,
+      assignedExecutionTrust: undefined,
+    });
+    postHumanAttachment(harness, parentTaskId, imageAttachment());
+
+    const { plan } = await orchestrator.createPlan(parentTaskId, undefined);
+    await approve(orchestrator, plan.id);
+
+    const result = await orchestrator.delegate(plan.id, orchestrator.getMutationToken(plan.id));
+    expect(result.childTasks.length).toBeGreaterThan(0);
+    for (const childTask of result.childTasks) {
+      expect(childTask.adapterId).toBe("hall.vision-fixture");
+    }
+  });
+
+  it("still requires verified vision.image (an adapter that only 'declares' vision.image, like Claude Code, is never selected) when the parent has an image attachment", async () => {
+    // Reports `vision.image` at status "declared" only — matching the real
+    // Claude Code adapter's own detection (`adapters/claude-code/src/detection.ts`:
+    // "never independently verified live, so routing never treats this as
+    // satisfying required vision work"). `evaluateCandidateEligibility`
+    // never treats "declared" as satisfying a required capability — only
+    // "verified" counts.
+    const declaredOnlyVisionAdapter: AgentAdapter = {
+      descriptor: { ...buildVisionCapableAdapter().descriptor, adapterId: "hall.declared-vision" },
+      detect: () =>
+        Promise.resolve<AgentDetectionResult>({
+          installed: true,
+          availability: "available",
+          executionTrust: "isolated",
+          capabilityObservations: [
+            {
+              capability: "vision.image",
+              status: "declared",
+              safeSummary: "Declared only — never independently verified live.",
+              evidence: "declared_only",
+            },
+          ],
+        }),
+      startTask: () => Promise.reject(new Error("must never be called")),
+    };
+    const harness = buildHarness({
+      plannerKind: "deterministic",
+      adapters: [declaredOnlyVisionAdapter],
+    });
+    const { orchestrator, taskStore } = harness;
+    const parentTaskId = "parent-declared-vision-task";
+    taskStore.add({
+      task: {
+        taskId: parentTaskId,
+        projectId: "project-1",
+        title: "Analyze the attached screenshot",
+        description: "Describe what is shown in the attached screenshot.",
+        priority: "normal",
+        status: "backlog",
+        dependencyTaskIds: [],
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      runId: undefined,
+      adapterId: undefined,
+      agentId: undefined,
+      eventCount: 0,
+      lastSequence: undefined,
+      terminalEventType: undefined,
+      failure: undefined,
+      cancellationRequested: false,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      startedAt: undefined,
+      completedAt: undefined,
+      assignedExecutionTrust: undefined,
+    });
+    postHumanAttachment(harness, parentTaskId, imageAttachment());
+
+    const { plan } = await orchestrator.createPlan(parentTaskId, undefined);
+    const version = orchestrator.getVersion(plan.id, 1);
+    // Planning-time: no eligible (verified) vision candidate exists, so no
+    // adapter can be safely recommended — mirrors "must not pretend to
+    // understand information it cannot derive."
+    expect(version.steps.every((step) => step.recommendedAdapterId === undefined)).toBe(true);
+
+    await approve(orchestrator, plan.id);
+    await expect(
+      orchestrator.delegate(plan.id, orchestrator.getMutationToken(plan.id)),
+    ).rejects.toThrow(CeoPlanDelegationBlockedError);
+  });
+
+  it("still blocks delegation to a non-vision adapter when the image is attached after plan creation (ephemeral revalidation at delegate-time)", async () => {
+    const harness = buildHarness({ plannerKind: "deterministic" });
+    const { orchestrator, parentTaskId } = harness;
+
+    // No image yet — the default harness parent task's requirements match
+    // MockAgentAdapter exactly (empty capabilities, "simulated" trust), so
+    // it is legitimately recommended and selectable at this point.
+    const { plan } = await orchestrator.createPlan(parentTaskId, undefined);
+    const version = orchestrator.getVersion(plan.id, 1);
+    expect(version.steps[0]?.requirements?.requiredCapabilities).not.toContain("vision.image");
+    expect(version.steps[0]?.recommendedAdapterId).toBe("hall.mock-agent");
+    await orchestrator.submit(plan.id, orchestrator.getMutationToken(plan.id));
+    await orchestrator.decideApproval(
+      plan.id,
+      orchestrator.getMutationToken(plan.id),
+      1,
+      version.contentHash,
+      "approve",
+      undefined,
+    );
+
+    // The image arrives on the parent's board only now — after approval,
+    // before delegation. The plan's own persisted step.requirements were
+    // never re-baked (no re-versioning happened), so this is exactly the
+    // gap a plan-creation-time-only check would miss.
+    postHumanAttachment(harness, parentTaskId, imageAttachment());
+
+    await expect(
+      orchestrator.delegate(plan.id, orchestrator.getMutationToken(plan.id)),
+    ).rejects.toThrow(CeoPlanDelegationBlockedError);
   });
 });

@@ -107,7 +107,7 @@ and what still does not.
 
 ### The semantic: what "this task's attachments" means
 
-A board is attached to *at most one* task, at the deterministic id `taskBoardId(taskId)` (`task:<taskId>`)
+A board is attached to _at most one_ task, at the deterministic id `taskBoardId(taskId)` (`task:<taskId>`)
 — boards are never the reverse (a task is never created from a board message). So "the attachments
 for a task" is defined as: **at each execution attempt (a fresh start, or a retry), snapshot every
 attachment currently linked to a human-authored message on that task's own board.** That snapshot is
@@ -159,7 +159,7 @@ prepared worktree is still cleaned up normally.
 field: `attachments`, an array of `{ relativePath, filename, mimeType, kind }` (never an absolute
 host path — `relativePath` is always relative to `AgentTaskInput.workingDirectory`), omitted
 entirely (never an empty array) for a text-only task, matching the same convention
-`CommunicationMessage.attachments` already established. This *does* depart from the earlier revision
+`CommunicationMessage.attachments` already established. This _does_ depart from the earlier revision
 of this document, which deliberately avoided adding an unused field to `AgentTaskInput` to avoid
 replicating the `metadata` anti-pattern (schema-legal but inert — `task-orchestrator.ts` never
 populates it, and `claude-code-adapter.test.ts` proves the one adapter that reads it ignores it
@@ -259,10 +259,133 @@ among several fails the whole request, not just that one image. This check runs 
 model/provider request is made. A valid image (and a task with no image attachment at all) is
 completely unaffected.
 
+### What remains (as of Session 2)
+
+Codex's `--image` flow was verified at the CLI-contract level (flag presence, argv shape). Claude
+Code is intentionally excluded from ever claiming verified support. No UI-facing "vision"
+requirement profile was added to `apps/web`. (Session 3, below, is what closes the last text-only
+gap in this flow: the Gateway itself.)
+
+## Session 3 — Wisdom Gateway attachments and CEO-delegated inheritance (Issue #23)
+
+Sessions 1–2 made attachments and vision work end-to-end for a task that already has a
+Communication Board — but `WisdomGateway`, the home-page entry point that actually creates most
+tasks, stayed text-only, and a CEO-delegated child task never saw anything posted to its _parent_
+task's board. This session closes both gaps, purely as orchestration around the existing
+machinery: no new attachment framework, no new routing engine, no image-pixel inspection anywhere
+server-side.
+
+The full flow is now:
+
+```
+Wisdom Gateway (attach + submit)
+  → create deferred parent task
+  → ensure the parent task's own Communication Board
+  → upload each staged file, then post one HUMAN board message linking them
+  → (only once linking succeeds) start CEO planning
+CEO deterministic planner
+  → bakes a vision.image requirement into every step when the parent board has a human image
+    attachment (metadata only — kind, never bytes)
+CEO delegation
+  → revalidates eligibility against a freshly recomputed vision.image requirement (so a late
+    attachment, or an edited plan, still blocks a non-vision adapter)
+  → creates child tasks exactly as before (unstarted, no board of their own)
+Delegated child execution
+  → TaskAttachmentMaterializer resolves the child back to its plan's parent task and inherits the
+    parent's own human attachments, deduplicated by attachmentId against the child's own
+  → the existing execution-time fail-closed gate (ImageAttachmentRequiresVisionCapabilityError)
+    applies unchanged — it was already keyed off whatever snapshotAttachments() returns
+  → Codex/Hermes vision, and the Claude Code exclusion, are completely unmodified
+```
+
+### Gateway attachment UI
+
+`apps/web/components/communication/attachment-picker.tsx` is a new, small module extracted from
+`MessageComposer`'s existing implementation (`validateFile`, `formatBytes`, `createLocalId`, the
+attach/file icons, and a generalized `AttachmentPreviewCard`) — `MessageComposer` was refactored to
+import from it instead of duplicating it, with no behavior change (its existing test suite passes
+unmodified). `WisdomGateway` uses the same module but with different state-machine semantics: it
+has no task and no board until the request is actually sent, so selected files are held as plain
+`File` objects client-side (`StagedFile`, no upload yet) rather than uploaded immediately per-file
+the way the Communication Board composer does.
+
+On submit, `WisdomGateway`:
+
+1. Creates the deferred parent task (unchanged from before this session).
+2. If any files were staged: `ensureTaskBoard(parentTaskId)` → uploads each file to that board →
+   posts one **human** board message with the request text (truncated to
+   `MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH` — the full, untruncated text already lives durably in
+   the task's own `description`) and the resulting `attachmentIds`.
+3. Only if step 2 succeeded (or there were no staged files at all) does it call `createCeoPlan`.
+4. If step 2 fails at any point, the conversation entry gets a new `"attachment_failed"` status
+   with its own clear copy — the task already exists (so nothing is lost), but planning is never
+   silently started against an incomplete attachment set.
+
+A text-only submission takes exactly the code path it always did — no board is created, no extra
+request is made — so existing text-only Gateway behavior is byte-identical.
+
+### Parent → delegated-child attachment inheritance
+
+`TaskAttachmentMaterializer.snapshotAttachments(taskId)` (`apps/server/src/agent-execution/`)
+gained an optional, lazily-resolved `getCeoPlanStore` dependency. For any `taskId`:
+
+- its own board's human attachments are collected exactly as before (Session 1, unchanged);
+- if `getCeoPlanStore` is wired and `taskId` is a currently-delegated CEO-plan child
+  (`CeoPlanStorePort.findPlanIdByChildTaskId`), the plan's `parentTaskId`'s own board is snapshotted
+  the same way, and the two sets are merged, deduplicated by `attachmentId`.
+
+A direct (non-CEO) task, or a CEO child whose plan store isn't wired, behaves exactly as before —
+own board only. Nothing is copied into another board or blob store; only the metadata snapshot is
+merged, and `AttachmentBlobStore` is still read once, lazily, at materialize time. The existing
+20-file/64 MiB materialization cap applies to the _combined_ snapshot.
+
+Composition wiring (`apps/server/src/composition/mock-agent-composition-root.ts`) uses the same
+forward-reference pattern already established for `ceoOrchestratorRef` (the CEO plan store doesn't
+exist yet when the materializer is constructed, so a mutable ref box is threaded through and
+populated once `createCeoPlanComposition` runs) — it covers both durable (SQLite) and ephemeral
+(in-memory) `CeoPlanStorePort` implementations identically, since both satisfy the same interface
+through the same one wiring point. `attachmentMaterializer` is exposed on `CoreStoresComposition`/
+`ServerComposition` specifically so a composition-level test can exercise the ref box and a real
+`InMemoryCeoPlanStore`'s `recordDelegation` → `findPlanIdByChildTaskId` reverse index end to end,
+not only a `CeoPlanStorePort` fake — deleting the ref-box assignment line is a one-line change that
+would otherwise leave typecheck, lint, and every unit test green while the whole feature silently
+no-ops in production; the composition-level test in `mock-agent-composition-root.test.ts` is the
+one thing that actually fails when that line is removed.
+
+### CEO-plan vision routing
+
+The deterministic planner (`ceo-plan-orchestrator.ts` / `deterministic-ceo-planner.ts`) now takes
+one additional, metadata-only input: whether the parent task's own board carries a human-authored
+image attachment (`kind === "image"`, never inspected further — the planner remains
+model-free/deterministic). When true, `withVisionRequirementForImage`
+(`apps/server/src/ceo-plans/ceo-plan-routing.ts`) adds `vision.image` to every generated step's
+`requirements` — synthesizing a full requirements object (default
+`allowedExecutionTrust: ["isolated", "trusted_local"]`) when the parent had none at all, since a
+CEO plan step, unlike a requirements-less direct task, always needs an adapter actually selected.
+This reuses the exact same `evaluateCandidateEligibility`/`evaluateRouting` policy every other
+capability already routes through — no second routing engine, no hardcoded provider/model name.
+
+Because a plan can be approved, edited, or have an image attached to its parent board _after_
+creation, `delegate()` also recomputes the same vision requirement fresh, immediately before its
+existing per-step eligibility check — applied ephemerally to that check only, never written onto
+the persisted step or child-task `requirements` (mirroring `TaskOrchestrator#routeAndAssign`'s own
+"never outlive the attachment" discipline for direct tasks). A non-vision-capable adapter (Claude
+Code, or any adapter that never reports `vision.image: "verified"`) can therefore never be selected
+or delegated for image-bearing work — delegation throws `CeoPlanDelegationBlockedError` rather than
+create a child task doomed to fail at execution time. The Claude Code exclusion and Codex/Hermes's
+own verified-vision behavior are completely unchanged by this session.
+
 ### What remains
 
-No real end-to-end run against a live vision-capable model has been executed by either repository
-this session — Codex's `--image` flow is verified at the CLI-contract level (flag presence, argv
-shape) but never task-run; Hermes's flow is proven by unit tests up to the point `router.py`'s
-already-tested vision gating takes over. Claude Code is intentionally excluded from ever claiming
-verified support. No UI-facing "vision" requirement profile was added to `apps/web`.
+Live, end-to-end vision execution has since been proven for both Codex and Hermes via real
+image-marker smoke tests (superseding the "no real end-to-end run" note under Session 2).
+CEO-delegated attachment inheritance has both isolated unit coverage (a fake `CeoPlanStorePort`,
+`task-attachment-materializer.test.ts`) and a composition-level integration test
+(`mock-agent-composition-root.test.ts`) that runs the real `createMockAgentServerComposition` wiring,
+a real `InMemoryCeoPlanStore`, and a real `delegate()` call end to end — but not through Playwright
+or the Playwright-driven Kanban/routing E2E suite: `apps/e2e/src/fixture-server.ts` was deliberately
+left unwired to `getCeoPlanStore`, since its fixture adapters never declare `vision.image` at all
+and it has no existing CEO-plan-delegation scenario to attach this to. A full manual browser
+smoke-test of the Gateway attachment flow was not completed this session (local environment
+friction unrelated to this change); coverage instead comes from the Gateway's own component test
+suite exercising the real upload → link → plan sequence against a mocked API client.

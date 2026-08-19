@@ -28,6 +28,7 @@ export interface HermesRouterAdapterConfig {
   readonly processRunner?: DetectionProcessRunner;
   readonly startTransport?: HermesExecutionTransportStarter;
   readonly isolatedExecutionEnabled?: boolean;
+  readonly runtimeRoot?: string;
 }
 
 export class HermesRouterAdapter implements AgentAdapter {

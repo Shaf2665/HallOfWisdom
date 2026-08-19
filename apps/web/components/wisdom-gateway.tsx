@@ -1,20 +1,40 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type DragEvent,
+} from "react";
 import type { SubmitEvent } from "react";
+import { MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH } from "@hall-of-wisdom/protocol";
 import {
   approveCeoPlan,
+  createBoardMessage,
   createCeoPlan,
   createCeoPlanVersion,
   createDeferredTask,
   delegateCeoPlan,
+  ensureTaskBoard,
   getCeoPlan,
   getCeoPlanVersion,
   listCeoPlans,
   listTasks,
   submitCeoPlan,
+  uploadBoardAttachment,
 } from "../lib/api-client";
 import type { CeoDelegationLink, CeoPlan, CeoPlanVersion } from "../lib/api-schemas";
+import {
+  ALLOWED_ATTACHMENT_MIME_TYPES,
+  AttachmentPreviewCard,
+  PaperclipIcon,
+  createLocalId,
+  formatBytes,
+  validateFile,
+} from "./communication/attachment-picker";
 import { CeoPlanSummaryCard } from "./ceo/ceo-plan-summary-card";
 import { stepsWithAgentChoices, type AgentSelections } from "./ceo/ceo-plan-versioning";
 import { GatewayOverview } from "./gateway-overview";
@@ -25,7 +45,33 @@ const MAX_REQUEST_LENGTH = 20_000;
 const MAX_TITLE_LENGTH = 200;
 const MAX_RECENT_REQUESTS = 10;
 
-type MessageStatus = "sending" | "planning_started" | "request_failed" | "planning_failed";
+/**
+ * The Communication Board message posted alongside Gateway attachments is
+ * bounded by `MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH` (4000), well below the
+ * Gateway's own `MAX_REQUEST_LENGTH` (20,000) — the full request always
+ * lives durably in the parent task's `description`, so truncating this
+ * board copy loses nothing the CEO planner reads from.
+ */
+const BOARD_MESSAGE_TRUNCATION_MARKER = " … (see task description for the full request)";
+
+function boardMessageText(request: string): string {
+  if (request.length <= MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH) return request;
+  const keep = Math.max(
+    0,
+    MAX_COMMUNICATION_MESSAGE_TEXT_LENGTH - BOARD_MESSAGE_TRUNCATION_MARKER.length,
+  );
+  return request.slice(0, keep) + BOARD_MESSAGE_TRUNCATION_MARKER;
+}
+
+interface StagedFile {
+  readonly localId: string;
+  readonly file: File;
+  readonly previewUrl: string | undefined;
+  readonly kind: "image" | "file";
+}
+
+type MessageStatus =
+  "sending" | "planning_started" | "request_failed" | "attachment_failed" | "planning_failed";
 type PlanAction = "continuing" | "approving" | "saving_agent_choices" | "preparing";
 
 interface ConversationEntry {
@@ -70,6 +116,8 @@ function statusCopy(status: MessageStatus): string {
       return "Your plan is ready to review.";
     case "request_failed":
       return "I couldn’t send that request to Hall. Check that Hall is online, then try again.";
+    case "attachment_failed":
+      return "Your request is safely saved, but its attachments couldn’t be uploaded, so planning didn’t start. You can try planning again without them.";
     case "planning_failed":
       return "Your request is safely saved, but planning couldn’t start. You can try planning again without resending it.";
   }
@@ -138,6 +186,10 @@ export function WisdomGateway({
   const [busyMessageId, setBusyMessageId] = useState<string | null>(null);
   const [conversation, setConversation] = useState<readonly ConversationEntry[]>([]);
   const [historyState, setHistoryState] = useState<"loading" | "ready" | "error">("loading");
+  const [stagedFiles, setStagedFiles] = useState<readonly StagedFile[]>([]);
+  const [attachmentValidationError, setAttachmentValidationError] = useState<string | null>(null);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -510,6 +562,105 @@ export function WisdomGateway({
     }
   }
 
+  function addStagedFiles(files: readonly File[]): void {
+    if (files.length === 0) return;
+    setAttachmentValidationError(null);
+    let currentCount = stagedFiles.length;
+    const accepted: StagedFile[] = [];
+    for (const file of files) {
+      const result = validateFile(file, currentCount);
+      if (!result.ok) {
+        setAttachmentValidationError(result.errorMessage);
+        continue;
+      }
+      currentCount += 1;
+      accepted.push({
+        localId: createLocalId(),
+        file,
+        previewUrl: result.kind === "image" ? URL.createObjectURL(file) : undefined,
+        kind: result.kind,
+      });
+    }
+    if (accepted.length === 0) return;
+    setStagedFiles((current) => [...current, ...accepted]);
+  }
+
+  function removeStagedFile(localId: string): void {
+    setStagedFiles((current) => {
+      const target = current.find((staged) => staged.localId === localId);
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return current.filter((staged) => staged.localId !== localId);
+    });
+  }
+
+  function clearStagedFiles(): void {
+    for (const staged of stagedFiles) {
+      if (staged.previewUrl) URL.revokeObjectURL(staged.previewUrl);
+    }
+    setStagedFiles([]);
+  }
+
+  function handleFileInputChange(event: ChangeEvent<HTMLInputElement>): void {
+    addStagedFiles(Array.from(event.target.files ?? []));
+    event.target.value = "";
+  }
+
+  function handleRequestPaste(event: ClipboardEvent<HTMLTextAreaElement>): void {
+    const files: File[] = [];
+    for (const item of event.clipboardData.items) {
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file) files.push(file);
+      }
+    }
+    if (files.length > 0) {
+      event.preventDefault();
+      addStagedFiles(files);
+    }
+  }
+
+  function handleFormDragOver(event: DragEvent<HTMLFormElement>): void {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    setIsDraggingOver(true);
+  }
+
+  function handleFormDragLeave(event: DragEvent<HTMLFormElement>): void {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setIsDraggingOver(false);
+  }
+
+  function handleFormDrop(event: DragEvent<HTMLFormElement>): void {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    setIsDraggingOver(false);
+    addStagedFiles(Array.from(event.dataTransfer.files));
+  }
+
+  /**
+   * Uploads every staged file to the parent task's own Communication Board
+   * and posts one human message linking them, so the task's board is the
+   * durable record of the original request + attachments (kickoff: "the
+   * parent task board is the durable discussion/source"). Returns `false`
+   * (never throws) on any failure — the caller decides what "planning must
+   * not start" looks like from the caller's own status vocabulary.
+   */
+  async function linkStagedAttachments(parentTaskId: string, text: string): Promise<boolean> {
+    if (stagedFiles.length === 0) return true;
+    try {
+      const { board } = await ensureTaskBoard(baseUrl, parentTaskId);
+      const attachmentIds: string[] = [];
+      for (const staged of stagedFiles) {
+        const uploaded = await uploadBoardAttachment(baseUrl, board.boardId, staged.file);
+        attachmentIds.push(uploaded.attachmentId);
+      }
+      await createBoardMessage(baseUrl, board.boardId, boardMessageText(text), attachmentIds);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function handleSubmit(event: SubmitEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (busyMessageId !== null) return;
@@ -566,6 +717,12 @@ export function WisdomGateway({
         parentTaskId: parentTask.task.taskId,
       }));
 
+      const attachmentsLinked = await linkStagedAttachments(parentTask.task.taskId, trimmedRequest);
+      if (!attachmentsLinked) {
+        updateMessage(messageId, (entry) => ({ ...entry, status: "attachment_failed" }));
+        return;
+      }
+
       try {
         const created = await createCeoPlan(baseUrl, parentTask.task.taskId);
         const result = await loadPlanResult(baseUrl, created.plan);
@@ -583,6 +740,7 @@ export function WisdomGateway({
           prepareConfirmed: false,
         }));
         setRequest("");
+        clearStagedFiles();
         if (selectedProject === NEW_PROJECT && !projects.includes(projectName)) {
           setProjects((current) =>
             [...current, projectName].sort((left, right) => left.localeCompare(right)),
@@ -634,7 +792,10 @@ export function WisdomGateway({
       {conversation.length > 0 ? (
         <div aria-live="polite" aria-label="Conversation" className="flex flex-col gap-5">
           {conversation.map((entry) => {
-            const isError = entry.status === "request_failed" || entry.status === "planning_failed";
+            const isError =
+              entry.status === "request_failed" ||
+              entry.status === "attachment_failed" ||
+              entry.status === "planning_failed";
             return (
               <article key={entry.id} className="flex flex-col gap-3">
                 <div className="ml-auto max-w-[88%] rounded-2xl rounded-br-sm bg-amber-700 px-5 py-4 text-white shadow-sm">
@@ -751,7 +912,8 @@ export function WisdomGateway({
                       }}
                     />
                   ) : null}
-                  {entry.status === "planning_failed" && entry.parentTaskId ? (
+                  {(entry.status === "planning_failed" || entry.status === "attachment_failed") &&
+                  entry.parentTaskId ? (
                     <button
                       type="button"
                       disabled={isBusy}
@@ -777,9 +939,16 @@ export function WisdomGateway({
         onSubmit={(event) => {
           void handleSubmit(event);
         }}
+        onDragOver={handleFormDragOver}
+        onDragLeave={handleFormDragLeave}
+        onDrop={handleFormDrop}
         noValidate
         aria-labelledby={`${formId}-heading`}
-        className="rounded-2xl border border-stone-200 bg-white p-5 shadow-xl shadow-stone-950/5 sm:p-7 dark:border-stone-800 dark:bg-stone-900 dark:shadow-black/20"
+        className={`rounded-2xl border p-5 shadow-xl shadow-stone-950/5 transition-colors sm:p-7 dark:shadow-black/20 ${
+          isDraggingOver
+            ? "border-amber-500 bg-amber-50 dark:border-amber-500 dark:bg-amber-950/20"
+            : "border-stone-200 bg-white dark:border-stone-800 dark:bg-stone-900"
+        }`}
       >
         <h3 id={`${formId}-heading`} className="sr-only">
           Send a request to the CEO
@@ -851,12 +1020,61 @@ export function WisdomGateway({
                 setRequest(event.target.value);
                 setFormError(null);
               }}
+              onPaste={handleRequestPaste}
               placeholder="Tell Hall what success looks like. Add any context or constraints that matter."
               className="min-h-44 resize-y rounded-xl border border-stone-300 bg-stone-50 px-4 py-4 text-base leading-7 placeholder:text-stone-400 disabled:cursor-not-allowed disabled:opacity-60 dark:border-stone-700 dark:bg-stone-950 dark:placeholder:text-stone-600"
             />
             <p className="text-right text-xs text-stone-500 dark:text-stone-400">
               {request.length.toLocaleString()} / {MAX_REQUEST_LENGTH.toLocaleString()}
             </p>
+          </div>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept={ALLOWED_ATTACHMENT_MIME_TYPES.join(",")}
+            onChange={handleFileInputChange}
+            className="sr-only"
+            tabIndex={-1}
+            aria-hidden="true"
+          />
+          <div className="flex flex-col gap-2">
+            <div>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isBusy}
+                aria-label="Attach files"
+                title="Attach files"
+                className="flex items-center justify-center rounded border border-stone-300 p-1.5 text-stone-600 hover:bg-stone-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-stone-700 dark:text-stone-300 dark:hover:bg-stone-800"
+              >
+                <PaperclipIcon />
+              </button>
+            </div>
+            {stagedFiles.length > 0 ? (
+              <ul className="flex flex-wrap gap-3">
+                {stagedFiles.map((staged) => (
+                  <AttachmentPreviewCard
+                    key={staged.localId}
+                    file={staged.file}
+                    kind={staged.kind}
+                    previewUrl={staged.previewUrl}
+                    statusText={formatBytes(staged.file.size)}
+                    errored={false}
+                    errorMessage={undefined}
+                    onRemove={() => {
+                      removeStagedFile(staged.localId);
+                    }}
+                  />
+                ))}
+              </ul>
+            ) : null}
+            {attachmentValidationError ? (
+              <p role="alert" className="text-xs text-red-600 dark:text-red-400">
+                {attachmentValidationError}
+              </p>
+            ) : null}
           </div>
 
           {formError ? (

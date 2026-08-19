@@ -34,6 +34,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask({ description: "" }),
       routingCandidates: [],
       planningInstructions: undefined,
+      hasImageAttachment: false,
     });
     expect(result.kind).toBe("blocked");
     if (result.kind === "blocked") {
@@ -46,6 +47,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask({ description: "   \n  " }),
       routingCandidates: [],
       planningInstructions: undefined,
+      hasImageAttachment: false,
     });
     expect(result.kind).toBe("blocked");
   });
@@ -55,6 +57,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask(),
       routingCandidates: [],
       planningInstructions: undefined,
+      hasImageAttachment: false,
     });
     expect(result.kind).toBe("plan");
     if (result.kind !== "plan") return;
@@ -69,6 +72,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask(),
       routingCandidates: [],
       planningInstructions: undefined,
+      hasImageAttachment: false,
     });
     if (result.kind !== "plan") return;
     expect(result.draft.steps.at(0)?.dependsOnStepIndex).toEqual([]);
@@ -82,6 +86,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask({ description }),
       routingCandidates: [],
       planningInstructions: undefined,
+      hasImageAttachment: false,
     });
     if (result.kind !== "plan") return;
     expect(result.draft.steps.at(0)?.boundedInstructions).toContain(description);
@@ -94,6 +99,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask({ description }),
       routingCandidates: [],
       planningInstructions: undefined,
+      hasImageAttachment: false,
     });
     if (result.kind !== "plan") return;
     for (const step of result.draft.steps.slice(0, 2)) {
@@ -106,6 +112,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask(),
       routingCandidates: [],
       planningInstructions: "Keep the fix minimal; do not refactor unrelated code.",
+      hasImageAttachment: false,
     });
     if (result.kind !== "plan") return;
     expect(result.draft.constraints.join(" ")).toContain(
@@ -118,11 +125,100 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask(),
       routingCandidates: [],
       planningInstructions: undefined,
+      hasImageAttachment: false,
     });
     if (result.kind !== "plan") return;
     for (const step of result.draft.steps) {
       expect(step.requirements).toBeUndefined();
       expect(step.recommendedAdapterId).toBeUndefined();
     }
+  });
+
+  describe("Issue #23 — vision.image requirement synthesis", () => {
+    it("synthesizes a vision.image requirement on every step when the parent task has an image attachment but no requirements at all", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask(),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        hasImageAttachment: true,
+      });
+      expect(result.kind).toBe("plan");
+      if (result.kind !== "plan") return;
+      expect(result.draft.steps).toHaveLength(3);
+      for (const step of result.draft.steps) {
+        expect(step.requirements?.requiredCapabilities).toContain("vision.image");
+        expect(step.requirements?.allowedExecutionTrust.length).toBeGreaterThan(0);
+      }
+    });
+
+    it("adds vision.image to an existing requirements set without dropping other capabilities", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask({
+          requirements: {
+            requiredCapabilities: ["project.read", "project.edit"],
+            allowedExecutionTrust: ["isolated"],
+          },
+        }),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        hasImageAttachment: true,
+      });
+      if (result.kind !== "plan") return;
+      for (const step of result.draft.steps) {
+        expect(step.requirements?.requiredCapabilities).toEqual(
+          expect.arrayContaining(["project.read", "project.edit", "vision.image"]),
+        );
+        expect(step.requirements?.allowedExecutionTrust).toEqual(["isolated"]);
+      }
+    });
+
+    it("does not duplicate vision.image when the parent task already requires it", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask({
+          requirements: {
+            requiredCapabilities: ["vision.image"],
+            allowedExecutionTrust: ["isolated"],
+          },
+        }),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        hasImageAttachment: true,
+      });
+      if (result.kind !== "plan") return;
+      for (const step of result.draft.steps) {
+        expect(
+          step.requirements?.requiredCapabilities.filter((c) => c === "vision.image"),
+        ).toHaveLength(1);
+      }
+    });
+
+    it("never adds vision.image when there is no image attachment, even with other requirements set", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask({
+          requirements: {
+            requiredCapabilities: ["project.read"],
+            allowedExecutionTrust: ["isolated"],
+          },
+        }),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        hasImageAttachment: false,
+      });
+      if (result.kind !== "plan") return;
+      for (const step of result.draft.steps) {
+        expect(step.requirements?.requiredCapabilities).not.toContain("vision.image");
+      }
+    });
+
+    it("notes the vision requirement in the plan's constraints, without fabricating any other content", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask(),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        hasImageAttachment: true,
+      });
+      if (result.kind !== "plan") return;
+      expect(result.draft.constraints.join(" ")).toContain("vision");
+    });
   });
 });
