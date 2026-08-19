@@ -43,49 +43,79 @@ export function recommendStepAdapter(
 }
 
 /**
- * Real execution-trust levels a vision-capable step can run under absent
- * any other, more specific constraint — mirrors `requirement-profiles.ts`'s
- * "real work" presets (`isolated` preferred, `trusted_local` allowed);
- * never `simulated` (no genuine vision execution) or `unavailable`.
+ * Summarizes what an attachment-inheriting step needs to know about its
+ * parent's attachments — never the bytes, only the classification every
+ * `MessageAttachment.kind` already carries (`classifyAttachmentKind`).
+ * `"image"` is the strictly more-constrained case (isolation *and*
+ * vision), so it takes precedence over `"file"` when a parent has both.
  */
-const DEFAULT_VISION_EXECUTION_TRUST: TaskRequirements["allowedExecutionTrust"] = [
-  "isolated",
-  "trusted_local",
-];
+export type AttachmentSignal = "none" | "file" | "image";
+
+const ISOLATED_ONLY: TaskRequirements["allowedExecutionTrust"] = ["isolated"];
+
+export type AttachmentRequirementsResult =
+  | { readonly kind: "requirements"; readonly requirements: TaskRequirements | undefined }
+  | { readonly kind: "blocked"; readonly reason: string };
 
 /**
- * Issue #23 — a CEO plan step whose parent Gateway task carries an image
- * attachment must require `vision.image`, so `evaluateCandidateEligibility`
- * (via `recommendStepAdapter` at planning time, and `delegate()`'s own
- * revalidation) excludes any adapter without a *verified* observation for
- * it, exactly the same rule direct-task routing already enforces (see
- * `TaskOrchestrator#requirementsWithVisionIfImageAttached`). Unlike that
- * direct-task method, this one still synthesizes a fresh requirements
- * object when `requirements` was `undefined` — a CEO plan step always
- * needs *some* adapter selected, so it cannot opt out of capability-based
- * eligibility filtering the way a requirements-less direct task can. An
- * already-present `vision.image` is left as-is (idempotent), and a
- * requirements object already at the 9-capability cap is left unchanged —
- * `TaskAttachmentMaterializer`'s execution-time check remains the
- * authoritative, fail-closed guard regardless. Ordinary (non-image)
- * attachments never reach this function's `hasImageAttachment` parameter
- * as `true` — see `CeoPlanOrchestrator#hasImageAttachment`.
+ * Issue #23 (final correction) — `TaskAttachmentMaterializer` only ever
+ * copies attachment bytes into an isolated worktree
+ * (`AttachmentsRequireIsolatedExecutionError` otherwise: see
+ * `docs/architecture/0020-communication-board-attachments.md`, "Isolation
+ * is required"), so a non-isolated adapter was never actually a valid
+ * candidate for attachment-bearing work — it would only fail later, at
+ * execution time, with the entirely predictable
+ * `ATTACHMENT_REQUIRES_ISOLATED_EXECUTION`. This function turns that fact
+ * into a routing/delegation-time constraint: **any** inherited attachment
+ * (image or not) narrows `allowedExecutionTrust` to its intersection with
+ * `["isolated"]` — never widens it, so an operator's own, stricter trust
+ * policy is always preserved — and an image attachment additionally
+ * requires verified `vision.image`, exactly as before this correction
+ * (see `TaskOrchestrator#requirementsWithVisionIfImageAttached` for the
+ * equivalent direct-task rule this mirrors).
+ *
+ * If the parent task's own requirements already exclude `"isolated"`
+ * entirely, this returns `"blocked"` rather than silently narrowing down
+ * to an empty (and schema-invalid — `taskRequirementsSchema.allowedExecutionTrust`
+ * requires at least one entry) trust list: "fail clearly," per the
+ * correction's own requirement, not "fail as an opaque ineligibility."
+ *
+ * Synthesizes a fresh requirements object when `requirements` was
+ * `undefined` — a CEO plan step always needs *some* adapter selected, so
+ * it cannot opt out of capability-based eligibility filtering the way a
+ * requirements-less direct task can. An already-present `vision.image` is
+ * left as-is (idempotent), and a requirements object already at the
+ * 9-capability cap is left unchanged — `TaskAttachmentMaterializer`'s
+ * execution-time checks (isolation, then vision) remain the authoritative,
+ * fail-closed backstop regardless.
  */
-export function withVisionRequirementForImage(
+export function withAttachmentDerivedRequirements(
   requirements: TaskRequirements | undefined,
-  hasImageAttachment: boolean,
-): TaskRequirements | undefined {
-  if (!hasImageAttachment) return requirements;
-  if (requirements === undefined) {
+  attachmentSignal: AttachmentSignal,
+): AttachmentRequirementsResult {
+  if (attachmentSignal === "none") {
+    return { kind: "requirements", requirements };
+  }
+
+  const allowedExecutionTrust =
+    requirements === undefined
+      ? [...ISOLATED_ONLY]
+      : requirements.allowedExecutionTrust.filter((trust) => trust === "isolated");
+  if (allowedExecutionTrust.length === 0) {
     return {
-      requiredCapabilities: ["vision.image"],
-      allowedExecutionTrust: [...DEFAULT_VISION_EXECUTION_TRUST],
+      kind: "blocked",
+      reason:
+        'This step inherits an attachment, which requires isolated execution, but the task\'s allowed execution trust does not include "isolated".',
     };
   }
-  if (requirements.requiredCapabilities.includes("vision.image")) return requirements;
-  if (requirements.requiredCapabilities.length >= 9) return requirements;
-  return {
-    ...requirements,
-    requiredCapabilities: [...requirements.requiredCapabilities, "vision.image"],
-  };
+
+  const baseCapabilities = requirements?.requiredCapabilities ?? [];
+  const requiredCapabilities =
+    attachmentSignal === "image" &&
+    !baseCapabilities.includes("vision.image") &&
+    baseCapabilities.length < 9
+      ? [...baseCapabilities, "vision.image" as const]
+      : baseCapabilities;
+
+  return { kind: "requirements", requirements: { requiredCapabilities, allowedExecutionTrust } };
 }

@@ -625,12 +625,11 @@ describe("createMockAgentServerComposition", () => {
         createdAt: now,
         updatedAt: now,
         source: "wisdom_gateway",
-        // Matches MockAgentAdapter's own detect() output — this test is
-        // about attachment inheritance (Part 2), not vision routing (Part
-        // 3, covered elsewhere), so the attachment below is deliberately
-        // non-image (kind: "file") — an image would bake `vision.image`
-        // into the plan and make MockAgentAdapter ineligible, and no
-        // child task would ever be created to check inheritance on.
+        // Matches MockAgentAdapter's own detect() output (simulated, never
+        // isolated) — deliberately no attachment posted until *after* the
+        // plan is created/approved (below), since Issue #23's final
+        // correction now requires isolated execution for any attachment,
+        // and MockAgentAdapter can never satisfy that.
         requirements: { requiredCapabilities: [], allowedExecutionTrust: ["simulated"] },
       },
       runId: undefined,
@@ -645,24 +644,6 @@ describe("createMockAgentServerComposition", () => {
       startedAt: undefined,
       completedAt: undefined,
       assignedExecutionTrust: undefined,
-    });
-
-    const board = boardStore.ensureTaskBoard(parentTaskId, now).board;
-    messageStore.registerBoard(board.boardId);
-    const parentAttachment = {
-      attachmentId: "11111111-1111-4111-8111-111111111111",
-      filename: "notes.txt",
-      mimeType: "text/plain",
-      byteSize: 12,
-      kind: "file" as const,
-    };
-    messageStore.append(board.boardId, {
-      messageId: "msg-1",
-      boardId: board.boardId,
-      author: { kind: "human", displayName: "Test User" },
-      text: "here are some notes",
-      attachments: [parentAttachment],
-      createdAt: now,
     });
 
     // A direct (never-delegated) task must still see only its own board —
@@ -695,6 +676,9 @@ describe("createMockAgentServerComposition", () => {
     });
     expect(attachmentMaterializer.snapshotAttachments(directTaskId).attachments).toEqual([]);
 
+    // Plan creation/submission/approval — all with no attachment on the
+    // parent's board yet, so MockAgentAdapter's own ("simulated") trust is
+    // unaffected by Issue #23's isolation requirement.
     const { plan } = await ceoPlans.orchestrator.createPlan(parentTaskId, undefined);
     await ceoPlans.orchestrator.submit(plan.id, ceoPlans.orchestrator.getMutationToken(plan.id));
     const version = ceoPlans.orchestrator.getVersion(plan.id, 1);
@@ -706,19 +690,52 @@ describe("createMockAgentServerComposition", () => {
       "approve",
       undefined,
     );
-    const delegated = await ceoPlans.orchestrator.delegate(
-      plan.id,
-      ceoPlans.orchestrator.getMutationToken(plan.id),
-    );
-    const childTaskId = delegated.childTasks[0]?.task.taskId;
-    expect(childTaskId).toBeDefined();
-    if (childTaskId === undefined) return;
+
+    // Records the delegation link directly against the real store — the
+    // same write `CeoPlanOrchestrator.delegate()` itself performs — rather
+    // than going through `delegate()`'s own eligibility gate, which this
+    // test does not exercise (covered exhaustively in
+    // `ceo-plan-orchestrator.test.ts`). This test's own concern is
+    // narrower and orthogonal: whether the *composition wiring* (the ref
+    // box between `createCoreStoresComposition` and
+    // `createCeoPlanComposition`) correctly reaches a real, delegated
+    // `CeoPlanStorePort`'s reverse index.
+    const childTaskId = "synthetic-child-task-1";
+    const firstStep = version.steps[0];
+    if (firstStep === undefined) throw new Error("expected at least one plan step");
+    ceoPlans.planStore.recordDelegation({
+      planId: plan.id,
+      expectedRevision: ceoPlans.planStore.getRevision(plan.id),
+      approvedVersion: 1,
+      approvedContentHash: version.contentHash,
+      links: [{ stepId: firstStep.id, childTaskId, adapterId: "hall.mock-agent" }],
+      delegatedAt: now,
+    });
+
+    const board = boardStore.ensureTaskBoard(parentTaskId, now).board;
+    messageStore.registerBoard(board.boardId);
+    const parentAttachment = {
+      attachmentId: "11111111-1111-4111-8111-111111111111",
+      filename: "notes.txt",
+      mimeType: "text/plain",
+      byteSize: 12,
+      kind: "file" as const,
+    };
+    messageStore.append(board.boardId, {
+      messageId: "msg-1",
+      boardId: board.boardId,
+      author: { kind: "human", displayName: "Test User" },
+      text: "here are some notes",
+      attachments: [parentAttachment],
+      createdAt: now,
+    });
 
     // The real end-to-end mechanism: findPlanIdByChildTaskId (InMemoryCeoPlanStore's
-    // real reverse index, populated by a real recordDelegation call) →
-    // getPlan(planId).parentTaskId → the parent's own board — reached only
-    // through the ref box `createMockAgentServerComposition` wires between
-    // `createCoreStoresComposition` and `createCeoPlanComposition`.
+    // real reverse index, populated by the real recordDelegation call
+    // above) → getPlan(planId).parentTaskId → the parent's own board —
+    // reached only through the ref box `createMockAgentServerComposition`
+    // wires between `createCoreStoresComposition` and
+    // `createCeoPlanComposition`.
     const childSnapshot = attachmentMaterializer.snapshotAttachments(childTaskId);
     expect(childSnapshot.attachments).toEqual([parentAttachment]);
   });

@@ -29,7 +29,11 @@ import {
 } from "../errors/app-error.js";
 import type { CeoPlanStorePort, DelegationLink } from "./ceo-plan-store-port.js";
 import type { CeoPlannerPort } from "./ceo-planner-port.js";
-import { recommendStepAdapter, withVisionRequirementForImage } from "./ceo-plan-routing.js";
+import {
+  recommendStepAdapter,
+  withAttachmentDerivedRequirements,
+  type AttachmentSignal,
+} from "./ceo-plan-routing.js";
 import { computeCeoPlanContentHash } from "./ceo-plan-content-hash.js";
 import type { CeoPlanEventBus } from "./ceo-plan-events.js";
 import type { CeoPlanMutationTokenIssuer } from "./ceo-plan-mutation-token.js";
@@ -143,24 +147,24 @@ export class CeoPlanOrchestrator {
 
   /**
    * Issue #23 — metadata-only check (an attachment's `kind`, never its
-   * bytes) for whether `taskId`'s own Communication Board carries a
-   * human-authored image attachment. Mirrors
+   * bytes) for what `taskId`'s own Communication Board carries: no human
+   * attachment, a non-image one, or an image. Mirrors
    * `TaskAttachmentMaterializer#snapshotAttachments`'s own-board lookup
    * exactly (human-authored messages on `task:<taskId>`), duplicated
    * rather than shared because this orchestrator has no other reason to
    * depend on the materializer, and the two independent, small
    * implementations reading the same board/message ports are simpler than
-   * a new cross-module dependency for four lines of logic.
+   * a new cross-module dependency for a few lines of logic.
    */
-  #hasImageAttachment(taskId: string): boolean {
+  #attachmentSignal(taskId: string): AttachmentSignal {
     const boardId = taskBoardId(taskId);
-    if (!this.#boardStore.has(boardId)) return false;
-    return this.#messageStore
+    if (!this.#boardStore.has(boardId)) return "none";
+    const attachments = this.#messageStore
       .list(boardId)
       .filter((message) => message.author.kind === "human")
-      .some((message) =>
-        (message.attachments ?? []).some((attachment) => attachment.kind === "image"),
-      );
+      .flatMap((message) => message.attachments ?? []);
+    if (attachments.length === 0) return "none";
+    return attachments.some((attachment) => attachment.kind === "image") ? "image" : "file";
   }
 
   #postAuditMessage(
@@ -232,7 +236,7 @@ export class CeoPlanOrchestrator {
       parentTask: parent.task,
       routingCandidates: candidates,
       planningInstructions,
-      hasImageAttachment: this.#hasImageAttachment(parentTaskId),
+      attachmentSignal: this.#attachmentSignal(parentTaskId),
     });
     if (result.kind === "blocked") {
       throw new CeoPlanningBlockedError(result.reason);
@@ -550,21 +554,34 @@ export class CeoPlanOrchestrator {
     }
 
     const candidates = await detectRoutingCandidates(this.#registry);
-    // Issue #23 — recomputed fresh, right before revalidating every step,
-    // so an image attached to the parent *after* this plan was created (or
-    // a step whose `requirements` an edit/re-version dropped) still blocks
-    // delegation to a non-vision adapter. Applied ephemerally to the
-    // eligibility check only — never persisted onto the child task below,
-    // exactly like `TaskOrchestrator#routeAndAssign`'s own routing-time-
-    // only augmentation (`requirementsWithVisionIfImageAttached`'s doc
-    // comment: "a synthetic, attachment-derived requirement must never
+    // Issue #23 (final correction) — recomputed fresh, right before
+    // revalidating every step, so an attachment added to the parent
+    // *after* this plan was created (or a step whose `requirements` an
+    // edit/re-version dropped) still blocks delegation to a non-isolated
+    // (or, for an image, non-vision-verified) adapter. Applied ephemerally
+    // to the eligibility check only — never persisted onto the child task
+    // below, exactly like `TaskOrchestrator#routeAndAssign`'s own
+    // routing-time-only augmentation (`requirementsWithVisionIfImageAttached`'s
+    // doc comment: "a synthetic, attachment-derived requirement must never
     // outlive the attachment it came from").
-    const parentHasImageAttachment = this.#hasImageAttachment(plan.parentTaskId);
+    const parentAttachmentSignal = this.#attachmentSignal(plan.parentTaskId);
     const resolvedByStepId = new Map<
       string,
       { adapterId: string; agentId: string; executionTrust: string }
     >();
     for (const step of version.steps) {
+      const effectiveRequirementsResult = withAttachmentDerivedRequirements(
+        step.requirements,
+        parentAttachmentSignal,
+      );
+      if (effectiveRequirementsResult.kind === "blocked") {
+        throw new CeoPlanDelegationBlockedError(
+          planId,
+          `Step "${step.id}": ${effectiveRequirementsResult.reason}`,
+        );
+      }
+      const effectiveRequirements = effectiveRequirementsResult.requirements;
+
       const chosenAdapterId = step.selectedAdapterId ?? step.recommendedAdapterId;
       if (chosenAdapterId === undefined) {
         throw new CeoPlanDelegationBlockedError(
@@ -579,10 +596,6 @@ export class CeoPlanOrchestrator {
           `Step "${step.id}"'s adapter "${chosenAdapterId}" is not currently registered.`,
         );
       }
-      const effectiveRequirements = withVisionRequirementForImage(
-        step.requirements,
-        parentHasImageAttachment,
-      );
       if (effectiveRequirements !== undefined) {
         const eligibility = evaluateCandidateEligibility(effectiveRequirements, candidate);
         if (!eligibility.eligible) {

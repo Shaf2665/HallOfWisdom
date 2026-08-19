@@ -5,7 +5,7 @@ import type {
   CeoPlannerPort,
   CeoPlannerResult,
 } from "./ceo-planner-port.js";
-import { recommendStepAdapter, withVisionRequirementForImage } from "./ceo-plan-routing.js";
+import { recommendStepAdapter, withAttachmentDerivedRequirements } from "./ceo-plan-routing.js";
 
 /** `exactOptionalPropertyTypes` forbids assigning `recommendedAdapterId: undefined` outright — this omits the key entirely when there is no recommendation, exactly like every other optional field in this codebase. */
 function optionalRecommendedAdapter(
@@ -61,16 +61,24 @@ export function createDeterministicCeoPlanner(): CeoPlannerPort {
       }
 
       const title = input.parentTask.title;
-      // Issue #23 — the parent task's own requirements, plus `vision.image`
-      // when the parent's Communication Board carries a human-authored
-      // image attachment (`withVisionRequirementForImage`'s doc comment).
-      // All three generic steps inherit the same original user context, so
-      // all three carry the same requirements — see this module's own doc
-      // comment on why that is safe for a generic, non-semantic plan.
-      const requirements = withVisionRequirementForImage(
+      // Issue #23 (final correction) — the parent task's own requirements,
+      // narrowed to isolated-only execution (and, for an image, also
+      // requiring vision.image) when the parent's Communication Board
+      // carries a human attachment (`withAttachmentDerivedRequirements`'s
+      // doc comment). All three generic steps inherit the same original
+      // user context, so all three carry the same requirements — see this
+      // module's own doc comment on why that is safe for a generic,
+      // non-semantic plan. A trust conflict (the task's own requirements
+      // already exclude isolated) blocks the whole plan rather than
+      // silently producing one no adapter could ever satisfy.
+      const requirementsResult = withAttachmentDerivedRequirements(
         input.parentTask.requirements,
-        input.hasImageAttachment,
+        input.attachmentSignal,
       );
+      if (requirementsResult.kind === "blocked") {
+        return { kind: "blocked", reason: requirementsResult.reason };
+      }
+      const requirements = requirementsResult.requirements;
       const routing = recommendStepAdapter(requirements, input.routingCandidates);
       const truncatedDescription = truncateForBound(description, MAX_STEP_TEXT_LENGTH - 80);
 
@@ -83,9 +91,11 @@ export function createDeterministicCeoPlanner(): CeoPlannerPort {
           "The parent task has no capability or execution-trust requirements set, so no step below carries an adapter recommendation.",
         );
       }
-      if (input.hasImageAttachment) {
+      if (input.attachmentSignal !== "none") {
         constraints.push(
-          "The parent task's Communication Board carries an image attachment, so every step below requires verified vision capability.",
+          input.attachmentSignal === "image"
+            ? "The parent task's Communication Board carries an image attachment, so every step below requires isolated execution and verified vision capability."
+            : "The parent task's Communication Board carries an attachment, so every step below requires isolated execution.",
         );
       }
 

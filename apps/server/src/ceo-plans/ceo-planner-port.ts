@@ -1,5 +1,6 @@
 import type { HallTask, TaskRequirements } from "@hall-of-wisdom/protocol";
 import type { RoutingCandidateInput } from "../routing/routing-policy.js";
+import type { AttachmentSignal } from "./ceo-plan-routing.js";
 
 /**
  * One step in a planner's draft output — deliberately index-based
@@ -50,17 +51,18 @@ export interface CeoPlannerInput {
   readonly routingCandidates: readonly RoutingCandidateInput[];
   readonly planningInstructions: string | undefined;
   /**
-   * Issue #23 — whether the parent task's own Communication Board carries
-   * at least one human-authored, image-kind attachment. Metadata only
-   * (an attachment's `kind`, itself always server-derived from MIME type —
-   * see `classifyAttachmentKind`), never the attachment's bytes: the CEO
-   * planner remains deterministic and never inspects image pixels. A
-   * planner uses this only to decide whether a step's `requirements`
-   * should require `vision.image` (`withVisionRequirementForImage` in
+   * Issue #23 — what the parent task's own Communication Board carries:
+   * no human attachment, a human attachment that isn't an image, or a
+   * human image attachment. Metadata only (an attachment's `kind`, itself
+   * always server-derived from MIME type — see `classifyAttachmentKind`),
+   * never the attachment's bytes: the CEO planner remains deterministic
+   * and never inspects image pixels. A planner uses this only to decide
+   * whether a step's `requirements` should require isolated execution
+   * and/or `vision.image` (`withAttachmentDerivedRequirements` in
    * `ceo-plan-routing.ts`) — it is not itself a capability or a routing
    * decision.
    */
-  readonly hasImageAttachment: boolean;
+  readonly attachmentSignal: AttachmentSignal;
 }
 
 /**

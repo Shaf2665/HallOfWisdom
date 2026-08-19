@@ -34,7 +34,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask({ description: "" }),
       routingCandidates: [],
       planningInstructions: undefined,
-      hasImageAttachment: false,
+      attachmentSignal: "none",
     });
     expect(result.kind).toBe("blocked");
     if (result.kind === "blocked") {
@@ -47,7 +47,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask({ description: "   \n  " }),
       routingCandidates: [],
       planningInstructions: undefined,
-      hasImageAttachment: false,
+      attachmentSignal: "none",
     });
     expect(result.kind).toBe("blocked");
   });
@@ -57,7 +57,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask(),
       routingCandidates: [],
       planningInstructions: undefined,
-      hasImageAttachment: false,
+      attachmentSignal: "none",
     });
     expect(result.kind).toBe("plan");
     if (result.kind !== "plan") return;
@@ -72,7 +72,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask(),
       routingCandidates: [],
       planningInstructions: undefined,
-      hasImageAttachment: false,
+      attachmentSignal: "none",
     });
     if (result.kind !== "plan") return;
     expect(result.draft.steps.at(0)?.dependsOnStepIndex).toEqual([]);
@@ -86,7 +86,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask({ description }),
       routingCandidates: [],
       planningInstructions: undefined,
-      hasImageAttachment: false,
+      attachmentSignal: "none",
     });
     if (result.kind !== "plan") return;
     expect(result.draft.steps.at(0)?.boundedInstructions).toContain(description);
@@ -99,7 +99,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask({ description }),
       routingCandidates: [],
       planningInstructions: undefined,
-      hasImageAttachment: false,
+      attachmentSignal: "none",
     });
     if (result.kind !== "plan") return;
     for (const step of result.draft.steps.slice(0, 2)) {
@@ -112,7 +112,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask(),
       routingCandidates: [],
       planningInstructions: "Keep the fix minimal; do not refactor unrelated code.",
-      hasImageAttachment: false,
+      attachmentSignal: "none",
     });
     if (result.kind !== "plan") return;
     expect(result.draft.constraints.join(" ")).toContain(
@@ -125,7 +125,7 @@ describe("createDeterministicCeoPlanner", () => {
       parentTask: makeTask(),
       routingCandidates: [],
       planningInstructions: undefined,
-      hasImageAttachment: false,
+      attachmentSignal: "none",
     });
     if (result.kind !== "plan") return;
     for (const step of result.draft.steps) {
@@ -140,7 +140,7 @@ describe("createDeterministicCeoPlanner", () => {
         parentTask: makeTask(),
         routingCandidates: [],
         planningInstructions: undefined,
-        hasImageAttachment: true,
+        attachmentSignal: "image",
       });
       expect(result.kind).toBe("plan");
       if (result.kind !== "plan") return;
@@ -161,7 +161,7 @@ describe("createDeterministicCeoPlanner", () => {
         }),
         routingCandidates: [],
         planningInstructions: undefined,
-        hasImageAttachment: true,
+        attachmentSignal: "image",
       });
       if (result.kind !== "plan") return;
       for (const step of result.draft.steps) {
@@ -182,7 +182,7 @@ describe("createDeterministicCeoPlanner", () => {
         }),
         routingCandidates: [],
         planningInstructions: undefined,
-        hasImageAttachment: true,
+        attachmentSignal: "image",
       });
       if (result.kind !== "plan") return;
       for (const step of result.draft.steps) {
@@ -202,7 +202,7 @@ describe("createDeterministicCeoPlanner", () => {
         }),
         routingCandidates: [],
         planningInstructions: undefined,
-        hasImageAttachment: false,
+        attachmentSignal: "none",
       });
       if (result.kind !== "plan") return;
       for (const step of result.draft.steps) {
@@ -215,10 +215,118 @@ describe("createDeterministicCeoPlanner", () => {
         parentTask: makeTask(),
         routingCandidates: [],
         planningInstructions: undefined,
-        hasImageAttachment: true,
+        attachmentSignal: "image",
       });
       if (result.kind !== "plan") return;
       expect(result.draft.constraints.join(" ")).toContain("vision");
+    });
+  });
+
+  describe("Issue #23 (final correction) — attachment-derived isolation requirement", () => {
+    it("narrows allowedExecutionTrust to isolated-only for a normal (non-image) attachment, with no requirements at all", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask(),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        attachmentSignal: "file",
+      });
+      expect(result.kind).toBe("plan");
+      if (result.kind !== "plan") return;
+      for (const step of result.draft.steps) {
+        expect(step.requirements?.allowedExecutionTrust).toEqual(["isolated"]);
+        expect(step.requirements?.requiredCapabilities).not.toContain("vision.image");
+      }
+    });
+
+    it("intersects an existing allowedExecutionTrust down to isolated-only for a normal attachment, never widening it", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask({
+          requirements: {
+            requiredCapabilities: ["project.read"],
+            allowedExecutionTrust: ["isolated", "trusted_local"],
+          },
+        }),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        attachmentSignal: "file",
+      });
+      if (result.kind !== "plan") return;
+      for (const step of result.draft.steps) {
+        expect(step.requirements?.allowedExecutionTrust).toEqual(["isolated"]);
+        expect(step.requirements?.requiredCapabilities).toContain("project.read");
+      }
+    });
+
+    it("also narrows to isolated-only for an image attachment, on top of requiring vision.image", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask({
+          requirements: {
+            requiredCapabilities: [],
+            allowedExecutionTrust: ["isolated", "trusted_local"],
+          },
+        }),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        attachmentSignal: "image",
+      });
+      if (result.kind !== "plan") return;
+      for (const step of result.draft.steps) {
+        expect(step.requirements?.allowedExecutionTrust).toEqual(["isolated"]);
+        expect(step.requirements?.requiredCapabilities).toContain("vision.image");
+      }
+    });
+
+    it("blocks the whole plan clearly when the task's existing allowedExecutionTrust excludes isolated entirely", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask({
+          requirements: {
+            requiredCapabilities: [],
+            allowedExecutionTrust: ["trusted_local"],
+          },
+        }),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        attachmentSignal: "file",
+      });
+      expect(result.kind).toBe("blocked");
+      if (result.kind !== "blocked") return;
+      expect(result.reason).toContain("isolated");
+    });
+
+    it("blocks the whole plan the same way for an image attachment when isolated is excluded", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask({
+          requirements: {
+            requiredCapabilities: [],
+            allowedExecutionTrust: ["simulated"],
+          },
+        }),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        attachmentSignal: "image",
+      });
+      expect(result.kind).toBe("blocked");
+      if (result.kind !== "blocked") return;
+      expect(result.reason).toContain("isolated");
+    });
+
+    it("no attachment preserves previous routing behavior, even for a task whose allowedExecutionTrust excludes isolated", () => {
+      const result = createDeterministicCeoPlanner().generatePlan({
+        parentTask: makeTask({
+          requirements: {
+            requiredCapabilities: [],
+            allowedExecutionTrust: ["simulated"],
+          },
+        }),
+        routingCandidates: [],
+        planningInstructions: undefined,
+        attachmentSignal: "none",
+      });
+      expect(result.kind).toBe("plan");
+      if (result.kind !== "plan") return;
+      for (const step of result.draft.steps) {
+        expect(step.requirements?.allowedExecutionTrust).toEqual(["simulated"]);
+      }
     });
   });
 });

@@ -284,17 +284,21 @@ Wisdom Gateway (attach + submit)
   → upload each staged file, then post one HUMAN board message linking them
   → (only once linking succeeds) start CEO planning
 CEO deterministic planner
-  → bakes a vision.image requirement into every step when the parent board has a human image
-    attachment (metadata only — kind, never bytes)
+  → bakes an isolated-only allowedExecutionTrust into every step when the parent board has ANY
+    human attachment (image or not) — intersected with, never widening, existing requirements
+  → additionally requires vision.image for an image attachment (metadata only — kind, never bytes)
+  → a parent whose own requirements already exclude "isolated" blocks the whole plan, clearly
 CEO delegation
-  → revalidates eligibility against a freshly recomputed vision.image requirement (so a late
-    attachment, or an edited plan, still blocks a non-vision adapter)
+  → revalidates eligibility against freshly recomputed isolation (+ vision, for images)
+    requirements (so a late attachment, a manually-selected adapter, or an edited plan still
+    blocks a non-isolated or non-vision adapter)
   → creates child tasks exactly as before (unstarted, no board of their own)
 Delegated child execution
   → TaskAttachmentMaterializer resolves the child back to its plan's parent task and inherits the
     parent's own human attachments, deduplicated by attachmentId against the child's own
-  → the existing execution-time fail-closed gate (ImageAttachmentRequiresVisionCapabilityError)
-    applies unchanged — it was already keyed off whatever snapshotAttachments() returns
+  → the existing execution-time fail-closed gates (AttachmentsRequireIsolatedExecutionError,
+    ImageAttachmentRequiresVisionCapabilityError) apply unchanged — already keyed off whatever
+    snapshotAttachments() returns, now simply never reached on the predictable path anymore
   → Codex/Hermes vision, and the Claude Code exclusion, are completely unmodified
 ```
 
@@ -352,28 +356,65 @@ would otherwise leave typecheck, lint, and every unit test green while the whole
 no-ops in production; the composition-level test in `mock-agent-composition-root.test.ts` is the
 one thing that actually fails when that line is removed.
 
-### CEO-plan vision routing
+### CEO-plan isolation and vision routing (final correction)
 
-The deterministic planner (`ceo-plan-orchestrator.ts` / `deterministic-ceo-planner.ts`) now takes
-one additional, metadata-only input: whether the parent task's own board carries a human-authored
-image attachment (`kind === "image"`, never inspected further — the planner remains
-model-free/deterministic). When true, `withVisionRequirementForImage`
-(`apps/server/src/ceo-plans/ceo-plan-routing.ts`) adds `vision.image` to every generated step's
-`requirements` — synthesizing a full requirements object (default
-`allowedExecutionTrust: ["isolated", "trusted_local"]`) when the parent had none at all, since a
-CEO plan step, unlike a requirements-less direct task, always needs an adapter actually selected.
+**The gap this closes.** `TaskAttachmentMaterializer` only ever copies attachment bytes into an
+isolated worktree (`AttachmentsRequireIsolatedExecutionError`/`ATTACHMENT_REQUIRES_ISOLATED_EXECUTION`
+otherwise — see "Isolation is required," above). Before this correction, CEO planning/delegation
+only ever added a requirement for an _image_ attachment (`vision.image`) — a plain, non-image
+Gateway attachment (a PDF, a text file) could still be recommended and delegated to a non-isolated
+adapter such as Claude Code running in its real, documented default configuration, and would only
+discover the conflict once execution actually started. That failure was entirely predictable ahead
+of time from attachment metadata alone; this correction makes it a routing/delegation-time
+constraint instead.
+
+**The rule.** Any step that inherits one or more parent attachments — image or not — must run
+under an `allowedExecutionTrust` that permits only `"isolated"`.
+`withAttachmentDerivedRequirements` (`apps/server/src/ceo-plans/ceo-plan-routing.ts`) computes an
+`AttachmentSignal` (`"none" | "file" | "image"`, from attachment `kind` metadata only — the planner
+never inspects bytes) and:
+
+- `"none"` — requirements pass through completely unchanged (byte-identical to before any of this
+  existed).
+- `"file"` — `allowedExecutionTrust` is **intersected** with `["isolated"]`, never widened; an
+  operator's own, stricter policy is always preserved. A parent with no requirements at all gets a
+  freshly synthesized `{requiredCapabilities: [], allowedExecutionTrust: ["isolated"]}`.
+- `"image"` — the same isolation narrowing, plus `vision.image` added to `requiredCapabilities`
+  (unchanged from the previous session's behavior).
+- **If the parent's own `allowedExecutionTrust` already excludes `"isolated"` entirely**, the
+  intersection would be empty (and schema-invalid — `taskRequirementsSchema.allowedExecutionTrust`
+  requires at least one entry) — this returns a `"blocked"` result instead: the deterministic
+  planner refuses to produce a plan at all (`CeoPlanningBlockedError`, reason mentions
+  `"isolated"`), and `delegate()` throws `CeoPlanDelegationBlockedError` the same way if a
+  late-arriving attachment creates the same conflict after a plan already exists. "Fail clearly,"
+  never a silent, impossible-to-satisfy trust policy.
+
 This reuses the exact same `evaluateCandidateEligibility`/`evaluateRouting` policy every other
-capability already routes through — no second routing engine, no hardcoded provider/model name.
+capability already routes through, and the exact same `TaskRequirements.allowedExecutionTrust`
+field routing already had — no new capability id, no second routing engine, no hardcoded
+provider/model name.
 
-Because a plan can be approved, edited, or have an image attached to its parent board _after_
-creation, `delegate()` also recomputes the same vision requirement fresh, immediately before its
-existing per-step eligibility check — applied ephemerally to that check only, never written onto
-the persisted step or child-task `requirements` (mirroring `TaskOrchestrator#routeAndAssign`'s own
-"never outlive the attachment" discipline for direct tasks). A non-vision-capable adapter (Claude
-Code, or any adapter that never reports `vision.image: "verified"`) can therefore never be selected
-or delegated for image-bearing work — delegation throws `CeoPlanDelegationBlockedError` rather than
-create a child task doomed to fail at execution time. The Claude Code exclusion and Codex/Hermes's
-own verified-vision behavior are completely unchanged by this session.
+**Both routing points, both directions.** The deterministic planner applies this once at plan
+creation (baking the result into every generated step's persisted `requirements`, so the plan's own
+`recommendedAdapterId` already reflects it and an operator reviewing the plan sees a correctly
+isolated-only recommendation). `delegate()` independently recomputes the same signal fresh,
+immediately before its existing per-step eligibility check — applied **ephemerally** to that check
+only, never written onto the persisted step or child-task `requirements` (mirroring
+`TaskOrchestrator#routeAndAssign`'s own "never outlive the attachment" discipline for direct
+tasks). This catches every path a plan-creation-time-only check would miss: an attachment added
+after approval, or an adapter chosen via `selectedAdapterId` override through `createVersion()`
+(whose own eligibility check only runs `evaluateCandidateEligibility` when the edited step already
+carries `requirements` — a step with none passes that check regardless of trust, exactly the gap
+`delegate()`'s revalidation exists to close).
+
+**Per-adapter outcome.** A non-isolated adapter — Claude Code's real, documented default, or any
+fixture/adapter that never reports `executionTrust: "isolated"` — is now excluded from
+recommendation and delegation for _any_ attachment-bearing step, not only image ones; if Claude Code
+is genuinely detected running isolated, it becomes eligible for normal-file work exactly like any
+other isolated candidate (no adapter-specific carve-out — eligibility is purely a function of the
+registered candidate's own reported trust). Codex and Hermes, isolated by default in this server's
+composition, are unaffected for normal-file work; image work still additionally requires their own
+verified `vision.image`, unchanged.
 
 ### What remains
 
@@ -381,11 +422,18 @@ Live, end-to-end vision execution has since been proven for both Codex and Herme
 image-marker smoke tests (superseding the "no real end-to-end run" note under Session 2).
 CEO-delegated attachment inheritance has both isolated unit coverage (a fake `CeoPlanStorePort`,
 `task-attachment-materializer.test.ts`) and a composition-level integration test
-(`mock-agent-composition-root.test.ts`) that runs the real `createMockAgentServerComposition` wiring,
-a real `InMemoryCeoPlanStore`, and a real `delegate()` call end to end — but not through Playwright
-or the Playwright-driven Kanban/routing E2E suite: `apps/e2e/src/fixture-server.ts` was deliberately
-left unwired to `getCeoPlanStore`, since its fixture adapters never declare `vision.image` at all
-and it has no existing CEO-plan-delegation scenario to attach this to. A full manual browser
-smoke-test of the Gateway attachment flow was not completed this session (local environment
-friction unrelated to this change); coverage instead comes from the Gateway's own component test
-suite exercising the real upload → link → plan sequence against a mocked API client.
+(`mock-agent-composition-root.test.ts`) that runs the real `createMockAgentServerComposition`
+wiring and a real `InMemoryCeoPlanStore` end to end. That composition test writes its delegation
+link directly against the real `CeoPlanStorePort` (mirroring exactly what `delegate()` itself
+writes) rather than calling `orchestrator.delegate()` — a deliberate, final-correction-era choice,
+since the mock composition's only registered candidate (`MockAgentAdapter`, always `"simulated"`
+trust) can no longer legitimately delegate _any_ attachment-bearing step under this correction's own
+isolation rule; `delegate()`'s isolation/vision eligibility gate itself is covered exhaustively,
+with real fixture adapters of every relevant trust/vision combination, in
+`ceo-plan-orchestrator.test.ts`. Not covered through Playwright or the Playwright-driven
+Kanban/routing E2E suite: `apps/e2e/src/fixture-server.ts` was deliberately left unwired to
+`getCeoPlanStore`, since its fixture adapters never declare `vision.image` at all and it has no
+existing CEO-plan-delegation scenario to attach this to. A full manual browser smoke-test of the
+Gateway attachment flow was not completed this session (local environment friction unrelated to
+this change); coverage instead comes from the Gateway's own component test suite exercising the
+real upload → link → plan sequence against a mocked API client.
